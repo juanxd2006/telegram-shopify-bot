@@ -1,0 +1,772 @@
+============================================================
+RESULTADOS MULTI-CHK - 2026-02-21_04-43-25
+============================================================
+
+RESUMEN:
+Total: 57
+CHARGE: 0
+3D: 0
+DECLINE: 5
+ERROR: 42
+Tiempo total: 6m 1s
+
+============================================================
+DETALLE POR TARJETA:
+============================================================
+
+TARJETA #1
+----------------------------------------
+CC: 4895040359448277|06|2030|303
+Sitio: https://www.pour-n-restore.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 22.46s
+----------------------------------------
+RESPUESTA API:
+{"Price":"0.99","Response":"Clinte Token"}
+...
+============================================================
+
+TARJETA #2
+----------------------------------------
+CC: 4895040359439227|06|2030|408
+Sitio: https://theboudoirkey.com/
+Proxy: 72.56.59.23:61937
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 25.91s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"18.0","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"4895040359439227|06|2030|408"}
+...
+============================================================
+
+TARJETA #3
+----------------------------------------
+CC: 4895040359488869|06|2030|769
+Sitio: https://www.beyondyouryaad.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.34s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #4
+----------------------------------------
+CC: 4895040359436447|06|2030|771
+Sitio: https://baby-bloom-777.myshopify.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.38s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #5
+----------------------------------------
+CC: 4895040359474208|06|2030|227
+Sitio: https://hi5paws.sg
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.37s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #6
+----------------------------------------
+CC: 4895040359418262|06|2030|471
+Sitio: https://totalknockoutfarms.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 5.37s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Product id is empty"}
+...
+============================================================
+
+TARJETA #7
+----------------------------------------
+CC: 4895040359475411|06|2030|930
+Sitio: https://lisvanscents.myshopify.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 30.03s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"0.99","Response":"del ammount empty","Status":"true"}
+...
+============================================================
+
+TARJETA #8
+----------------------------------------
+CC: 4895040359457229|06|2030|648
+Sitio: https://meriwetherfarms.com
+Proxy: 104.238.30.68:63744
+Tipo: DECLINE
+Status Code: 200
+Tiempo: 28.29s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"0.98","Response":"GENERIC_ERROR","Status":"true","cc":"4895040359457229|06|2030|648"}
+...
+============================================================
+
+TARJETA #9
+----------------------------------------
+CC: 4895040359473747|06|2030|220
+Sitio: https://guardianchildren.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 27.39s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Product id is empty"}
+...
+============================================================
+
+TARJETA #10
+----------------------------------------
+CC: 4895040359424195|06|2030|253
+Sitio: https://wholesalebingosupplies.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 29.40s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"11.04","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"4895040359424195|06|2030|253"}
+...
+============================================================
+
+TARJETA #11
+----------------------------------------
+CC: 4895040359476252|06|2030|569
+Sitio: https://hinzepens.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.35s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #12
+----------------------------------------
+CC: 4895040359454234|06|2030|520
+Sitio: https://www.integrityco
+Proxy: 104.238.30.68:63744
+Tipo: DECLINE
+Status Code: 200
+Tiempo: 0.93s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Error in 1 req: TLS connect error: error:0A000126:SSL routines::unexpected eof while reading"}
+...
+============================================================
+
+TARJETA #13
+----------------------------------------
+CC: 4895040359494156|06|2030|976
+Sitio: https://fifteentwenty.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #14
+----------------------------------------
+CC: 4895040359408537|06|2030|382
+Sitio: https://juukdesign.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 29.01s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"10.0","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"4895040359408537|06|2030|382"}
+...
+============================================================
+
+TARJETA #15
+----------------------------------------
+CC: 4895040359426992|06|2030|379
+Sitio: https://dtfmadness.com
+Proxy: 104.238.30.68:63744
+Tipo: DECLINE
+Status Code: 200
+Tiempo: 27.55s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"20.5","Response":"GENERIC_ERROR","Status":"true","cc":"4895040359426992|06|2030|379"}
+...
+============================================================
+
+TARJETA #16
+----------------------------------------
+CC: 4895040359487432|06|2030|558
+Sitio: https://www.hookedonpickin.com
+Proxy: 72.56.59.56:63127
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #17
+----------------------------------------
+CC: 4895040359419112|06|2030|532
+Sitio: https://holidayshopcloseouts.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.30s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #18
+----------------------------------------
+CC: 4895040359405145|06|2030|246
+Sitio: https://store.montanaraptor.org
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 27.36s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"7.0","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"4895040359405145|06|2030|246"}
+...
+============================================================
+
+TARJETA #19
+----------------------------------------
+CC: 4895040359484546|06|2030|299
+Sitio: https://kamikaze-collection.store
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #20
+----------------------------------------
+CC: 4895040359403397|06|2030|720
+Sitio: https://mariescandies.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #21
+----------------------------------------
+CC: 4895040359493729|06|2030|285
+Sitio: https://store.tompetty.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #22
+----------------------------------------
+CC: 4895040359464399|06|2030|136
+Sitio: https://www.baristaunderground.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.29s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #23
+----------------------------------------
+CC: 4895040359477839|06|2030|159
+Sitio: https://www.kandiesworld.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #24
+----------------------------------------
+CC: 4895040359409154|06|2030|427
+Sitio: https://logolaunch.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.29s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #25
+----------------------------------------
+CC: 4895040359467079|06|2030|915
+Sitio: https://sustaingrooming.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.29s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #26
+----------------------------------------
+CC: 4895040359450257|06|2030|501
+Sitio: https://bjjproblems.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.38s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #27
+----------------------------------------
+CC: 4895040359423817|06|2030|144
+Sitio: https://rcboxclub.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.24s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #28
+----------------------------------------
+CC: 4895040359450869|06|2030|330
+Sitio: https://www.integrityco
+Proxy: 104.238.30.68:63744
+Tipo: DECLINE
+Status Code: 200
+Tiempo: 13.12s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Error in 1 req: TLS connect error: error:0A000126:SSL routines::unexpected eof while reading"}
+...
+============================================================
+
+TARJETA #29
+----------------------------------------
+CC: 4895040359403124|06|2030|209
+Sitio: https://thepouchshop.com.au
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #30
+----------------------------------------
+CC: 4895040359487762|06|2030|508
+Sitio: https://www.candytresses.shop
+Proxy: 72.56.59.23:61937
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.31s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #31
+----------------------------------------
+CC: 4895040359417660|06|2030|750
+Sitio: https://sfsustainable.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #32
+----------------------------------------
+CC: 4895040359472608|06|2030|577
+Sitio: https://theboudoirkey.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #33
+----------------------------------------
+CC: 4895040359428063|06|2030|109
+Sitio: https://csrdetailsupply.com
+Proxy: 72.56.59.56:63127
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 2.99s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Product id is empty"}
+...
+============================================================
+
+TARJETA #34
+----------------------------------------
+CC: 4895040359483977|06|2030|175
+Sitio: https://rucci.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.30s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #35
+----------------------------------------
+CC: 4895040359471543|06|2030|797
+Sitio: https://loveyourpets.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #36
+----------------------------------------
+CC: 4895040359400195|06|2030|308
+Sitio: https://polarfilament.com
+Proxy: 72.56.59.56:63127
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #37
+----------------------------------------
+CC: 4895040359460074|06|2030|354
+Sitio: https://shophaud.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 200
+Tiempo: 29.56s
+----------------------------------------
+RESPUESTA API:
+{"Gateway":"Normal","Price":"12.0","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"4895040359460074|06|2030|354"}
+...
+============================================================
+
+TARJETA #38
+----------------------------------------
+CC: 4895040359432867|06|2030|326
+Sitio: http://oshojapanesecafe.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #39
+----------------------------------------
+CC: 4895040359433170|06|2030|797
+Sitio: https://soavefaire.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.21s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #40
+----------------------------------------
+CC: 4895040359417207|06|2030|976
+Sitio: https://meriwetherfarms.com
+Proxy: 72.56.59.56:63127
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.23s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #41
+----------------------------------------
+CC: 4895040359411549|06|2030|519
+Sitio: https://sorrelsouth.com
+Proxy: 72.56.59.23:61937
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #42
+----------------------------------------
+CC: 4895040359439185|06|2030|937
+Sitio: https://herlegacybeauty.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #43
+----------------------------------------
+CC: 4895040359459571|06|2030|734
+Sitio: https://www.vasenbrewing.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #44
+----------------------------------------
+CC: 4895040359465354|06|2030|435
+Sitio: https://watermanlures.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.22s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #45
+----------------------------------------
+CC: 4895040359440365|06|2030|422
+Sitio: https://shop.studiostonecreative.com
+Proxy: 72.56.59.23:61937
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.28s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #46
+----------------------------------------
+CC: 4895040359447428|06|2030|152
+Sitio: https://vegasteamstore.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.38s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #47
+----------------------------------------
+CC: 4895040359440308|06|2030|636
+Sitio: https://breakroasters.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.25s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #48
+----------------------------------------
+CC: 4895040359401557|06|2030|552
+Sitio: https://shop.aansw.org.au
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #49
+----------------------------------------
+CC: 4895040359404353|06|2030|100
+Sitio: https://shopcaffeinequeens.com
+Proxy: 45.12.151.226:2828
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.25s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #50
+----------------------------------------
+CC: 4895040359444763|06|2030|144
+Sitio: https://cedarchestsanibel.com
+Proxy: 72.56.59.62:63133
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.21s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #51
+----------------------------------------
+CC: 4895040359432636|06|2030|272
+Sitio: https://shophaud.com
+Proxy: 72.56.59.56:63127
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.23s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #52
+----------------------------------------
+CC: 4895040359461775|06|2030|486
+Sitio: https://onlineliquor.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.25s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #53
+----------------------------------------
+CC: 4895040359480700|06|2030|752
+Sitio: https://sassysaucepolish.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.23s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #54
+----------------------------------------
+CC: 4895040359494263|06|2030|517
+Sitio: https://teamstore.kansascitycurrent.com
+Proxy: 104.238.30.68:63744
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.27s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #55
+----------------------------------------
+CC: 4895040359466667|06|2030|223
+Sitio: https://www.integrityco
+Proxy: 72.56.59.23:61937
+Tipo: DECLINE
+Status Code: 200
+Tiempo: 17.16s
+----------------------------------------
+RESPUESTA API:
+{"Response":"Error in 1 req: TLS connect error: error:0A000126:SSL routines::unexpected eof while reading"}
+...
+============================================================
+
+TARJETA #56
+----------------------------------------
+CC: 4895040359474612|06|2030|153
+Sitio: https://www.thelemonmachine.com
+Proxy: 104.238.30.50:59741
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.23s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+
+TARJETA #57
+----------------------------------------
+CC: 4895040359475502|06|2030|168
+Sitio: https://kegco.com
+Proxy: 72.56.59.23:61937
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 30.39s
+----------------------------------------
+RESPUESTA API:
+HTTPSConnectionPool(host='auto-shopify-api-production.up.railway.app', port=443): Read timed out. (read timeout=30)...
+============================================================
+

@@ -1,0 +1,172 @@
+============================================================
+RESULTADOS MULTI-CHK - 2026-02-21_02-52-42
+============================================================
+
+RESUMEN:
+Total: 12
+CHARGE: 0
+3D: 0
+DECLINE: 0
+ERROR: 12
+Tiempo total: 2m 1s
+
+============================================================
+DETALLE POR TARJETA:
+============================================================
+
+TARJETA #1
+----------------------------------------
+CC: 4100390116731932|04|2030|599
+Sitio: https://www.anchorproteinchips.com
+Proxy: 255.253.255.253:65100
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #2
+----------------------------------------
+CC: 4100390437645191|04|2031|573
+Sitio: https://josonja.com
+Proxy: 5.234.126.250:27939
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #3
+----------------------------------------
+CC: 4100390086899719|01|2028|182
+Sitio: https://www.lightandlilac.com
+Proxy: 151.252.214.25:4954
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #4
+----------------------------------------
+CC: 4100390362784353|12|2027|457
+Sitio: https://www.solsticekids.com
+Proxy: 144.250.4.63:42391
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #5
+----------------------------------------
+CC: 4100390834471381|05|2028|684
+Sitio: https://www.daytoncarsandcoffee.com
+Proxy: 115.40.70.154:24584
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #6
+----------------------------------------
+CC: 4100390464751649|11|2026|794
+Sitio: https://momoslimes.com
+Proxy: 4.212.4.9:34657
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #7
+----------------------------------------
+CC: 4100390668218957|10|2026|159
+Sitio: https://brittnetta.com
+Proxy: 139.251.4.66:9522
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #8
+----------------------------------------
+CC: 4100390595338092|09|2032|311
+Sitio: https://i55bookfairs.com
+Proxy: 130.242.243.228:14023
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #9
+----------------------------------------
+CC: 4100390151142722|01|2028|618
+Sitio: https://eastcoastkids.net
+Proxy: 8.250.253.40:21883
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #10
+----------------------------------------
+CC: 4100390943970026|04|2028|222
+Sitio: https://picapicatx.com
+Proxy: 251.28.252.253:51811
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #11
+----------------------------------------
+CC: 4100390311170548|03|2032|718
+Sitio: https://bundteas.com
+Proxy: 7.115.109.47:56269
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+
+TARJETA #12
+----------------------------------------
+CC: 4100390667826560|01|2028|858
+Sitio: https://lunareplicas.com
+Proxy: 255.251.250.247:59160
+Tipo: UNKNOWN
+Status Code: 0
+Tiempo: 0.00s
+----------------------------------------
+RESPUESTA RAW DE LA API:
+Extra data: line 422 column 2 (char 13879)
+============================================================
+

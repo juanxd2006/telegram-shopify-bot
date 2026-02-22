@@ -1,0 +1,105 @@
+============================================================
+     SHOPIFY CHECK RESULTS
+============================================================
+
+Date: 2026-02-21 15:16:44
+Total cards processed: 12
+Successful: 2
+Failed: 10
+Products found: 2
+
+============================================================
+DETAILED RESULTS
+============================================================
+
+Card #1
+----------------------------------------
+CC: 374355120935347|08|2029|3314
+Site: https://pilotandprincess.myshopify.com
+Proxy: 224.230.34.9:43442
+Status: ✅ SUCCESS
+Response: ❌ Respuesta no reconocida (sitio posiblemente inválido)
+Type: UNKNOWN
+
+Card #2
+----------------------------------------
+CC: 374355121696575|06|2031|8842
+Site: https://kbxpshop.myshopify.com
+Proxy: 5.57.38.64:27913
+Status: ✅ SUCCESS
+Response: ❌ Respuesta no reconocida (sitio posiblemente inválido)
+Type: UNKNOWN
+
+Card #3
+----------------------------------------
+CC: 374355128147267|04|2031|7361
+Site: https://studgate.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #4
+----------------------------------------
+CC: 374355121229195|07|2027|5006
+Site: https://thepocketshopper.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #5
+----------------------------------------
+CC: 374355122666668|02|2032|7833
+Site: https://ichooseit.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #6
+----------------------------------------
+CC: 374355129639551|11|2030|5556
+Site: https://y-front.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #7
+----------------------------------------
+CC: 374355122319417|11|2027|8157
+Site: https://cinemasetfree.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #8
+----------------------------------------
+CC: 374355120702754|11|2027|9553
+Site: https://petersbiks.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #9
+----------------------------------------
+CC: 374355129588725|01|2028|5195
+Site: https://moccasweet.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #10
+----------------------------------------
+CC: 374355127935795|11|2029|2267
+Site: https://nexshop.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #11
+----------------------------------------
+CC: 374355129041311|11|2031|6277
+Site: https://billy.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+Card #12
+----------------------------------------
+CC: 374355122242973|04|2031|2977
+Site: https://jj05.myshopify.com
+Status: ❌ FAILED
+Error: Timeout
+
+============================================================
+END OF REPORT
+============================================================

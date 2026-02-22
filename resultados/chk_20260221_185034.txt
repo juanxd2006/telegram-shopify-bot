@@ -1,0 +1,13 @@
+RESULTADO CHK - 20260221_185034
+==================================================
+
+Tarjeta: 5253222254795738|03|2027|103
+Sitio: https://le-mini-macaron-2.myshopify.com
+Proxy: 72.56.50.17:59787
+Tipo: CHARGE
+Código: 200
+Tiempo: 34.50s
+
+RESPUESTA COMPLETA:
+------------------------------
+{"Gateway":"Normal","Price":"9.14","Response":"CAPTCHA_REQUIRED","Status":"true","cc":"5253222254795738|03|2027|103"}

@@ -1,0 +1,422 @@
+[
+  {
+    "cc": "4466133355861194|04|2030|519",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 5.396193981170654,
+    "timestamp": "2026-02-21T02:11:00.111147",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868140|04|2030|954",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 5.480231523513794,
+    "timestamp": "2026-02-21T02:11:00.162867",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868439|04|2030|368",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 5.583720445632935,
+    "timestamp": "2026-02-21T02:11:00.258470",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861590|04|2030|609",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 5.644059658050537,
+    "timestamp": "2026-02-21T02:11:00.321699",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355867241|04|2030|980",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8242125511169434,
+    "timestamp": "2026-02-21T02:11:04.096983",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355862408|04|2030|882",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9863176345825195,
+    "timestamp": "2026-02-21T02:11:04.132747",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355860402|04|2030|873",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9919679164886475,
+    "timestamp": "2026-02-21T02:11:04.137103",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868454|04|2030|811",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.045675277709961,
+    "timestamp": "2026-02-21T02:11:04.226525",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869890|04|2030|684",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9021494388580322,
+    "timestamp": "2026-02-21T02:11:08.067491",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355860626|04|2030|160",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9027154445648193,
+    "timestamp": "2026-02-21T02:11:08.079209",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355866102|04|2030|232",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9889636039733887,
+    "timestamp": "2026-02-21T02:11:08.097199",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355866243|04|2030|987",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8815999031066895,
+    "timestamp": "2026-02-21T02:11:08.126679",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868074|04|2030|209",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.940049409866333,
+    "timestamp": "2026-02-21T02:11:08.193984",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355867779|04|2030|139",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.867100715637207,
+    "timestamp": "2026-02-21T02:11:11.940941",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355860428|04|2030|553",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.90432071685791,
+    "timestamp": "2026-02-21T02:11:12.009374",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355867548|04|2030|512",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9819834232330322,
+    "timestamp": "2026-02-21T02:11:12.068025",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869064|04|2030|591",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9012489318847656,
+    "timestamp": "2026-02-21T02:11:12.105606",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355866078|04|2030|644",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8625781536102295,
+    "timestamp": "2026-02-21T02:11:15.946610",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861905|04|2030|723",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.020799160003662,
+    "timestamp": "2026-02-21T02:11:16.008808",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355865302|04|2030|451",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9381463527679443,
+    "timestamp": "2026-02-21T02:11:16.066402",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861053|04|2030|020",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.89308500289917,
+    "timestamp": "2026-02-21T02:11:19.880811",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355864644|04|2030|778",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9200077056884766,
+    "timestamp": "2026-02-21T02:11:19.940875",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869536|04|2030|090",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.018613815307617,
+    "timestamp": "2026-02-21T02:11:20.007884",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869494|04|2030|813",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.95286226272583,
+    "timestamp": "2026-02-21T02:11:20.037466",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868199|04|2030|924",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9910361766815186,
+    "timestamp": "2026-02-21T02:11:20.101300",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355863018|04|2030|076",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8574981689453125,
+    "timestamp": "2026-02-21T02:11:23.755810",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355862135|04|2030|223",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8863918781280518,
+    "timestamp": "2026-02-21T02:11:23.943963",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355868157|04|2030|184",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.038931608200073,
+    "timestamp": "2026-02-21T02:11:23.995678",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355860709|04|2030|861",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.8912477493286133,
+    "timestamp": "2026-02-21T02:11:24.012976",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861277|04|2030|580",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9450294971466064,
+    "timestamp": "2026-02-21T02:11:27.718004",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355866698|04|2030|622",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.871588706970215,
+    "timestamp": "2026-02-21T02:11:27.873538",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355866276|04|2030|892",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.902784585952759,
+    "timestamp": "2026-02-21T02:11:27.973293",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869106|04|2030|655",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.968308210372925,
+    "timestamp": "2026-02-21T02:11:27.977773",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355863034|04|2030|435",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9938597679138184,
+    "timestamp": "2026-02-21T02:11:28.047779",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861541|04|2030|869",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.974268674850464,
+    "timestamp": "2026-02-21T02:11:31.718028",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861186|04|2030|094",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9750747680664062,
+    "timestamp": "2026-02-21T02:11:31.873789",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355867944|04|2030|094",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.9604880809783936,
+    "timestamp": "2026-02-21T02:11:32.009855",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869874|04|2030|676",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.973257064819336,
+    "timestamp": "2026-02-21T02:11:32.048218",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355861921|04|2030|684",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.946228504180908,
+    "timestamp": "2026-02-21T02:11:35.687477",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869882|04|2030|044",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.011459589004517,
+    "timestamp": "2026-02-21T02:11:35.913305",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355869148|04|2030|984",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 3.981989622116089,
+    "timestamp": "2026-02-21T02:11:36.033556",
+    "type": "UNKNOWN"
+  },
+  {
+    "cc": "4466133355863877|04|2030|442",
+    "site": "https://annieetsescoutures.com",
+    "proxy": "104.238.30.50:59741:user:pass",
+    "status_code": 200,
+    "response": "{\"Response\":\"Product id is empty\"}\n",
+    "elapsed": 4.000371694564819,
+    "timestamp": "2026-02-21T02:11:36.105711",
+    "type": "UNKNOWN"
+  }
+]]
