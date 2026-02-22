@@ -1,4 +1,4 @@
-# novachk.py - VERSIÓN COMPLETA Y CORREGIDA
+# novachk.py - Bot completo para Shopify CHK
 import logging
 import requests
 import json
@@ -14,9 +14,12 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
-# --- CONFIGURACIÓN ---
-TOKEN = "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE"
-BOT_NAME = "AUTO SHOPIFY"
+# --- CONFIGURACIÓN DESDE VARIABLES DE ENTORNO ---
+TOKEN = os.environ.get('TOKEN')
+if not TOKEN:
+    raise ValueError("TOKEN no configurado. Por favor, configura la variable de entorno TOKEN")
+
+BOT_NAME = "NovaChk"
 API_BASE_URL = "https://auto-shopify-api-production.up.railway.app/index.php"
 DEFAULT_PROXY = "45.155.88.66:7497:zpqdlliz:1jrl1sdkbmlj"
 ADMIN_ID = 8220432777
@@ -1834,6 +1837,8 @@ def main():
     print(f"✅ Tipos: Charge | Live | Decline | Error | CAPTCHA | TIMEOUT")
     print(f"✅ Notificaciones en tiempo real para Hits")
     print(f"✅ Nuevos comandos: /delproxyall, /delsiteall, /delcardall, /delqueueall")
+    
+    # Iniciar el bot (esto es un bucle infinito)
     app.run_polling()
 
 if __name__ == "__main__":
