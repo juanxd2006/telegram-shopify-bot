@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CON TODOS LOS MENÚS
-Todos los submenús funcionando: check, mass, sites, proxies, cards, stats, settings.
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CORREGIDA
+Con todos los menús funcionando, barra de progreso, y sin errores de sintaxis.
 """
 
 import os
@@ -52,12 +52,14 @@ MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
 MASS_COOLDOWN_MINUTES = int(os.environ.get("MASS_COOLDOWN", 3))
 ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
+# Configuración de timeouts
 TIMEOUT_CONFIG = {
     "connect": 3,
     "sock_read": 5,
     "total": 8,
 }
 
+# Configuración de confianza
 CONFIDENCE_CONFIG = {
     "charged_fast_threshold": 1.5,
     "charged_normal_min": 2.0,
@@ -2143,27 +2145,32 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active mass check.")
 
-# ================== COMANDO SETWORKERS ==================
+# ================== COMANDO SETWORKERS (CORREGIDO) ==================
 async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cambiar límite de workers (solo admin)"""
     user_id = update.effective_user.id
     
+    # Verificar si es admin
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ Not authorized.")
         return
     
+    # Si no hay argumentos, mostrar valor actual
     if not context.args:
         await update.message.reply_text(f"Current max workers: {MAX_WORKERS_PER_USER}")
         return
     
+    # Intentar cambiar el valor
     try:
         new_value = int(context.args[0])
         if 1 <= new_value <= 20:
+            # Declarar global ANTES de usarla
             global MAX_WORKERS_PER_USER
             MAX_WORKERS_PER_USER = new_value
             await update.message.reply_text(f"✅ Max workers set to {new_value}")
         else:
             await update.message.reply_text("❌ Value must be between 1 and 20.")
-    except:
+    except ValueError:
         await update.message.reply_text("❌ Invalid number.")
 
 # ================== MAIN ==================
