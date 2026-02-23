@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CORREGIDA
-Con todos los menús funcionando, barra de progreso, y sin errores de sintaxis.
+Con todos los menús funcionando y error de MAX_WORKERS_PER_USER solucionado.
 """
 
 import os
@@ -2164,7 +2164,7 @@ async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         new_value = int(context.args[0])
         if 1 <= new_value <= 20:
-            # Declarar global ANTES de usarla
+            # Declarar global ANTES de modificarla
             global MAX_WORKERS_PER_USER
             MAX_WORKERS_PER_USER = new_value
             await update.message.reply_text(f"✅ Max workers set to {new_value}")
