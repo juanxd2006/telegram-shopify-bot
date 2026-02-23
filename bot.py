@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA RESTAURADA
-Con detección inteligente de archivos, aprendizaje avanzado, sin reintentos.
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CON EXPORTACIÓN TXT
+Con detección inteligente de archivos, aprendizaje avanzado, sin reintentos y exportación de resultados.
 """
 
 import os
@@ -193,7 +193,7 @@ class CardValidator:
             "last4": number[-4:]
         }
 
-# ================== DETECCIÓN INTELIGENTE DE ARCHIVOS (RESTAURADA) ==================
+# ================== DETECCIÓN INTELIGENTE DE ARCHIVOS ==================
 def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
     """
     Detección INTELIGENTE de tipo de línea.
@@ -245,7 +245,7 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
-# ================== BASE DE DATOS CON MIGRACIÓN (RESTAURADA) ==================
+# ================== BASE DE DATOS CON MIGRACIÓN ==================
 class Database:
     def __init__(self, db_path=DB_FILE):
         self.db_path = db_path
@@ -417,7 +417,7 @@ class Database:
             (user_id, result.card_bin, result.card_last4, 
              result.site, result.proxy, result.status.value,
              result.response_time, result.http_code, result.api_used,
-             result.response_text[:200])
+             result.response_text[:500])
         )
 
     async def shutdown(self):
@@ -493,7 +493,7 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== SISTEMA DE APRENDIZAJE AVANZADO (RESTAURADO) ==================
+# ================== SISTEMA DE APRENDIZAJE AVANZADO ==================
 class LearningSystem:
     def __init__(self, db: Database, user_id: int):
         self.db = db
@@ -932,7 +932,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*GATES*  \n"
         "• `/sh [card]` · SHOPIFY CUSTOM GATE\n"
-        "• `/msh [workers]` · MASS SHOPIFY\n"
+        "• `/msh [workers]` · MASS SHOPIFY (con exportación TXT)\n"
         "• `/proxyhealth` · PROXY CHECKER\n\n"
         "*SITES*  \n"
         "• `/addsite [url]` · ADD SHOPIFY STORE\n"
@@ -1398,6 +1398,7 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(response, parse_mode="Markdown")
 
 async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verificación masiva con exportación a TXT"""
     user_id = update.effective_user.id
     
     allowed, msg = await user_manager.check_rate_limit(user_id)
@@ -1448,7 +1449,8 @@ async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: num_workers = min(int(context.args[0]), MAX_WORKERS_PER_USER)
         except: pass
     
-    msg = await update.message.reply_text(
+    # Mensaje de progreso
+    progress_msg = await update.message.reply_text(
         f"❖ *MASS SHOPIFY* ❖\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*CARDS*: `{len(valid_cards)}`\n"
@@ -1457,17 +1459,36 @@ async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     
+    # Callback para actualizar progreso
+    async def progress_callback(proc: int, succ: int, total: int):
+        bar = create_progress_bar(proc, total)
+        elapsed = time.time() - start_time
+        speed = proc / elapsed if elapsed > 0 else 0
+        
+        await progress_msg.edit_text(
+            f"❖ *MASS SHOPIFY* ❖\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"*PROGRESS*: {bar} {proc}/{total}\n"
+            f"*APPROVED*: `{succ}`\n"
+            f"*SPEED*: `{speed:.1f} cards/s`\n"
+            f"*TIME*: `{elapsed:.1f}s`\n"
+            f"*STATUS*: 🔄 PROCESSING...",
+            parse_mode="Markdown"
+        )
+    
+    start_time = time.time()
     results, success_count, elapsed = await card_service.check_mass(
         user_id=user_id,
         cards=valid_cards,
         sites=sites,
         proxies=proxies,
         num_workers=num_workers,
-        progress_callback=None
+        progress_callback=progress_callback
     )
     
     await user_manager.increment_checks(user_id)
     
+    # Resumen en Telegram
     response = (
         f"✅ *MASS CHECK COMPLETE* ✅\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1478,7 +1499,50 @@ async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• ❌ DECLINED: `{len(valid_cards) - success_count}`"
     )
     
-    await msg.edit_text(response, parse_mode="Markdown")
+    await progress_msg.edit_text(response, parse_mode="Markdown")
+    
+    # Generar archivo TXT con todos los detalles
+    filename = f"mass_results_{user_id}_{int(time.time())}.txt"
+    
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("=" * 80 + "\n")
+        f.write("RESULTADOS DE VERIFICACIÓN MASIVA\n")
+        f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Usuario ID: {user_id}\n")
+        f.write(f"Total tarjetas: {len(valid_cards)}\n")
+        f.write(f"Aprobadas: {success_count}\n")
+        f.write(f"Rechazadas: {len(valid_cards) - success_count}\n")
+        f.write(f"Tiempo total: {elapsed:.2f}s\n")
+        f.write("=" * 80 + "\n\n")
+        
+        for i, result in enumerate(results, 1):
+            f.write(f"{'='*60}\n")
+            f.write(f"TARJETA #{i}\n")
+            f.write(f"{'='*60}\n")
+            f.write(f"📱 Tarjeta: {result.card_bin}xxxxxx{result.card_last4}\n")
+            f.write(f"🌐 Sitio: {result.site}\n")
+            f.write(f"🔒 Proxy: {result.proxy}\n")
+            f.write(f"📊 Estado: {result.status.value.upper()}\n")
+            f.write(f"💰 Precio: {result.price}\n")
+            f.write(f"⚡ Tiempo: {result.response_time:.2f}s\n")
+            f.write(f"📟 HTTP Code: {result.http_code or 'N/A'}\n")
+            f.write(f"🏦 Banco: {result.bin_info.get('bank', 'Unknown')}\n")
+            f.write(f"💳 Marca: {result.bin_info.get('brand', 'Unknown')}\n")
+            f.write(f"🌍 País: {result.bin_info.get('country', 'UN')}\n")
+            f.write(f"📝 Respuesta API:\n{result.response_text}\n")
+            f.write("\n")
+    
+    # Enviar archivo
+    with open(filename, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename=filename,
+            caption=f"📊 *RESULTADOS COMPLETOS*\n{len(valid_cards)} tarjetas procesadas",
+            parse_mode="Markdown"
+        )
+    
+    # Limpiar archivo temporal
+    os.remove(filename)
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1515,7 +1579,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ===== MANEJO DE ARCHIVOS CON DETECCIÓN INTELIGENTE (RESTAURADA) =====
+# ===== MANEJO DE ARCHIVOS CON DETECCIÓN INTELIGENTE =====
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     if not document.file_name.endswith('.txt'):
@@ -1691,7 +1755,7 @@ def main():
     # Callbacks
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("🚀 Bot started (versión completa restaurada)")
+    logger.info("🚀 Bot started con exportación TXT")
     app.run_polling()
 
 if __name__ == "__main__":
