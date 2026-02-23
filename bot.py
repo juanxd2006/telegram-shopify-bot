@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CORREGIDA
-Con todos los menús funcionando y error de MAX_WORKERS_PER_USER solucionado.
+Bot de Telegram para verificar tarjetas - VERSIÓN PROFESIONAL
+Con clase Settings para configuración dinámica sin global.
 """
 
 import os
@@ -35,38 +35,41 @@ def handle_shutdown(signum, frame):
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
-# ================== CONFIGURACIÓN ==================
-TOKEN = os.environ.get("BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
+# ================== CONFIGURACIÓN CON CLASE SETTINGS ==================
+class Settings:
+    """Configuración global del bot (sin global)"""
+    TOKEN = os.environ.get("BOT_TOKEN")
+    if not TOKEN:
+        raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
 
-API_ENDPOINTS = [
-    os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
-]
+    API_ENDPOINTS = [
+        os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
+    ]
 
-DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
-MAX_WORKERS_PER_USER = int(os.environ.get("MAX_WORKERS", 8))
-RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
-DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
-MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
-MASS_COOLDOWN_MINUTES = int(os.environ.get("MASS_COOLDOWN", 3))
-ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
+    DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
+    MAX_WORKERS_PER_USER = int(os.environ.get("MAX_WORKERS", 8))
+    RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
+    DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
+    MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
+    MASS_COOLDOWN_MINUTES = int(os.environ.get("MASS_COOLDOWN", 3))
+    ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
-# Configuración de timeouts
-TIMEOUT_CONFIG = {
-    "connect": 3,
-    "sock_read": 5,
-    "total": 8,
-}
+    # Configuración de timeouts
+    TIMEOUT_CONFIG = {
+        "connect": 3,
+        "sock_read": 5,
+        "total": 8,
+    }
 
-# Configuración de confianza
-CONFIDENCE_CONFIG = {
-    "charged_fast_threshold": 1.5,
-    "charged_normal_min": 2.0,
-    "charged_normal_max": 7.0,
-    "html_large_threshold": 50000,
-}
+    # Configuración de confianza
+    CONFIDENCE_CONFIG = {
+        "charged_fast_threshold": 1.5,
+        "charged_normal_min": 2.0,
+        "charged_normal_max": 7.0,
+        "html_large_threshold": 50000,
+    }
 
+# ================== LOGGING ==================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -134,12 +137,12 @@ class ResponseThinker:
         
         html_size = context.response_size
         
-        if html_size > CONFIDENCE_CONFIG["html_large_threshold"]:
+        if html_size > Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
             patterns_detected.append("large_html")
         
-        if context.response_time < CONFIDENCE_CONFIG["charged_fast_threshold"]:
+        if context.response_time < Settings.CONFIDENCE_CONFIG["charged_fast_threshold"]:
             patterns_detected.append("fast_response")
-        elif CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= CONFIDENCE_CONFIG["charged_normal_max"]:
+        elif Settings.CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= Settings.CONFIDENCE_CONFIG["charged_normal_max"]:
             patterns_detected.append("normal_response")
         else:
             patterns_detected.append("slow_response")
@@ -196,11 +199,11 @@ class ResponseThinker:
                 patterns_detected.append(f"success:{success_type}")
         
         if success_matches:
-            if context.response_time < CONFIDENCE_CONFIG["charged_fast_threshold"]:
+            if context.response_time < Settings.CONFIDENCE_CONFIG["charged_fast_threshold"]:
                 return cls._create_result(context, CheckStatus.POSSIBLE_APPROVAL, Confidence.SUSPICIOUS,
                                          "fast response with success patterns", patterns_detected)
-            elif CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= CONFIDENCE_CONFIG["charged_normal_max"]:
-                if html_size < CONFIDENCE_CONFIG["html_large_threshold"]:
+            elif Settings.CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= Settings.CONFIDENCE_CONFIG["charged_normal_max"]:
+                if html_size < Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
                     return cls._create_result(context, CheckStatus.CHARGED, Confidence.HIGH,
                                              "confirmed checkout flow", patterns_detected)
                 else:
@@ -210,7 +213,7 @@ class ResponseThinker:
                 return cls._create_result(context, CheckStatus.POSSIBLE_APPROVAL, Confidence.LOW,
                                          "slow success response", patterns_detected)
         
-        if html_size > CONFIDENCE_CONFIG["html_large_threshold"]:
+        if html_size > Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
             return cls._create_result(context, CheckStatus.AMBIGUOUS, Confidence.LOW,
                                      "large HTML response, possible WAF page", patterns_detected)
         
@@ -403,7 +406,7 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
 # ================== BASE DE DATOS ==================
 class Database:
-    def __init__(self, db_path=DB_FILE):
+    def __init__(self, db_path=Settings.DB_FILE):
         self.db_path = db_path
         self._write_lock = asyncio.Lock()
         self._batch_queue = []
@@ -630,9 +633,9 @@ class ProxyHealthChecker:
         self.user_id = user_id
         self.test_url = "https://httpbin.org/ip"
         self.timeout = aiohttp.ClientTimeout(
-            total=TIMEOUT_CONFIG["total"],
-            connect=TIMEOUT_CONFIG["connect"],
-            sock_read=TIMEOUT_CONFIG["sock_read"]
+            total=Settings.TIMEOUT_CONFIG["total"],
+            connect=Settings.TIMEOUT_CONFIG["connect"],
+            sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
         )
         
     async def check_proxy(self, proxy: str) -> Dict:
@@ -714,9 +717,9 @@ class UltraFastChecker:
             session = aiohttp.ClientSession(
                 connector=self.connector,
                 timeout=aiohttp.ClientTimeout(
-                    total=TIMEOUT_CONFIG["total"],
-                    connect=TIMEOUT_CONFIG["connect"],
-                    sock_read=TIMEOUT_CONFIG["sock_read"]
+                    total=Settings.TIMEOUT_CONFIG["total"],
+                    connect=Settings.TIMEOUT_CONFIG["connect"],
+                    sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
                 )
             )
             self.session_pool.append(session)
@@ -753,7 +756,7 @@ class UltraFastChecker:
         redirect_count = 0
         
         try:
-            async with session.get(API_ENDPOINTS[0], params=params) as resp:
+            async with session.get(Settings.API_ENDPOINTS[0], params=params) as resp:
                 elapsed = time.time() - start_time
                 response_text = await resp.text()
                 response_size = len(response_text)
@@ -910,25 +913,25 @@ class UserManager:
                 mass_count_hour = row["mass_count_hour"]
             
             if command == "mass":
-                if mass_count_hour >= MASS_LIMIT_PER_HOUR:
-                    return False, f"⚠️ Máximo {MASS_LIMIT_PER_HOUR} mass/hora"
+                if mass_count_hour >= Settings.MASS_LIMIT_PER_HOUR:
+                    return False, f"⚠️ Máximo {Settings.MASS_LIMIT_PER_HOUR} mass/hora"
                 
                 if row.get("last_mass"):
                     last_mass = datetime.fromisoformat(row["last_mass"])
                     elapsed = (datetime.now() - last_mass).total_seconds() / 60
-                    if elapsed < MASS_COOLDOWN_MINUTES:
-                        wait = MASS_COOLDOWN_MINUTES - elapsed
+                    if elapsed < Settings.MASS_COOLDOWN_MINUTES:
+                        wait = Settings.MASS_COOLDOWN_MINUTES - elapsed
                         return False, f"⏳ Espera {wait:.1f} minutos para otro mass"
             
             elif command == "check":
-                if checks_today >= DAILY_LIMIT_CHECKS:
-                    return False, f"📅 Límite diario ({DAILY_LIMIT_CHECKS}) alcanzado"
+                if checks_today >= Settings.DAILY_LIMIT_CHECKS:
+                    return False, f"📅 Límite diario ({Settings.DAILY_LIMIT_CHECKS}) alcanzado"
                 
                 if row.get("last_check"):
                     last_check = datetime.fromisoformat(row["last_check"])
                     elapsed = (datetime.now() - last_check).seconds
-                    if elapsed < RATE_LIMIT_SECONDS:
-                        wait = RATE_LIMIT_SECONDS - elapsed
+                    if elapsed < Settings.RATE_LIMIT_SECONDS:
+                        wait = Settings.RATE_LIMIT_SECONDS - elapsed
                         return False, f"⏳ Espera {wait}s"
             
             return True, ""
@@ -954,10 +957,10 @@ class UserManager:
             )
 
     async def get_optimal_workers(self, user_id: int, proxies: List[str]) -> int:
-        return min(len(proxies), 8)
+        return min(len(proxies), Settings.MAX_WORKERS_PER_USER)
 
     async def is_admin(self, user_id: int) -> bool:
-        return user_id in ADMIN_IDS
+        return user_id in Settings.ADMIN_IDS
 
 # ================== CARD CHECK SERVICE ==================
 class CardCheckService:
@@ -1180,7 +1183,7 @@ async def mass_workers_settings(update: Update, context: ContextTypes.DEFAULT_TY
     text = (
         "⚙️ *WORKERS SETTINGS*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Current max workers: `{MAX_WORKERS_PER_USER}`\n\n"
+        f"Current max workers: `{Settings.MAX_WORKERS_PER_USER}`\n\n"
         "Workers are automatically optimized based on:\n"
         "• Number of alive proxies\n"
         "• Timeout rate\n\n"
@@ -1597,7 +1600,7 @@ async def settings_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚡ *WORKERS CONFIGURATION*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Max workers per user: `{MAX_WORKERS_PER_USER}`\n\n"
+        f"Max workers per user: `{Settings.MAX_WORKERS_PER_USER}`\n\n"
         "The bot automatically adjusts workers based on:\n"
         "• Number of alive proxies\n"
         "• Timeout rate (>20% reduces workers)\n\n"
@@ -1615,9 +1618,9 @@ async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⏱ *TIMEOUT CONFIGURATION*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Connect timeout: `{TIMEOUT_CONFIG['connect']}s`\n"
-        f"Read timeout: `{TIMEOUT_CONFIG['sock_read']}s`\n"
-        f"Total timeout: `{TIMEOUT_CONFIG['total']}s`\n\n"
+        f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s`\n"
+        f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s`\n"
+        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n\n"
         "These values are optimized for balance between speed and reliability."
     )
     
@@ -1631,10 +1634,10 @@ async def settings_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🔒 *USAGE RULES*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Daily limit: `{DAILY_LIMIT_CHECKS}` checks\n"
-        f"• Mass limit: `{MASS_LIMIT_PER_HOUR}` per hour\n"
-        f"• Cooldown between mass: `{MASS_COOLDOWN_MINUTES}` minutes\n"
-        f"• Rate limit: `{RATE_LIMIT_SECONDS}s` between checks\n\n"
+        f"• Daily limit: `{Settings.DAILY_LIMIT_CHECKS}` checks\n"
+        f"• Mass limit: `{Settings.MASS_LIMIT_PER_HOUR}` per hour\n"
+        f"• Cooldown between mass: `{Settings.MASS_COOLDOWN_MINUTES}` minutes\n"
+        f"• Rate limit: `{Settings.RATE_LIMIT_SECONDS}s` between checks\n\n"
         "These limits protect the bot from abuse."
     )
     
@@ -2145,28 +2148,27 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active mass check.")
 
-# ================== COMANDO SETWORKERS (CORREGIDO) ==================
+# ================== COMANDO SETWORKERS (SIN GLOBAL) ==================
 async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cambiar límite de workers (solo admin)"""
+    """Cambiar límite de workers (solo admin) - SIN GLOBAL"""
     user_id = update.effective_user.id
     
     # Verificar si es admin
-    if user_id not in ADMIN_IDS:
+    if user_id not in Settings.ADMIN_IDS:
         await update.message.reply_text("❌ Not authorized.")
         return
     
     # Si no hay argumentos, mostrar valor actual
     if not context.args:
-        await update.message.reply_text(f"Current max workers: {MAX_WORKERS_PER_USER}")
+        await update.message.reply_text(f"Current max workers: {Settings.MAX_WORKERS_PER_USER}")
         return
     
     # Intentar cambiar el valor
     try:
         new_value = int(context.args[0])
         if 1 <= new_value <= 20:
-            # Declarar global ANTES de modificarla
-            global MAX_WORKERS_PER_USER
-            MAX_WORKERS_PER_USER = new_value
+            # Modificar directamente la clase Settings (sin global)
+            Settings.MAX_WORKERS_PER_USER = new_value
             await update.message.reply_text(f"✅ Max workers set to {new_value}")
         else:
             await update.message.reply_text("❌ Value must be between 1 and 20.")
@@ -2195,10 +2197,10 @@ async def post_init(application: Application):
     
     card_service = CardCheckService(db, user_manager, checker)
     
-    logger.info("✅ Bot inicializado con todos los menús")
+    logger.info("✅ Bot inicializado con clase Settings")
 
 def main():
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
     app.post_shutdown = shutdown
 
     # Comandos
@@ -2213,7 +2215,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado con todos los menús funcionando")
+    logger.info("🚀 Bot iniciado sin errores de global")
     app.run_polling()
 
 if __name__ == "__main__":
