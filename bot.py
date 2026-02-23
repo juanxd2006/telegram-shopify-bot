@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN CON BARRA DE PROGRESO EN TIEMPO REAL
-Mass check con actualizaciones cada 0.5s, botón STOP, y diseño profesional.
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CON TODOS LOS MENÚS
+Todos los submenús funcionando: check, mass, sites, proxies, cards, stats, settings.
 """
 
 import os
@@ -52,14 +52,12 @@ MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
 MASS_COOLDOWN_MINUTES = int(os.environ.get("MASS_COOLDOWN", 3))
 ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
-# Configuración de timeouts
 TIMEOUT_CONFIG = {
     "connect": 3,
     "sock_read": 5,
     "total": 8,
 }
 
-# Configuración de confianza
 CONFIDENCE_CONFIG = {
     "charged_fast_threshold": 1.5,
     "charged_normal_min": 2.0,
@@ -274,7 +272,6 @@ class CheckResult:
 
 # ================== FUNCIONES AUXILIARES ==================
 def create_progress_bar(current: int, total: int, width: int = 20) -> str:
-    """Crea una barra de progreso visual"""
     if total == 0:
         return "[" + "░" * width + "]"
     filled = int((current / total) * width)
@@ -302,7 +299,6 @@ def get_status_emoji(status: CheckStatus) -> str:
     return emoji_map.get(status, "❓")
 
 def format_time(seconds: float) -> str:
-    """Formatea tiempo en minutos y segundos"""
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     if minutes > 0:
@@ -556,7 +552,7 @@ class Database:
             blocks = existing["blocks"] + (weight if result.status in [CheckStatus.BLOCKED, CheckStatus.WAF_BLOCK, CheckStatus.RATE_LIMIT] else 0)
             total_time = existing["total_time"] + result.context.response_time
             
-            await self.db.execute(
+            await self.execute(
                 """UPDATE learning SET 
                    attempts = ?, successes = ?, declines = ?, timeouts = ?, blocks = ?,
                    total_time = ?, last_seen = CURRENT_TIMESTAMP
@@ -564,7 +560,7 @@ class Database:
                 (attempts, successes, declines, timeouts, blocks, total_time, existing["id"])
             )
         else:
-            await self.db.execute(
+            await self.execute(
                 """INSERT INTO learning 
                    (user_id, site, proxy, bin, attempts, successes, declines, timeouts, blocks, total_time)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -981,7 +977,7 @@ class CardCheckService:
         sites: List[str],
         proxies: List[str],
         progress_callback=None
-    ) -> Tuple[List[CheckResult], int, float]:
+    ) -> Tuple[List[CheckResult], int, int, int, float]:
         
         optimal_workers = await self.user_manager.get_optimal_workers(user_id, proxies)
         
@@ -1019,7 +1015,6 @@ class CardCheckService:
                 
                 await result_queue.put(result)
                 
-                # Actualizar contadores
                 if result.success:
                     approved += 1
                 elif "timeout" in result.status.value:
@@ -1029,7 +1024,6 @@ class CardCheckService:
                 
                 processed += 1
                 
-                # Actualizar progreso cada 0.5s o cada 5 tarjetas
                 current_time = time.time()
                 if progress_callback and (current_time - last_update >= 0.5 or processed % 5 == 0):
                     await progress_callback(processed, approved, declined, timeout, len(cards))
@@ -1041,13 +1035,11 @@ class CardCheckService:
         
         results = []
         
-        # Mantener actualizaciones incluso sin workers
         while len(results) < len(cards) and not all(t.done() for t in tasks):
             try:
                 result = await asyncio.wait_for(result_queue.get(), timeout=0.1)
                 results.append(result)
             except asyncio.TimeoutError:
-                # Actualizar aunque no haya resultados nuevos
                 if progress_callback and time.time() - last_update >= 0.5:
                     await progress_callback(processed, approved, declined, timeout, len(cards))
                     last_update = time.time()
@@ -1098,6 +1090,42 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
+# ================== SUBMENÚ CHECK CARD ==================
+async def show_check_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💳 *CHECK CARD*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Selecciona una opción:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("▶️ Check one card", callback_data="check_one")],
+        [InlineKeyboardButton("ℹ️ How it works", callback_data="check_howto")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def check_howto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💳 *HOW TO CHECK A CARD*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the card in this format:\n"
+        "`NUMBER|MONTH|YEAR|CVV`\n\n"
+        "Example:\n"
+        "`4377110010309114|08|2026|501`\n\n"
+        "The bot will automatically use your first site and proxy."
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_check")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
 # ================== SUBMENÚ MASS CHECK ==================
 async def show_mass_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1146,12 +1174,479 @@ async def show_mass_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
+async def mass_workers_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⚙️ *WORKERS SETTINGS*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Current max workers: `{MAX_WORKERS_PER_USER}`\n\n"
+        "Workers are automatically optimized based on:\n"
+        "• Number of alive proxies\n"
+        "• Timeout rate\n\n"
+        "To change the limit, use the command:\n"
+        "`/setworkers [number]`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_mass")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+# ================== SUBMENÚ SITES ==================
+async def show_sites_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    
+    text = (
+        "🌐 *SITES MANAGER*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Total sites: `{len(sites)}`\n\n"
+        "What do you want to do?"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add site", callback_data="sites_add")],
+        [InlineKeyboardButton("📃 List sites", callback_data="sites_list")],
+        [InlineKeyboardButton("❌ Remove site", callback_data="sites_remove")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def sites_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "➕ *ADD SITE*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the Shopify store URL:\n"
+        "Example:\n"
+        "`mystore.myshopify.com`\n\n"
+        "Or full URL:\n"
+        "`https://mystore.myshopify.com`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_sites")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+    
+    user_state[update.effective_user.id] = "awaiting_site_url"
+
+async def sites_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    
+    if not sites:
+        text = "📭 *No sites saved.*"
+    else:
+        lines = ["📃 *YOUR SITES*", "━━━━━━━━━━━━━━━━━━", ""]
+        for i, site in enumerate(sites, 1):
+            lines.append(f"{i}. {site}")
+        text = "\n".join(lines)
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_sites")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def sites_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    
+    if not sites:
+        text = "📭 *No sites to remove.*"
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_sites")]]
+    else:
+        text = "❌ *REMOVE SITE*\n━━━━━━━━━━━━━━━━━━\n\nSelect a site to remove:"
+        keyboard = []
+        for i, site in enumerate(sites, 1):
+            keyboard.append([InlineKeyboardButton(f"{i}. {site[:30]}...", callback_data=f"remove_site_{i}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_sites")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+# ================== SUBMENÚ PROXIES ==================
+async def show_proxies_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    text = (
+        "🔌 *PROXIES MANAGER*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Total proxies: `{len(proxies)}`\n\n"
+        "What do you want to do?"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add proxy", callback_data="proxies_add")],
+        [InlineKeyboardButton("📃 List proxies", callback_data="proxies_list")],
+        [InlineKeyboardButton("❤️ Proxy health", callback_data="proxies_health")],
+        [InlineKeyboardButton("🗑️ Clean dead proxies", callback_data="proxies_clean")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def proxies_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "➕ *ADD PROXY*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the proxy in one of these formats:\n"
+        "• `ip:port`\n"
+        "• `ip:port:user:pass`\n\n"
+        "Examples:\n"
+        "`205.209.118.30:3138`\n"
+        "`p.webshare.io:80:user:pass`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_proxies")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+    
+    user_state[update.effective_user.id] = "awaiting_proxy"
+
+async def proxies_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        text = "📭 *No proxies saved.*"
+    else:
+        lines = ["📃 *YOUR PROXIES*", "━━━━━━━━━━━━━━━━━━", ""]
+        for i, p in enumerate(proxies, 1):
+            display = p.split(':')[0] + ':' + p.split(':')[1]
+            lines.append(f"{i}. `{display}`")
+        text = "\n".join(lines)
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_proxies")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def proxies_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        text = "📭 *No proxies to check.*"
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_proxies")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        return
+    
+    await update.callback_query.edit_message_text("🔄 Checking proxies...")
+    
+    health_checker = ProxyHealthChecker(db, user_id)
+    results = await health_checker.check_all_proxies(proxies)
+    
+    alive = [r for r in results if r["alive"]]
+    dead = [r for r in results if not r["alive"]]
+    
+    lines = [
+        "❤️ *PROXY HEALTH RESULTS*",
+        "━━━━━━━━━━━━━━━━━━",
+        f"",
+        f"✅ Alive: {len(alive)}",
+        f"❌ Dead: {len(dead)}",
+    ]
+    
+    if alive:
+        lines.append(f"\n✅ *Fastest:*")
+        for i, r in enumerate(sorted(alive, key=lambda x: x["response_time"])[:3]):
+            display = r['proxy'].split(':')[0] + ':' + r['proxy'].split(':')[1]
+            lines.append(f"  {i+1}. `{display}` · {r['response_time']:.2f}s")
+    
+    if dead and dead[0].get("error"):
+        lines.append(f"\n⚠️ *Sample error:* {dead[0]['error']}")
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_proxies")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        "\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def proxies_clean_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🗑️ *CLEAN DEAD PROXIES*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Are you sure you want to remove all dead proxies?\n\n"
+        "This action cannot be undone."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes", callback_data="proxies_clean_yes")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="menu_proxies")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def proxies_clean_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        await update.callback_query.edit_message_text("📭 No proxies to clean.")
+        return
+    
+    await update.callback_query.edit_message_text("🔄 Cleaning proxies...")
+    
+    health_checker = ProxyHealthChecker(db, user_id)
+    results = await health_checker.check_all_proxies(proxies)
+    
+    alive_proxies = [r["proxy"] for r in results if r["alive"]]
+    dead_count = len([r for r in results if not r["alive"]])
+    
+    await user_manager.update_user_data(user_id, proxies=alive_proxies)
+    
+    text = (
+        f"🗑️ *CLEAN COMPLETE*\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Kept: {len(alive_proxies)}\n"
+        f"❌ Removed: {dead_count}"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_proxies")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+# ================== SUBMENÚ CARDS ==================
+async def show_cards_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data["cards"]
+    
+    text = (
+        "🧾 *CARDS MANAGER*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Total cards: `{len(cards)}`\n\n"
+        "What do you want to do?"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("📄 Upload cards (.txt)", callback_data="cards_upload")],
+        [InlineKeyboardButton("📃 List cards", callback_data="cards_list")],
+        [InlineKeyboardButton("❌ Remove card", callback_data="cards_remove")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def cards_upload_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📄 *UPLOAD CARDS*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Send a `.txt` file with cards in this format:\n"
+        "`NUMBER|MONTH|YEAR|CVV`\n\n"
+        "Example:\n"
+        "`4377110010309114|08|2026|501`\n"
+        "`5355221247797089|02|2028|986`\n\n"
+        "One card per line."
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_cards")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+    
+    user_state[update.effective_user.id] = "awaiting_cards_file"
+
+async def cards_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data["cards"]
+    
+    if not cards:
+        text = "📭 *No cards saved.*"
+    else:
+        lines = ["📃 *YOUR CARDS*", "━━━━━━━━━━━━━━━━━━", ""]
+        for i, card in enumerate(cards, 1):
+            bin_code = card.split('|')[0][:6]
+            last4 = card.split('|')[0][-4:]
+            lines.append(f"{i}. `{bin_code}xxxxxx{last4}`")
+        if len(cards) > 10:
+            lines.append(f"\n... and {len(cards)-10} more.")
+        text = "\n".join(lines)
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_cards")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def cards_remove_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data["cards"]
+    
+    if not cards:
+        text = "📭 *No cards to remove.*"
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_cards")]]
+    else:
+        text = "❌ *REMOVE CARD*\n━━━━━━━━━━━━━━━━━━\n\nSelect a card to remove:"
+        keyboard = []
+        for i, card in enumerate(cards, 1):
+            bin_code = card.split('|')[0][:6]
+            last4 = card.split('|')[0][-4:]
+            keyboard.append([InlineKeyboardButton(f"{i}. {bin_code}xxxxxx{last4}", callback_data=f"remove_card_{i}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="menu_cards")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+# ================== SUBMENÚ STATS ==================
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    total = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ?",
+        (user_id,)
+    )
+    total_count = total["count"] if total else 0
+    
+    charged = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status = 'charged'",
+        (user_id,)
+    )
+    charged_count = charged["count"] if charged else 0
+    
+    declined = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status IN ('declined', 'insufficient_funds', 'card_error')",
+        (user_id,)
+    )
+    declined_count = declined["count"] if declined else 0
+    
+    timeout = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status LIKE '%timeout%'",
+        (user_id,)
+    )
+    timeout_count = timeout["count"] if timeout else 0
+    
+    text = (
+        f"📊 *BOT STATISTICS*\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"Total checks: {total_count}\n"
+        f"✅ Approved: {charged_count}\n"
+        f"❌ Declined: {declined_count}\n"
+        f"⏱️ Timeout: {timeout_count}"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+
+# ================== SUBMENÚ SETTINGS ==================
+async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⚙️ *SETTINGS*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Current configuration:"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("⚡ Workers count", callback_data="settings_workers")],
+        [InlineKeyboardButton("⏱ Timeout info", callback_data="settings_timeout")],
+        [InlineKeyboardButton("🔒 Usage rules", callback_data="settings_rules")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def settings_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⚡ *WORKERS CONFIGURATION*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Max workers per user: `{MAX_WORKERS_PER_USER}`\n\n"
+        "The bot automatically adjusts workers based on:\n"
+        "• Number of alive proxies\n"
+        "• Timeout rate (>20% reduces workers)\n\n"
+        "To change the limit, use:\n"
+        "`/setworkers [number]`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⏱ *TIMEOUT CONFIGURATION*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"Connect timeout: `{TIMEOUT_CONFIG['connect']}s`\n"
+        f"Read timeout: `{TIMEOUT_CONFIG['sock_read']}s`\n"
+        f"Total timeout: `{TIMEOUT_CONFIG['total']}s`\n\n"
+        "These values are optimized for balance between speed and reliability."
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+async def settings_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🔒 *USAGE RULES*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"• Daily limit: `{DAILY_LIMIT_CHECKS}` checks\n"
+        f"• Mass limit: `{MASS_LIMIT_PER_HOUR}` per hour\n"
+        f"• Cooldown between mass: `{MASS_COOLDOWN_MINUTES}` minutes\n"
+        f"• Rate limit: `{RATE_LIMIT_SECONDS}s` between checks\n\n"
+        "These limits protect the bot from abuse."
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_settings")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
 # ================== INICIAR MASS CHECK ==================
 async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
     
-    # Verificar rate limit
     allowed, msg = await user_manager.check_rate_limit(user_id, "mass")
     if not allowed:
         await query.edit_message_text(msg)
@@ -1178,11 +1673,9 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ No valid cards found.")
         return
     
-    # Marcar que este usuario tiene un mass activo
     active_mass.add(user_id)
     cancel_mass[user_id] = False
     
-    # Mensaje inicial con barra vacía
     bar = create_progress_bar(0, len(valid_cards))
     text = (
         f"📦 *MASS CHECK IN PROGRESS*\n"
@@ -1209,7 +1702,6 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         speed = proc / elapsed if elapsed > 0 else 0
         bar = create_progress_bar(proc, total)
         
-        # Determinar ícono según tasa de timeout
         timeout_rate = to / proc if proc > 0 else 0
         if timeout_rate > 0.3:
             icon = "🔴"
@@ -1246,7 +1738,6 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await user_manager.increment_checks(user_id, "mass")
     active_mass.discard(user_id)
     
-    # Verificar si fue cancelado
     if cancel_mass.get(user_id, False):
         cancel_mass[user_id] = False
         text = (
@@ -1263,7 +1754,6 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await progress_msg.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
         return
     
-    # Resumen final
     avg_speed = len(valid_cards) / elapsed if elapsed > 0 else 0
     text = (
         f"✅ *MASS CHECK COMPLETED*\n"
@@ -1283,11 +1773,9 @@ async def mass_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await progress_msg.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
     
-    # Guardar resultados para descarga
     context.user_data['last_mass_results'] = results
     context.user_data['last_mass_cards'] = valid_cards
 
-# ================== DETENER MASS CHECK ==================
 async def mass_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
@@ -1298,7 +1786,6 @@ async def mass_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("No active mass check.")
 
-# ================== DOWNLOAD RESULTADOS ==================
 async def mass_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
@@ -1337,7 +1824,7 @@ async def mass_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(filename)
     await query.answer("Results sent!")
 
-# ================== MANEJO DE BOTONES ==================
+# ================== MANEJO DE BOTONES PRINCIPAL ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1345,33 +1832,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user_id = update.effective_user.id
     
-    # No permitir navegación si hay mass activo
     if user_id in active_mass and data != "mass_stop":
         await query.edit_message_text(
             "❌ Mass check in progress. Use STOP button to cancel."
         )
         return
     
-    if data == "mass_start":
+    # ===== NAVEGACIÓN PRINCIPAL =====
+    if data == "menu_main":
+        await show_main_menu(update, context, edit=True)
+    
+    # ===== CHECK CARD =====
+    elif data == "menu_check":
+        await show_check_menu(update, context)
+    elif data == "check_one":
+        text = (
+            "💳 *CHECK ONE CARD*\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "Send the card in this format:\n"
+            "`NUMBER|MONTH|YEAR|CVV`\n\n"
+            "Example:\n"
+            "`4377110010309114|08|2026|501`"
+        )
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_check")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        user_state[user_id] = "awaiting_single_card"
+    elif data == "check_howto":
+        await check_howto(update, context)
+    
+    # ===== MASS CHECK =====
+    elif data == "menu_mass":
+        await show_mass_menu(update, context)
+    elif data == "mass_start":
         await mass_start(update, context)
     elif data == "mass_stop":
         await mass_stop(update, context)
     elif data == "mass_download":
         await mass_download(update, context)
     elif data == "mass_workers":
-        text = (
-            "⚙️ *WORKERS SETTINGS*\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"Current max workers: `{MAX_WORKERS_PER_USER}`\n\n"
-            "Workers are automatically optimized based on:\n"
-            "• Number of alive proxies\n"
-            "• Timeout rate\n\n"
-            "To change the limit, use the command:\n"
-            "`/setworkers [number]`"
-        )
-        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_mass")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        await mass_workers_settings(update, context)
     elif data == "mass_upload":
         text = (
             "📄 *UPLOAD CARDS FOR MASS*\n"
@@ -1385,25 +1885,211 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
         user_state[user_id] = "awaiting_cards_file"
+    
+    # ===== SITES =====
+    elif data == "menu_sites":
+        await show_sites_menu(update, context)
+    elif data == "sites_add":
+        await sites_add_prompt(update, context)
+    elif data == "sites_list":
+        await sites_list(update, context)
+    elif data == "sites_remove":
+        await sites_remove_prompt(update, context)
+    elif data.startswith("remove_site_"):
+        try:
+            index = int(data.split("_")[2]) - 1
+            user_data = await user_manager.get_user_data(user_id)
+            sites = user_data["sites"]
+            
+            if 0 <= index < len(sites):
+                removed = sites.pop(index)
+                await user_manager.update_user_data(user_id, sites=sites)
+                await query.edit_message_text(f"✅ Site removed: {removed}")
+            else:
+                await query.edit_message_text("❌ Invalid index.")
+        except:
+            await query.edit_message_text("❌ Error removing site.")
+        
+        await asyncio.sleep(2)
+        await show_sites_menu(update, context)
+    
+    # ===== PROXIES =====
+    elif data == "menu_proxies":
+        await show_proxies_menu(update, context)
+    elif data == "proxies_add":
+        await proxies_add_prompt(update, context)
+    elif data == "proxies_list":
+        await proxies_list(update, context)
+    elif data == "proxies_health":
+        await proxies_health(update, context)
+    elif data == "proxies_clean":
+        await proxies_clean_confirm(update, context)
+    elif data == "proxies_clean_yes":
+        await proxies_clean_execute(update, context)
+    
+    # ===== CARDS =====
+    elif data == "menu_cards":
+        await show_cards_menu(update, context)
+    elif data == "cards_upload":
+        await cards_upload_prompt(update, context)
+    elif data == "cards_list":
+        await cards_list(update, context)
+    elif data == "cards_remove":
+        await cards_remove_prompt(update, context)
+    elif data.startswith("remove_card_"):
+        try:
+            index = int(data.split("_")[2]) - 1
+            user_data = await user_manager.get_user_data(user_id)
+            cards = user_data["cards"]
+            
+            if 0 <= index < len(cards):
+                removed = cards.pop(index)
+                bin_code = removed.split('|')[0][:6]
+                last4 = removed.split('|')[0][-4:]
+                await user_manager.update_user_data(user_id, cards=cards)
+                await query.edit_message_text(f"✅ Card removed: {bin_code}xxxxxx{last4}")
+            else:
+                await query.edit_message_text("❌ Invalid index.")
+        except:
+            await query.edit_message_text("❌ Error removing card.")
+        
+        await asyncio.sleep(2)
+        await show_cards_menu(update, context)
+    
+    # ===== STATS =====
+    elif data == "menu_stats":
+        await show_stats(update, context)
+    
+    # ===== SETTINGS =====
+    elif data == "menu_settings":
+        await show_settings(update, context)
+    elif data == "settings_workers":
+        await settings_workers(update, context)
+    elif data == "settings_timeout":
+        await settings_timeout(update, context)
+    elif data == "settings_rules":
+        await settings_rules(update, context)
+    
     else:
-        # Otros menús (simplificados para este ejemplo)
-        if data == "menu_mass":
-            await show_mass_menu(update, context)
-        elif data == "menu_main":
-            await show_main_menu(update, context, edit=True)
-        else:
-            # Respuesta genérica para otros menús
-            await query.edit_message_text(
-                f"Menú: {data}\n\nEsta función está en desarrollo.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back", callback_data="menu_main")
-                ]])
+        await query.edit_message_text(
+            f"❌ Unknown option: {data}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Back", callback_data="menu_main")
+            ]])
+        )
+
+# ================== MANEJO DE MENSAJES ==================
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if user_id in active_mass:
+        await update.message.reply_text("❌ Mass check in progress. Use /stop to cancel.")
+        return
+    
+    if user_id in user_state:
+        state = user_state[user_id]
+        
+        if state == "awaiting_site_url":
+            url = text.strip()
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            
+            user_data = await user_manager.get_user_data(user_id)
+            user_data["sites"].append(url)
+            await user_manager.update_user_data(user_id, sites=user_data["sites"])
+            
+            await update.message.reply_text(f"✅ Site added: {url}")
+            del user_state[user_id]
+            
+            keyboard = [[InlineKeyboardButton("🔙 Back to Sites", callback_data="menu_sites")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("What's next?", reply_markup=reply_markup)
+        
+        elif state == "awaiting_proxy":
+            proxy_input = text.strip()
+            colon_count = proxy_input.count(':')
+            
+            if colon_count == 1:
+                proxy = f"{proxy_input}::"
+            elif colon_count == 3:
+                proxy = proxy_input
+            else:
+                await update.message.reply_text("❌ Invalid proxy format.")
+                return
+            
+            user_data = await user_manager.get_user_data(user_id)
+            user_data["proxies"].append(proxy)
+            await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
+            
+            display = proxy.split(':')[0] + ':' + proxy.split(':')[1]
+            await update.message.reply_text(f"✅ Proxy added: {display}")
+            del user_state[user_id]
+            
+            keyboard = [[InlineKeyboardButton("🔙 Back to Proxies", callback_data="menu_proxies")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text("What's next?", reply_markup=reply_markup)
+        
+        elif state == "awaiting_single_card":
+            card_str = text.strip()
+            card_data = CardValidator.parse_card(card_str)
+            
+            if not card_data:
+                await update.message.reply_text("❌ Invalid card format.")
+                return
+            
+            user_data = await user_manager.get_user_data(user_id)
+            sites = user_data["sites"]
+            proxies = user_data["proxies"]
+            
+            if not sites or not proxies:
+                await update.message.reply_text("❌ Missing sites or proxies.")
+                return
+            
+            msg = await update.message.reply_text("🔄 Checking...")
+            
+            site = sites[0]
+            proxy = proxies[0]
+            
+            result = await card_service.check_single(user_id, card_data, site, proxy)
+            await user_manager.increment_checks(user_id, "check")
+            
+            emoji = get_status_emoji(result.status)
+            confidence_text = f"({result.confidence.value})"
+            
+            response = (
+                f"{emoji} *RESULT*\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"💳 Card: `{result.context.card_bin}xxxxxx{result.context.card_last4}`\n"
+                f"📊 Status: {emoji} `{result.status.value.upper()}` {confidence_text}\n"
+                f"📝 Reason: {result.reason}\n"
+                f"⚡ Time: `{result.context.response_time:.2f}s`\n"
             )
+            
+            if result.price != "N/A":
+                response += f"💰 Price: `{result.price}`\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 Back to Check", callback_data="menu_check")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await msg.edit_text(response, parse_mode="Markdown", reply_markup=reply_markup)
+            
+            del user_state[user_id]
+        
+        else:
+            del user_state[user_id]
+            await show_main_menu(update, context, edit=False)
+    
+    else:
+        await show_main_menu(update, context, edit=False)
 
 # ================== MANEJO DE ARCHIVOS ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     document = update.message.document
+    
+    if user_id in active_mass:
+        await update.message.reply_text("❌ Mass check in progress. Use /stop to cancel.")
+        return
     
     if not document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a .txt file.")
@@ -1437,7 +2123,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Invalid: {len(invalid)}"
     )
     
-    keyboard = [[InlineKeyboardButton("🔙 Back to Mass", callback_data="menu_mass")]]
+    keyboard = [[InlineKeyboardButton("🔙 Back to Cards", callback_data="menu_cards")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(response, parse_mode="Markdown", reply_markup=reply_markup)
     
@@ -1456,6 +2142,29 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏹ Stopping mass check...")
     else:
         await update.message.reply_text("No active mass check.")
+
+# ================== COMANDO SETWORKERS ==================
+async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Not authorized.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(f"Current max workers: {MAX_WORKERS_PER_USER}")
+        return
+    
+    try:
+        new_value = int(context.args[0])
+        if 1 <= new_value <= 20:
+            global MAX_WORKERS_PER_USER
+            MAX_WORKERS_PER_USER = new_value
+            await update.message.reply_text(f"✅ Max workers set to {new_value}")
+        else:
+            await update.message.reply_text("❌ Value must be between 1 and 20.")
+    except:
+        await update.message.reply_text("❌ Invalid number.")
 
 # ================== MAIN ==================
 async def shutdown(application: Application):
@@ -1479,7 +2188,7 @@ async def post_init(application: Application):
     
     card_service = CardCheckService(db, user_manager, checker)
     
-    logger.info("✅ Bot inicializado con barra de progreso en tiempo real")
+    logger.info("✅ Bot inicializado con todos los menús")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -1488,14 +2197,16 @@ def main():
     # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("setworkers", setworkers_command))
     
     # Manejador de botones
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Manejador de documentos
+    # Manejadores de mensajes y documentos
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado con barra de progreso en tiempo real")
+    logger.info("🚀 Bot iniciado con todos los menús funcionando")
     app.run_polling()
 
 if __name__ == "__main__":
