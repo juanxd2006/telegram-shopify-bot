@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN PROFESIONAL
-Con clase Settings para configuración dinámica sin global.
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CORREGIDA
+Con detección inteligente de archivos (proxies > tarjetas), clase Settings, y todos los menús.
 """
 
 import os
@@ -383,24 +383,58 @@ class CardValidator:
             "last4": number[-4:]
         }
 
-# ================== DETECCIÓN INTELIGENTE ==================
+# ================== DETECCIÓN INTELIGENTE CORREGIDA ==================
 def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
+    """
+    Detección INTELIGENTE de tipo de línea.
+    PRIORIDAD: 1. Sitios, 2. Proxies, 3. Tarjetas
+    """
     line = line.strip()
     if not line:
         return None, None
 
+    # ===== 1. DETECTAR SITIOS (URLs) =====
     if line.startswith(('http://', 'https://')):
-        return 'site', line
+        rest = line.split('://')[1]
+        if '.' in rest and not rest.startswith('.') and ' ' not in rest:
+            return 'site', line
 
+    # ===== 2. DETECTAR PROXIES (AHORA PRIMERO) =====
+    if not line.startswith(('http://', 'https://')):
+        parts = line.split(':')
+        
+        # Proxy simple: host:port
+        if len(parts) == 2:
+            host, port = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        # Proxy con autenticación: host:port:user:pass
+        elif len(parts) == 4:
+            host, port, user, password = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        # Proxy formato API: host:port::
+        elif len(parts) == 3 and parts[2] == '':
+            host, port, _ = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+
+    # ===== 3. DETECTAR TARJETAS =====
     if '|' in line:
         parts = line.split('|')
-        if len(parts) == 4 and all(p.strip() for p in parts):
-            return 'card', line
-
-    if ':' in line:
-        parts = line.split(':')
-        if len(parts) in [2, 4] or (len(parts) == 3 and parts[2] == ''):
-            return 'proxy', line
+        if len(parts) == 4:
+            numero, mes, año, cvv = parts
+            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
+                mes.isdigit() and 1 <= int(mes) <= 12 and
+                año.isdigit() and len(año) in (2, 4) and
+                cvv.isdigit() and len(cvv) in (3, 4)):
+                if CardValidator.luhn_check(numero):
+                    return 'card', line
 
     return None, None
 
@@ -2087,8 +2121,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await show_main_menu(update, context, edit=False)
 
-# ================== MANEJO DE ARCHIVOS ==================
+# ================== MANEJO DE ARCHIVOS CORREGIDO ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa archivos .txt con detección inteligente (proxiles primero)"""
     user_id = update.effective_user.id
     document = update.message.document
     
@@ -2105,35 +2140,75 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = file_content.decode('utf-8', errors='ignore')
     lines = text.splitlines()
     
+    sites_added = []
+    proxies_added = []
     cards_added = []
-    invalid = []
+    invalid_lines = []
+    unknown = []
     
-    for line in lines:
-        line = line.strip()
+    for raw_line in lines:
+        line = raw_line.strip()
         if not line:
             continue
-        if CardValidator.parse_card(line):
-            cards_added.append(line)
+        
+        line_type, normalized = detect_line_type(line)
+        
+        if line_type == 'site':
+            sites_added.append(normalized)
+        elif line_type == 'proxy':
+            # Normalizar proxy simple a formato API
+            if normalized.count(':') == 1:
+                normalized = f"{normalized}::"
+            proxies_added.append(normalized)
+        elif line_type == 'card':
+            # Validar tarjeta completa
+            card_data = CardValidator.parse_card(normalized)
+            if card_data:
+                cards_added.append(normalized)
+            else:
+                invalid_lines.append(line)
         else:
-            invalid.append(line)
+            unknown.append(line)
     
+    # Guardar en base de datos
     user_data = await user_manager.get_user_data(user_id)
-    user_data["cards"].extend(cards_added)
-    await user_manager.update_user_data(user_id, cards=user_data["cards"])
+    updated = False
     
-    response = (
-        f"📥 *CARDS IMPORTED*\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ Valid: {len(cards_added)}\n"
-        f"❌ Invalid: {len(invalid)}"
-    )
+    if sites_added:
+        user_data["sites"].extend(sites_added)
+        updated = True
+    if proxies_added:
+        user_data["proxies"].extend(proxies_added)
+        updated = True
+    if cards_added:
+        user_data["cards"].extend(cards_added)
+        updated = True
     
-    keyboard = [[InlineKeyboardButton("🔙 Back to Cards", callback_data="menu_cards")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(response, parse_mode="Markdown", reply_markup=reply_markup)
+    if updated:
+        await user_manager.update_user_data(
+            user_id, 
+            sites=user_data["sites"], 
+            proxies=user_data["proxies"], 
+            cards=user_data["cards"]
+        )
     
-    if user_id in user_state and user_state[user_id] == "awaiting_cards_file":
-        del user_state[user_id]
+    # Mensaje de respuesta
+    msg_parts = []
+    if sites_added:
+        msg_parts.append(f"✅ {len(sites_added)} sitio(s) añadido(s)")
+    if proxies_added:
+        msg_parts.append(f"✅ {len(proxies_added)} proxy(s) añadido(s)")
+    if cards_added:
+        msg_parts.append(f"✅ {len(cards_added)} tarjeta(s) válida(s) añadida(s)")
+    if invalid_lines:
+        msg_parts.append(f"⚠️ {len(invalid_lines)} tarjeta(s) inválida(s) rechazada(s)")
+    if unknown:
+        msg_parts.append(f"⚠️ {len(unknown)} línea(s) no reconocida(s)")
+    
+    if not msg_parts:
+        await update.message.reply_text("❌ No valid data found in file.")
+    else:
+        await update.message.reply_text("\n".join(msg_parts))
 
 # ================== COMANDO START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2197,7 +2272,7 @@ async def post_init(application: Application):
     
     card_service = CardCheckService(db, user_manager, checker)
     
-    logger.info("✅ Bot inicializado con clase Settings")
+    logger.info("✅ Bot inicializado con clase Settings y detección corregida")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2215,7 +2290,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado sin errores de global")
+    logger.info("🚀 Bot iniciado con detección inteligente corregida")
     app.run_polling()
 
 if __name__ == "__main__":
