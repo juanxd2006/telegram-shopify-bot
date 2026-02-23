@@ -1,0 +1,115 @@
+RESULTADOS MASS CHECK - 20260222_121504
+============================================================
+
+Tarjetas procesadas: 100
+Estadísticas:
+  CHARGE: 0
+  LIVE: 0
+  CAPTCHA: 0
+  DECLINE: 0
+  INSUFFICIENT_FUNDS: 0
+  TIMEOUT: 90
+  ERROR: 0
+  UNKNOWN: 10
+
+Detalle:
+5438279578960818|07|2028|984 | UNKNOWN | https://comedy.myshopify.com
+4232230265897723|09|2028|242 | UNKNOWN | https://ezstoredesign.myshopify.com
+4088805015185092|01|2026|164 | UNKNOWN | https://rowenamay.myshopify.com
+4246315350039879|08|2028|520 | UNKNOWN | https://wifi.myshopify.com
+4019240174109986|12|2027|852 | UNKNOWN | https://sorrycc.myshopify.com
+5133139841470086|07|2026|784 | UNKNOWN | https://futurestore.myshopify.com
+4430450302803357|01|2029|455 | UNKNOWN | https://officeconsignments.myshopify.com
+4289691908878374|05|2029|384 | UNKNOWN | https://www.pour-n-restore.com
+5287490991419413|11|2028|907 | UNKNOWN | https://dodgeit.myshopify.com
+4400665228952287|11|2029|948 | UNKNOWN | https://macksfoto.myshopify.com
+4221082919724859|05|2027|767 | TIMEOUT | https://miriamlovell.myshopify.com
+4552058159468828|05|2029|811 | TIMEOUT | https://garukabars.com
+4060000191168409|04|2030|401 | TIMEOUT | https://toddj.myshopify.com
+2340107308886306|11|2029|132 | TIMEOUT | https://nasadenova.myshopify.com
+4002609983208404|02|2027|252 | TIMEOUT | https://bucky.myshopify.com
+4563018560354378|07|2029|088 | TIMEOUT | https://netinfox.myshopify.com
+4400664688375162|11|2028|492 | TIMEOUT | https://velvetbath.myshopify.com
+5146160153817362|02|2027|260 | TIMEOUT | https://testashop.myshopify.com
+5193080110625744|02|2026|289 | TIMEOUT | https://alex77.myshopify.com
+4239094726038043|04|2027|074 | TIMEOUT | https://joebob.myshopify.com
+5414963811518842|09|2028|026 | TIMEOUT | https://vygifts.myshopify.com
+4837398554206523|02|2026|455 | TIMEOUT | https://maran.myshopify.com
+5500696120745541|06|2026|944 | TIMEOUT | https://leadersstudio.myshopify.com
+4556686457531040|01|2029|348 | TIMEOUT | https://advents.myshopify.com
+4400661703848173|07|2030|664 | TIMEOUT | https://achedrick.myshopify.com
+4705380306455920|08|2031|821 | TIMEOUT | https://seandong.myshopify.com
+5523426068472376|03|2029|709 | TIMEOUT | https://lincolncitygifts.com
+4108720113676445|07|2028|180 | TIMEOUT | https://bugmeno.myshopify.com
+4082582181446253|06|2026|329 | TIMEOUT | https://joebob.myshopify.com
+5554214132693132|03|2029|296 | TIMEOUT | https://brinquedos.myshopify.com
+5594182443912941|12|2028|018 | TIMEOUT | https://tamoko.myshopify.com
+4802138813957883|01|2026|674 | TIMEOUT | https://smtest.myshopify.com
+4400666850034063|02|2030|428 | TIMEOUT | https://cruel.myshopify.com
+4506190618571095|09|2028|843 | TIMEOUT | https://www.pour-n-restore.com
+4466133340896719|01|2030|203 | TIMEOUT | https://newtypeofficial.com
+4400665244529671|07|2030|744 | TIMEOUT | https://babyapl.myshopify.com
+5573507330930678|09|2027|595 | TIMEOUT | https://yakshatjewels.myshopify.com
+5299508254676720|04|2028|399 | TIMEOUT | https://www.simplyelegantchaircovers.com
+5276496303731539|02|2027|758 | TIMEOUT | https://turnkey.myshopify.com
+4972029814063330|04|2029|194 | TIMEOUT | https://the-shop.myshopify.com
+4352739029298030|10|2029|305 | TIMEOUT | https://schoolsupplyboxes.com
+4858803948737806|07|2029|874 | TIMEOUT | https://banjoreilly.myshopify.com
+4402606949419865|01|2030|037 | TIMEOUT | https://sugarnspiceartworks.myshopify.com
+4770282706329004|07|2026|360 | TIMEOUT | https://infuntion.myshopify.com
+4519912196992798|06|2028|975 | TIMEOUT | https://designedbyeh.myshopify.com
+4972029852615504|01|2027|851 | TIMEOUT | https://infuntion.myshopify.com
+5117681033398971|07|2028|699 | TIMEOUT | https://breannetrammell.myshopify.com
+5333171159427588|01|2027|773 | TIMEOUT | https://www.bountifulbaby.com
+4828210013742728|10|2029|456 | TIMEOUT | https://boxedgreens.com
+4132274973984648|03|2029|627 | TIMEOUT | https://scorenn.com
+4700076161819367|04|2026|592 | TIMEOUT | https://avon.myshopify.com
+4544046363359181|04|2028|973 | TIMEOUT | https://kingdomcomecards.com
+4269448151966628|02|2029|194 | TIMEOUT | https://www.elbadulake.es
+5350913801621615|06|2026|903 | TIMEOUT | https://emulateproductions.myshopify.com
+4347692062615859|03|2030|191 | TIMEOUT | https://barrygee.myshopify.com
+5332480301881142|10|2026|411 | TIMEOUT | https://pablodgavilan.myshopify.com
+4105311122970343|06|2027|260 | TIMEOUT | https://mezcla.myshopify.com
+5121079816875618|10|2029|623 | TIMEOUT | https://umade.myshopify.com
+4687427644919596|07|2029|363 | TIMEOUT | https://joker.myshopify.com
+4288039142066300|01|2026|210 | TIMEOUT | https://winecellar.myshopify.com
+5147592128689923|03|2029|010 | TIMEOUT | https://spankylicious.myshopify.com
+4400660573427761|01|2029|952 | TIMEOUT | https://pamelanielsen.com
+4147202717572497|12|2029|209 | TIMEOUT | https://pdfxchange.myshopify.com
+4645546152839028|06|2030|279 | TIMEOUT | https://redorb.myshopify.com
+4534652342054850|03|2030|642 | TIMEOUT | https://annas.myshopify.com
+4506445239443516|09|2029|844 | TIMEOUT | https://phreekit.myshopify.com
+5519438773111781|10|2028|048 | TIMEOUT | https://monkeybanana.myshopify.com
+4580264713762872|01|2027|049 | TIMEOUT | https://i55bookfairs.com
+4190024222574164|01|2026|862 | TIMEOUT | https://theatre.myshopify.com
+5275150045916616|03|2029|725 | TIMEOUT | https://officeconsignments.myshopify.com
+4400662187602706|12|2029|553 | TIMEOUT | https://obirac.myshopify.com
+5257838608420305|01|2028|633 | TIMEOUT | https://niggi.myshopify.com
+4759738237036207|07|2029|158 | TIMEOUT | https://lemagasin.myshopify.com
+4295442513558965|07|2033|442 | TIMEOUT | https://innersection.myshopify.com
+4708363006886021|01|2031|922 | TIMEOUT | https://water.myshopify.com
+4981727513056005|11|2027|007 | TIMEOUT | https://scoleman.myshopify.com
+5566604396897641|09|2027|758 | TIMEOUT | https://ciamor.com
+5356668098337358|01|2026|228 | TIMEOUT | https://violetvalley.myshopify.com
+5343480045985685|01|2026|577 | TIMEOUT | https://bughunterbug.com
+4342580215758525|05|2028|597 | TIMEOUT | https://advents.myshopify.com
+5524334584448111|10|2027|474 | TIMEOUT | https://strapandzipper.myshopify.com
+4117769398127326|05|2028|645 | TIMEOUT | https://akeihorse.myshopify.com
+4400667485664613|09|2027|622 | TIMEOUT | https://nomatrix.myshopify.com
+5114130003990493|10|2028|875 | TIMEOUT | https://graines-barbarin.myshopify.com
+5524334497973346|01|2030|346 | TIMEOUT | https://weebitshop.myshopify.com
+4051726434770418|12|2029|584 | TIMEOUT | https://stardust.myshopify.com
+5361400096228238|06|2027|230 | TIMEOUT | https://stardust.myshopify.com
+4539329429003101|03|2029|940 | TIMEOUT | https://advents.myshopify.com
+4262456974038811|06|2026|554 | TIMEOUT | https://xavierlouvo.myshopify.com
+4355467183457013|01|2028|172 | TIMEOUT | https://cruel.myshopify.com
+4497732230550246|08|2030|411 | TIMEOUT | https://twigag.myshopify.com
+5443471588334539|07|2030|778 | TIMEOUT | https://srle.myshopify.com
+4854524324432143|06|2028|728 | TIMEOUT | https://garukabars.com
+4865600005165181|11|2029|200 | TIMEOUT | https://i55bookfairs.com
+4134440109530633|01|2026|811 | TIMEOUT | https://pablodgavilan.myshopify.com
+5220426360884712|04|2026|527 | TIMEOUT | https://testikauppa.myshopify.com
+5430244337910080|08|2028|900 | TIMEOUT | https://eonic.myshopify.com
+4347692056055211|07|2029|867 | TIMEOUT | https://store.kittyhawk.com
+4000230110891962|05|2029|541 | TIMEOUT | https://e-shop.myshopify.com
+5440079303372693|08|2030|879 | TIMEOUT | https://naturwaren.myshopify.com

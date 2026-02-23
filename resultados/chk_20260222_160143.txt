@@ -1,0 +1,14 @@
+RESULTADO CHK - 20260222_160143
+==================================================
+
+Tarjeta: 5355221247797089|02/2028|986
+Sitio: https://sponsormetapefb.com
+Proxy: 186.148.180.46:999
+Tipo: UNKNOWN
+Código: 200
+Tiempo: 16.47s
+Precio: $7.0
+
+RESPUESTA COMPLETA:
+------------------------------
+{"Price":"7.00","Response":"Error in 1st Req => Recv failure: Connection reset by peer"}

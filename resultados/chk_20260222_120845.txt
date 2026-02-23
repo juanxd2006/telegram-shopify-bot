@@ -1,0 +1,14 @@
+RESULTADO CHK - 20260222_120845
+==================================================
+
+Tarjeta: 4147202608926197|05|2028|797
+Sitio: https://www.antstores.com
+Proxy: 104.238.30.58:63744
+Tipo: UNKNOWN
+Código: 200
+Tiempo: 37.88s
+Precio: $8.42
+
+RESPUESTA COMPLETA:
+------------------------------
+{"Gateway":"Normal","Price":"8.42","Response":"r4 token empty","Status":"true"}

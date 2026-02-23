@@ -1,0 +1,14 @@
+RESULTADO CHK - 20260222_125123
+==================================================
+
+Tarjeta: 4450863131147009|06|2029|534
+Sitio: https://lemondale.myshopify.com
+Proxy: 104.238.30.40:59741
+Tipo: UNKNOWN
+Código: 200
+Tiempo: 25.40s
+Precio: $8.99
+
+RESPUESTA COMPLETA:
+------------------------------
+{"Price":"8.99","Response":"py id empty"}

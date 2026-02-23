@@ -1,0 +1,14 @@
+RESULTADO CHK - 20260222_160224
+==================================================
+
+Tarjeta: 5355221247797089|02/2028|986
+Sitio: https://www.bountifulbaby.com
+Proxy: 72.56.59.17:61931
+Tipo: UNKNOWN
+Código: 200
+Tiempo: 25.19s
+Precio: $14.95
+
+RESPUESTA COMPLETA:
+------------------------------
+{"Price":"14.95","Response":"r2 id empty"}
