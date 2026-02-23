@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para verificar tarjetas - VERSIÓN PROFESIONAL ULTRA
-Con detección INTELIGENTE de archivos, validación real de tarjetas,
-aprendizaje con decay, rate limiting y manejo de mensajes largos.
-Adaptado para Railway con variables de entorno.
+Con barra de progreso en tiempo real, detección INTELIGENTE de archivos,
+validación real de tarjetas, aprendizaje con decay, rate limiting y manejo de mensajes largos.
 """
 
 import os
@@ -26,10 +25,10 @@ from telegram import Update, Document
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import aiohttp
 
-# ================== CONFIGURACIÓN SEGURA (RAILWAY) ==================
+# ================== CONFIGURACIÓN SEGURA ==================
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ ERROR: BOT_TOKEN no está configurado. Debes añadirlo en las variables de entorno de Railway.")
+    raise ValueError("❌ ERROR: BOT_TOKEN no está configurado. Debes añadirlo en las variables de entorno.")
 
 API_URL = os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php")
 DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
@@ -37,12 +36,24 @@ MAX_WORKERS_PER_USER = int(os.environ.get("MAX_WORKERS", 10))
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
 DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
 
+# Diccionario para controlar cancelación
+cancel_mass = {}
+
 # Logging profesional
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ================== FUNCIÓN PARA BARRA DE PROGRESO ==================
+def create_progress_bar(current: int, total: int, width: int = 20) -> str:
+    """Crea una barra de progreso visual"""
+    if total == 0:
+        return "[" + "░" * width + "]"
+    filled = int((current / total) * width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}]"
 
 # ================== ENUMS Y DATACLASSES ==================
 class CheckStatus(Enum):
@@ -170,50 +181,39 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
         return None, None
 
     # ===== 1. DETECTAR SITIOS (URLs) =====
-    # Una URL SIEMPRE empieza con http:// o https://
     if line.startswith(('http://', 'https://')):
-        # Verificación adicional: debe tener un dominio válido
         rest = line.split('://')[1]
         if '.' in rest and not rest.startswith('.') and ' ' not in rest:
             return 'site', line
 
     # ===== 2. DETECTAR TARJETAS =====
-    # Formato: NÚMERO|MES|AÑO|CVV
     if '|' in line:
         parts = line.split('|')
         if len(parts) == 4:
             numero, mes, año, cvv = parts
-            # Verificaciones básicas de formato
             if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
                 mes.isdigit() and 1 <= int(mes) <= 12 and
                 año.isdigit() and len(año) in (2, 4) and
                 cvv.isdigit() and len(cvv) in (3, 4)):
-                # Validación Luhn completa
                 if CardValidator.luhn_check(numero):
                     return 'card', line
 
     # ===== 3. DETECTAR PROXIES =====
-    # Un proxy NUNCA empieza con http://
     if not line.startswith(('http://', 'https://')):
         parts = line.split(':')
         
-        # Proxy simple: host:port
         if len(parts) == 2:
             host, port = parts
-            # El puerto debe ser un número válido
             if port.isdigit() and 1 <= int(port) <= 65535:
-                # El host no debe tener espacios ni caracteres raros
                 if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
                     return 'proxy', line
         
-        # Proxy con autenticación: host:port:user:pass
         elif len(parts) == 4:
             host, port, user, password = parts
             if port.isdigit() and 1 <= int(port) <= 65535:
                 if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
                     return 'proxy', line
         
-        # Proxy formato API: host:port::
         elif len(parts) == 3 and parts[2] == '':
             host, port, _ = parts
             if port.isdigit() and 1 <= int(port) <= 65535:
@@ -233,7 +233,6 @@ class Database:
         self._initialized = False
         
     def _init_db_sync(self):
-        """Inicialización síncrona de la BD"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -299,7 +298,6 @@ class Database:
             conn.commit()
 
     async def initialize(self):
-        """Inicialización asíncrona"""
         if self._initialized:
             return
         
@@ -311,7 +309,6 @@ class Database:
         logger.info("✅ Base de datos inicializada")
 
     async def _batch_processor(self):
-        """Procesa inserts en batch cada 5 segundos"""
         while True:
             try:
                 await asyncio.sleep(5)
@@ -334,7 +331,6 @@ class Database:
                 logger.error(f"Error en batch processor: {e}")
 
     async def _execute_batch(self, batch: List[tuple]):
-        """Ejecuta un batch de inserts"""
         try:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._sync_execute_batch, batch)
@@ -342,7 +338,6 @@ class Database:
             logger.error(f"Error en batch insert: {e}")
 
     def _sync_execute_batch(self, batch: List[tuple]):
-        """Ejecución síncrona del batch"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.executemany(
@@ -355,7 +350,6 @@ class Database:
             conn.commit()
 
     async def queue_result(self, user_id: int, result: CheckResult):
-        """Encola un resultado para insert batch"""
         if not self._initialized:
             await self.initialize()
         async with self._batch_lock:
@@ -366,7 +360,6 @@ class Database:
             ))
 
     async def execute(self, query: str, params: tuple = ()):
-        """Ejecuta una query de escritura (con lock)"""
         if not self._initialized:
             await self.initialize()
         async with self._write_lock:
@@ -383,7 +376,6 @@ class Database:
             return cursor
 
     async def fetch_one(self, query: str, params: tuple = ()):
-        """Obtiene una fila (solo lectura)"""
         if not self._initialized:
             await self.initialize()
         loop = asyncio.get_event_loop()
@@ -400,7 +392,6 @@ class Database:
             return dict(row) if row else None
 
     async def fetch_all(self, query: str, params: tuple = ()):
-        """Obtiene todas las filas"""
         if not self._initialized:
             await self.initialize()
         loop = asyncio.get_event_loop()
@@ -416,7 +407,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     async def cleanup_old_results(self, days: int = 7):
-        """Limpia resultados antiguos"""
         if not self._initialized:
             await self.initialize()
         await self.execute(
@@ -425,7 +415,6 @@ class Database:
         )
 
     async def shutdown(self):
-        """Cierra la BD gracefulmente"""
         if self._batch_task:
             self._batch_task.cancel()
             try:
@@ -444,7 +433,6 @@ class LearningSystem:
         self._cache_time = {}
 
     async def update(self, result: CheckResult):
-        """Actualiza estadísticas con penalización diferenciada"""
         site = result.site
         proxy = result.proxy
         elapsed = result.response_time
@@ -486,7 +474,6 @@ class LearningSystem:
         self._score_cache.pop(f"{site}|{proxy}", None)
 
     async def get_score(self, site: str, proxy: str) -> float:
-        """Calcula puntuación ponderada con caché"""
         cache_key = f"{site}|{proxy}"
         
         if cache_key in self._score_cache:
@@ -520,7 +507,6 @@ class LearningSystem:
         return score
 
     async def choose_combination(self, sites: List[str], proxies: List[str]) -> Tuple[str, str]:
-        """Elige combinación usando ε-greedy"""
         if random.random() < self.EPSILON:
             return random.choice(sites), random.choice(proxies)
         
@@ -609,7 +595,6 @@ class UltraFastChecker:
             await self.connector.close()
 
     async def check_card(self, site: str, proxy: str, card_data: Dict) -> CheckResult:
-        """Verifica una tarjeta con manejo profesional de errores"""
         card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
         params = {"site": site, "cc": card_str, "proxy": proxy}
         
@@ -724,7 +709,6 @@ class UserManager:
         self._command_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def check_rate_limit(self, user_id: int) -> Tuple[bool, str]:
-        """Verifica rate limiting por usuario"""
         today = datetime.now().date()
         
         row = await self.db.fetch_one(
@@ -760,14 +744,12 @@ class UserManager:
         return True, ""
 
     async def increment_checks(self, user_id: int):
-        """Incrementa contador de verificaciones"""
         await self.db.execute(
             "UPDATE rate_limits SET checks_today = checks_today + 1, last_command = ? WHERE user_id = ?",
             (datetime.now(), user_id)
         )
 
     async def get_user_data(self, user_id: int) -> Dict:
-        """Obtiene datos del usuario"""
         row = await self.db.fetch_one(
             "SELECT sites, proxies, cards FROM users WHERE user_id = ?",
             (user_id,)
@@ -787,7 +769,6 @@ class UserManager:
         }
 
     async def update_user_data(self, user_id: int, sites=None, proxies=None, cards=None):
-        """Actualiza datos del usuario"""
         current = await self.get_user_data(user_id)
         
         if sites is not None:
@@ -808,13 +789,11 @@ class UserManager:
         )
 
     async def register_task(self, user_id: int, task_id: str, task: asyncio.Task):
-        """Registra una tarea para poder cancelarla"""
         if user_id not in self.rate_limits:
             self.rate_limits[user_id] = UserRateLimit()
         self.rate_limits[user_id].tasks[task_id] = task
 
     async def cancel_user_tasks(self, user_id: int):
-        """Cancela todas las tareas de un usuario"""
         if user_id in self.rate_limits:
             for task_id, task in self.rate_limits[user_id].tasks.items():
                 if not task.done():
@@ -829,7 +808,6 @@ class CardCheckService:
         self.checker = checker
 
     async def check_single(self, user_id: int, card_data: Dict, site: str, proxy: str) -> CheckResult:
-        """Verifica una sola tarjeta"""
         result = await self.checker.check_card(site, proxy, card_data)
         
         await self.db.queue_result(user_id, result)
@@ -850,8 +828,6 @@ class CardCheckService:
         num_workers: int,
         progress_callback=None
     ) -> Tuple[List[CheckResult], int, float]:
-        """Verificación masiva con workers coordinados"""
-        
         queue = asyncio.Queue()
         for card in cards:
             await queue.put(card)
@@ -868,7 +844,7 @@ class CardCheckService:
             worker_processed = 0
             worker_success = 0
             
-            while not queue.empty():
+            while not queue.empty() and not cancel_mass.get(user_id, False):
                 try:
                     card_data = await asyncio.wait_for(queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
@@ -886,14 +862,14 @@ class CardCheckService:
                 await learning.update(result)
                 await self.db.queue_result(user_id, result)
                 
-                if progress_callback and worker_processed % 5 == 0:
-                    await progress_callback(
-                        processed=worker_processed,
-                        success=worker_success
-                    )
+                processed += 1
+                if result.success:
+                    success_count += 1
+                
+                if progress_callback:
+                    await progress_callback(processed, success_count, len(cards))
             
-            processed += worker_processed
-            success_count += worker_success
+            return worker_processed, worker_success
         
         tasks = []
         for i in range(num_workers):
@@ -908,6 +884,8 @@ class CardCheckService:
             for task in tasks:
                 if not task.done():
                     task.cancel()
+        except asyncio.CancelledError:
+            pass
         
         elapsed = time.time() - start_time
         return results, success_count, elapsed
@@ -927,7 +905,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧠 Aprendizaje con decaimiento exponencial\n"
         "⚡ Ultra rápido (200 conexiones)\n"
         "🔒 Rate limiting por usuario\n"
-        "📊 SQLite con batch inserts\n\n"
+        "📊 SQLite con batch inserts\n"
+        "📈 Barra de progreso en tiempo real\n\n"
         "Comandos:\n"
         "• `/addsite <url>` – Guardar tienda\n"
         "• `/addproxy <host:port>` – Guardar proxy\n"
@@ -935,7 +914,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/proxies` – Listar proxies\n"
         "• `/cards` – Listar tarjetas válidas\n"
         "• `/check <cc>` – Verificar una\n"
-        "• `/mass [workers]` – Masivo con aprendizaje\n"
+        "• `/mass [workers]` – Masivo con barra de progreso\n"
         "• `/learn` – Ver aprendizaje\n"
         "• `/stats` – Estadísticas\n"
         "• `/stop` – Detener proceso\n"
@@ -978,7 +957,6 @@ async def addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Proxy guardado:\n`{proxy}`", parse_mode="Markdown")
 
 async def listsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista sitios con manejo de mensajes largos"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     sites = user_data["sites"]
@@ -1010,7 +988,6 @@ async def listsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode="Markdown")
 
 async def listproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista proxies con manejo de mensajes largos"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -1042,7 +1019,6 @@ async def listproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode="Markdown")
 
 async def listcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista tarjetas con manejo de mensajes largos"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     cards = user_data["cards"]
@@ -1111,6 +1087,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def mass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verificación masiva con barra de progreso en tiempo real"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     
@@ -1138,16 +1115,46 @@ async def mass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try: num_workers = min(int(context.args[0]), MAX_WORKERS_PER_USER)
         except: pass
 
-    await update.message.reply_text(
+    # Mensaje inicial con barra vacía
+    progress_msg = await update.message.reply_text(
         f"🚀 *Iniciando masivo*\n"
-        f"Tarjetas válidas: {len(valid_cards)}\nWorkers: {num_workers}\n"
-        f"Usa /stop para cancelar",
+        f"📊 Progreso: {create_progress_bar(0, len(valid_cards))} 0/{len(valid_cards)}\n"
+        f"✅ Aprobadas: 0 | ❌ Fallidas: 0 | ⚡ 0.0 cards/s\n"
+        f"⚙️ Workers: {num_workers} | Usa /stop para cancelar",
         parse_mode="Markdown"
     )
 
-    async def progress_callback(processed: int, success: int):
-        await update.message.reply_text(f"📊 Progreso: {processed} tarjetas, {success} aprobadas")
+    queue = asyncio.Queue()
+    for card in valid_cards:
+        await queue.put(card)
 
+    results = []
+    processed = 0
+    success_count = 0
+    start_time = time.time()
+    last_update = time.time()
+    
+    learning = LearningSystem(db, user_id)
+    cancel_mass[user_id] = False
+
+    async def progress_callback(proc: int, succ: int, total: int):
+        nonlocal last_update
+        current_time = time.time()
+        if current_time - last_update > 0.5:  # Actualizar cada 0.5 segundos
+            elapsed = current_time - start_time
+            speed = proc / elapsed if elapsed > 0 else 0
+            fail = proc - succ
+            bar = create_progress_bar(proc, total)
+            
+            await progress_msg.edit_text(
+                f"📊 *Progreso:* {bar} {proc}/{total}\n"
+                f"✅ Aprobadas: {succ} | ❌ Fallidas: {fail} | ⚡ {speed:.1f} cards/s\n"
+                f"⚙️ Workers: {num_workers} | Usa /stop para cancelar",
+                parse_mode="Markdown"
+            )
+            last_update = current_time
+
+    # Ejecutar verificación masiva con callbacks de progreso
     try:
         results, success_count, elapsed = await card_service.check_mass(
             user_id=user_id,
@@ -1158,16 +1165,25 @@ async def mass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             progress_callback=progress_callback
         )
         
+        # Si se canceló, no mostrar resumen final
+        if cancel_mass.get(user_id, False):
+            cancel_mass[user_id] = False
+            return
+        
         speed = len(valid_cards) / elapsed if elapsed > 0 else 0
-        summary = (f"📊 *Resumen*\n"
-                   f"Total: {len(valid_cards)}\n"
+        
+        # Mensaje final con barra completa
+        bar = create_progress_bar(len(valid_cards), len(valid_cards))
+        summary = (f"✅ *¡PROCESO COMPLETADO!*\n"
+                   f"📊 Progreso: {bar} {len(valid_cards)}/{len(valid_cards)}\n"
                    f"✅ Aprobadas: {success_count}\n"
-                   f"❌ Rechazadas: {len(valid_cards) - success_count}\n"
+                   f"❌ Fallidas: {len(valid_cards) - success_count}\n"
                    f"⚡ Velocidad: {speed:.1f} cards/s\n"
                    f"⏱️ Tiempo: {elapsed:.1f}s")
         
-        await update.message.reply_text(summary, parse_mode="Markdown")
+        await progress_msg.edit_text(summary, parse_mode="Markdown")
         
+        # Mostrar algunas aprobadas si hay
         if success_count > 0:
             aprobadas = [r for r in results if r.success]
             if len(aprobadas) > 10:
@@ -1184,13 +1200,12 @@ async def mass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         
     except asyncio.CancelledError:
-        await update.message.reply_text("⏹️ Proceso cancelado por el usuario")
+        await progress_msg.edit_text("⏹️ Proceso cancelado por el usuario", parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error en mass: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        await progress_msg.edit_text(f"❌ Error: {str(e)[:100]}", parse_mode="Markdown")
 
 async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra aprendizaje con límite de caracteres"""
     user_id = update.effective_user.id
     
     rows = await db.fetch_all(
@@ -1236,7 +1251,6 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message, parse_mode="Markdown")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Estadísticas"""
     user_id = update.effective_user.id
     
     total = await db.fetch_one(
@@ -1283,8 +1297,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    cancel_mass[user_id] = True
     await user_manager.cancel_user_tasks(user_id)
-    await update.message.reply_text("⏹️ Procesos cancelados")
+    await update.message.reply_text("⏹️ Proceso cancelado (deteniéndose...)")
 
 async def reset_learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1292,7 +1307,6 @@ async def reset_learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("🔄 Aprendizaje reiniciado")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa archivos .txt con detección INTELIGENTE"""
     document = update.message.document
     if not document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Solo acepto archivos .txt")
@@ -1376,7 +1390,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== MAIN ==================
 async def shutdown(application: Application):
-    """Limpieza al cerrar"""
     logger.info("🛑 Cerrando conexiones...")
     if checker:
         await checker.shutdown()
@@ -1385,7 +1398,6 @@ async def shutdown(application: Application):
     logger.info("✅ Conexiones cerradas")
 
 async def post_init(application: Application):
-    """Inicialización post-loop"""
     global db, user_manager, checker, card_service
     
     db = Database()
@@ -1398,7 +1410,7 @@ async def post_init(application: Application):
     card_service = CardCheckService(db, user_manager, checker)
     
     await db.cleanup_old_results()
-    logger.info("✅ Bot inicializado correctamente en Railway")
+    logger.info("✅ Bot inicializado correctamente")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -1418,7 +1430,7 @@ def main():
     app.add_handler(CommandHandler("reset_learn", reset_learn_command))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_document))
 
-    logger.info("🚀 Bot Profesional Ultra iniciado en Railway")
+    logger.info("🚀 Bot Profesional Ultra con barra de progreso iniciado")
     app.run_polling()
 
 if __name__ == "__main__":
