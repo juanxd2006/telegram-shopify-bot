@@ -2,7 +2,7 @@
 """
 Bot de Telegram para verificar tarjetas - VERSIÓN ÉLITE
 Con todas las optimizaciones: API fallback, aprendizaje dinámico, concurrencia segura,
-rate limiting avanzado, seguridad, PostgreSQL listo y UX mejorada.
+rate limiting avanzado, seguridad, y manejo robusto de señales para Railway.
 """
 
 import os
@@ -21,10 +21,22 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 import statistics
+import signal
+import sys
 
 from telegram import Update, Document
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import aiohttp
+
+# ================== MANEJO DE SEÑALES PARA RAILWAY ==================
+def handle_shutdown(signum, frame):
+    """Maneja señales de terminación"""
+    logger.info(f"🛑 Recibida señal {signum}, cerrando gracefulmente...")
+    sys.exit(0)
+
+# Registrar manejadores de señales
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
 
 # ================== CONFIGURACIÓN SEGURA ==================
 TOKEN = os.environ.get("BOT_TOKEN")
@@ -51,7 +63,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== ESTRUCTURAS DE DATOS MEJORADAS ==================
+# ID único para esta instancia
+INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
+
+# ================== FUNCIÓN PARA BARRA DE PROGRESO ==================
+def create_progress_bar(current: int, total: int, width: int = 20) -> str:
+    """Crea una barra de progreso visual"""
+    if total == 0:
+        return "[" + "░" * width + "]"
+    filled = int((current / total) * width)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}]"
+
+# ================== ENUMS Y DATACLASSES ==================
 class CheckStatus(Enum):
     CHARGED = "charged"
     DECLINED = "declined"
@@ -102,15 +126,6 @@ class UserStats:
     banned_until: Optional[datetime] = None
     tasks: Dict[str, asyncio.Task] = field(default_factory=dict)
     command_locks: Dict[str, asyncio.Lock] = field(default_factory=dict)
-
-# ================== FUNCIÓN PARA BARRA DE PROGRESO ==================
-def create_progress_bar(current: int, total: int, width: int = 20) -> str:
-    """Crea una barra de progreso visual"""
-    if total == 0:
-        return "[" + "░" * width + "]"
-    filled = int((current / total) * width)
-    bar = "█" * filled + "░" * (width - filled)
-    return f"[{bar}]"
 
 # ================== VALIDACIÓN DE TARJETAS ==================
 class CardValidator:
@@ -222,7 +237,7 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
-# ================== BASE DE DATOS MEJORADA ==================
+# ================== BASE DE DATOS OPTIMIZADA ==================
 class Database:
     def __init__(self, db_path=DB_FILE):
         self.db_path = db_path
@@ -329,7 +344,7 @@ class Database:
         
         self._batch_task = asyncio.create_task(self._batch_processor())
         self._initialized = True
-        logger.info("✅ Base de datos inicializada")
+        logger.info(f"✅ Base de datos inicializada [Instancia: {INSTANCE_ID}]")
 
     async def _batch_processor(self):
         while True:
@@ -439,6 +454,8 @@ class Database:
         )
 
     async def shutdown(self):
+        """Cierra la BD gracefulmente"""
+        logger.info(f"🛑 Cerrando base de datos [Instancia: {INSTANCE_ID}]")
         if self._batch_task:
             self._batch_task.cancel()
             try:
@@ -614,6 +631,7 @@ class UltraFastChecker:
         await self._create_sessions()
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self._initialized = True
+        logger.info(f"✅ Checker inicializado [Instancia: {INSTANCE_ID}]")
 
     async def _create_sessions(self):
         for _ in range(30):
@@ -648,6 +666,25 @@ class UltraFastChecker:
     async def return_session(self, session):
         if not session.closed:
             self.session_pool.append(session)
+
+    async def shutdown(self):
+        """Cierra el checker gracefulmente"""
+        logger.info(f"🛑 Cerrando checker [Instancia: {INSTANCE_ID}]")
+        self._initialized = False
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        while self.session_pool:
+            s = self.session_pool.popleft()
+            try:
+                await s.close()
+            except:
+                pass
+        if self.connector:
+            await self.connector.close()
 
     async def _check_api_health(self, endpoint: str) -> bool:
         """Health check rápido antes de usar"""
@@ -773,23 +810,6 @@ class UltraFastChecker:
             await self.return_session(session)
             async with self._request_lock:
                 self._active_requests -= 1
-
-    async def shutdown(self):
-        self._initialized = False
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-        while self.session_pool:
-            s = self.session_pool.popleft()
-            try:
-                await s.close()
-            except:
-                pass
-        if self.connector:
-            await self.connector.close()
 
 # ================== GESTIÓN DE USUARIOS Y SEGURIDAD ==================
 class UserManager:
@@ -965,6 +985,12 @@ class UserManager:
                     task.cancel()
             self.users[user_id].tasks.clear()
 
+    async def cancel_all_tasks(self):
+        """Cancela todas las tareas de todos los usuarios"""
+        logger.info("🛑 Cancelando todas las tareas de usuarios...")
+        for user_id in list(self.users.keys()):
+            await self.cancel_user_tasks(user_id)
+
 # ================== SERVICIOS ==================
 class CardCheckService:
     def __init__(self, db: Database, user_manager: UserManager, checker: UltraFastChecker):
@@ -1075,25 +1101,679 @@ cancel_mass = {}  # Para cancelación
 
 # ================== HANDLERS DE TELEGRAM ==================
 
-# [Aquí van todos los handlers: start, addsite, addproxy, listsites, listproxies, listcards,
-#  delsite, delproxy, delcard, clearsites, clearproxies, clearcards, clearall,
-#  check_command, mass_command, learn_command, stats_command, stop_command, 
-#  reset_learn_command, handle_document]
-# 
-# IMPORTANTE: Copia todos los handlers de tu código anterior aquí.
-# Por brevedad, no los incluyo todos pero deben estar presentes.
+# Comandos
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = (
+        "🤖 *Bot Checker Profesional Ultra*\n\n"
+        "✅ Detección INTELIGENTE de archivos\n"
+        "✅ Validación Luhn + fecha + CVV\n"
+        "🧠 Aprendizaje con decaimiento exponencial\n"
+        "⚡ Ultra rápido (200 conexiones)\n"
+        "🔒 Rate limiting por usuario\n"
+        "📊 SQLite con batch inserts\n"
+        "📈 Barra de progreso en tiempo real\n\n"
+        "*📌 COMANDOS:*\n\n"
+        "➕ *Agregar:*\n"
+        "• `/addsite <url>` – Guardar tienda\n"
+        "• `/addproxy <host:port>` – Guardar proxy\n\n"
+        "📋 *Listar:*\n"
+        "• `/sites` – Listar sitios\n"
+        "• `/proxies` – Listar proxies\n"
+        "• `/cards` – Listar tarjetas válidas\n\n"
+        "🗑️ *Eliminar (individual):*\n"
+        "• `/delsite <n>` – Eliminar sitio #n\n"
+        "• `/delproxy <n>` – Eliminar proxy #n\n"
+        "• `/delcard <n>` – Eliminar tarjeta #n\n\n"
+        "🔥 *Eliminar (todo):*\n"
+        "• `/clearsites` – Borrar TODOS los sitios\n"
+        "• `/clearproxies` – Borrar TODOS los proxies\n"
+        "• `/clearcards` – Borrar TODAS las tarjetas\n"
+        "• `/clearall` – Borrar TODO (sitios+proxies+tarjetas)\n\n"
+        "⚡ *Verificaciones:*\n"
+        "• `/check <cc>` – Verificar una tarjeta\n"
+        "• `/mass [workers]` – Masivo con barra de progreso\n\n"
+        "🧠 *Aprendizaje:*\n"
+        "• `/learn` – Ver aprendizaje\n"
+        "• `/stats` – Estadísticas\n"
+        "• `/reset_learn` – Reiniciar aprendizaje\n\n"
+        "🛑 *Control:*\n"
+        "• `/stop` – Detener proceso actual\n"
+        "• *Envía un .txt* con datos (detección automática)"
+    )
+    await update.message.reply_text(texto, parse_mode="Markdown")
+
+async def addsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Uso: `/addsite <url>`", parse_mode="Markdown")
+        return
+    url = context.args[0].strip()
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    user_data["sites"].append(url)
+    await user_manager.update_user_data(user_id, sites=user_data["sites"])
+    await update.message.reply_text(f"✅ Sitio guardado:\n{url}")
+
+async def addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Uso: `/addproxy <host:port>`", parse_mode="Markdown")
+        return
+
+    proxy_input = context.args[0].strip()
+    colon_count = proxy_input.count(':')
+
+    if colon_count == 1:
+        proxy = f"{proxy_input}::"
+    elif colon_count == 3:
+        proxy = proxy_input
+    else:
+        await update.message.reply_text("❌ Formato incorrecto")
+        return
+
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    user_data["proxies"].append(proxy)
+    await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
+    await update.message.reply_text(f"✅ Proxy guardado:\n`{proxy}`", parse_mode="Markdown")
+
+async def listsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    if not sites:
+        await update.message.reply_text("📭 No tienes sitios guardados.")
+        return
+    
+    if len(sites) > 20:
+        muestra = sites[:20]
+        lines = [f"{i+1}. {site}" for i, site in enumerate(muestra)]
+        lines.append(f"... y {len(sites)-20} sitios más.")
+    else:
+        lines = [f"{i+1}. {site}" for i, site in enumerate(sites)]
+    
+    message = "📌 *Sitios:*\n" + "\n".join(lines)
+    
+    if len(message) > 4000:
+        filename = f"sites_{user_id}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n".join([f"{i+1}. {site}" for i, site in enumerate(sites)]))
+        await update.message.reply_document(
+            document=open(filename, "rb"),
+            filename=filename,
+            caption="📌 *Lista completa de sitios*",
+            parse_mode="Markdown"
+        )
+        os.remove(filename)
+    else:
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+async def listproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    if not proxies:
+        await update.message.reply_text("📭 No tienes proxies guardados.")
+        return
+    
+    if len(proxies) > 20:
+        muestra = proxies[:20]
+        lines = [f"{i+1}. `{proxy}`" for i, proxy in enumerate(muestra)]
+        lines.append(f"... y {len(proxies)-20} proxies más.")
+    else:
+        lines = [f"{i+1}. `{proxy}`" for i, proxy in enumerate(proxies)]
+    
+    message = "📌 *Proxies:*\n" + "\n".join(lines)
+    
+    if len(message) > 4000:
+        filename = f"proxies_{user_id}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n".join([f"{i+1}. {proxy}" for i, proxy in enumerate(proxies)]))
+        await update.message.reply_document(
+            document=open(filename, "rb"),
+            filename=filename,
+            caption="📌 *Lista completa de proxies*",
+            parse_mode="Markdown"
+        )
+        os.remove(filename)
+    else:
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+async def listcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data["cards"]
+    if not cards:
+        await update.message.reply_text("📭 No tienes tarjetas válidas cargadas.")
+        return
+    
+    if len(cards) > 20:
+        muestra = cards[:20]
+        lines = [f"{i+1}. `{card}`" for i, card in enumerate(muestra)]
+        lines.append(f"... y {len(cards)-20} tarjetas más.")
+    else:
+        lines = [f"{i+1}. `{card}`" for i, card in enumerate(cards)]
+    
+    message = "📌 *Tarjetas:*\n" + "\n".join(lines)
+    
+    if len(message) > 4000:
+        filename = f"cards_{user_id}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n".join([f"{i+1}. {card}" for i, card in enumerate(cards)]))
+        await update.message.reply_document(
+            document=open(filename, "rb"),
+            filename=filename,
+            caption="📌 *Lista completa de tarjetas*",
+            parse_mode="Markdown"
+        )
+        os.remove(filename)
+    else:
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+async def delsite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina un sitio específico por su número"""
+    if not context.args:
+        await update.message.reply_text("❌ Uso: `/delsite <número>`\nEjemplo: `/delsite 3`", parse_mode="Markdown")
+        return
+    
+    try:
+        index = int(context.args[0]) - 1
+    except ValueError:
+        await update.message.reply_text("❌ El número debe ser un entero")
+        return
+    
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    
+    if not sites:
+        await update.message.reply_text("📭 No tienes sitios guardados.")
+        return
+    
+    if index < 0 or index >= len(sites):
+        await update.message.reply_text(f"❌ Número inválido. Tienes {len(sites)} sitios (1-{len(sites)}).")
+        return
+    
+    sitio_eliminado = sites.pop(index)
+    await user_manager.update_user_data(user_id, sites=sites)
+    await update.message.reply_text(f"🗑️ *Sitio eliminado:*\n`{sitio_eliminado}`", parse_mode="Markdown")
+
+async def delproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina un proxy específico por su número"""
+    if not context.args:
+        await update.message.reply_text("❌ Uso: `/delproxy <número>`\nEjemplo: `/delproxy 5`", parse_mode="Markdown")
+        return
+    
+    try:
+        index = int(context.args[0]) - 1
+    except ValueError:
+        await update.message.reply_text("❌ El número debe ser un entero")
+        return
+    
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        await update.message.reply_text("📭 No tienes proxies guardados.")
+        return
+    
+    if index < 0 or index >= len(proxies):
+        await update.message.reply_text(f"❌ Número inválido. Tienes {len(proxies)} proxies (1-{len(proxies)}).")
+        return
+    
+    proxy_eliminado = proxies.pop(index)
+    await user_manager.update_user_data(user_id, proxies=proxies)
+    await update.message.reply_text(f"🗑️ *Proxy eliminado:*\n`{proxy_eliminado}`", parse_mode="Markdown")
+
+async def delcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina una tarjeta específica por su número"""
+    if not context.args:
+        await update.message.reply_text("❌ Uso: `/delcard <número>`\nEjemplo: `/delcard 2`", parse_mode="Markdown")
+        return
+    
+    try:
+        index = int(context.args[0]) - 1
+    except ValueError:
+        await update.message.reply_text("❌ El número debe ser un entero")
+        return
+    
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data["cards"]
+    
+    if not cards:
+        await update.message.reply_text("📭 No tienes tarjetas guardadas.")
+        return
+    
+    if index < 0 or index >= len(cards):
+        await update.message.reply_text(f"❌ Número inválido. Tienes {len(cards)} tarjetas (1-{len(cards)}).")
+        return
+    
+    card_eliminada = cards.pop(index)
+    await user_manager.update_user_data(user_id, cards=cards)
+    
+    card_preview = card_eliminada.split('|')[0]
+    card_preview = card_preview[-4:] if len(card_preview) > 4 else card_preview
+    await update.message.reply_text(f"🗑️ *Tarjeta eliminada:*\n`xxxx...{card_preview}`", parse_mode="Markdown")
+
+async def clearsites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina TODOS los sitios"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    if not user_data["sites"]:
+        await update.message.reply_text("📭 No hay sitios para eliminar.")
+        return
+    
+    cantidad = len(user_data["sites"])
+    user_data["sites"] = []
+    await user_manager.update_user_data(user_id, sites=[])
+    await update.message.reply_text(f"🗑️ *{cantidad} sitio(s) eliminados*", parse_mode="Markdown")
+
+async def clearproxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina TODOS los proxies"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    if not user_data["proxies"]:
+        await update.message.reply_text("📭 No hay proxies para eliminar.")
+        return
+    
+    cantidad = len(user_data["proxies"])
+    user_data["proxies"] = []
+    await user_manager.update_user_data(user_id, proxies=[])
+    await update.message.reply_text(f"🗑️ *{cantidad} proxy(s) eliminados*", parse_mode="Markdown")
+
+async def clearcards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina TODAS las tarjetas"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    if not user_data["cards"]:
+        await update.message.reply_text("📭 No hay tarjetas para eliminar.")
+        return
+    
+    cantidad = len(user_data["cards"])
+    user_data["cards"] = []
+    await user_manager.update_user_data(user_id, cards=[])
+    await update.message.reply_text(f"🗑️ *{cantidad} tarjeta(s) eliminadas*", parse_mode="Markdown")
+
+async def clearall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina TODOS los datos (sitios, proxies y tarjetas)"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    total = len(user_data["sites"]) + len(user_data["proxies"]) + len(user_data["cards"])
+    
+    if total == 0:
+        await update.message.reply_text("📭 No hay datos para eliminar.")
+        return
+    
+    await user_manager.update_user_data(user_id, sites=[], proxies=[], cards=[])
+    await update.message.reply_text(f"🗑️ *{total} elemento(s) eliminados* (sitios, proxies y tarjetas)", parse_mode="Markdown")
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ Uso: `/check <cc>`", parse_mode="Markdown")
+        return
+
+    card_str = context.args[0]
+    card_data = CardValidator.parse_card(card_str)
+    if not card_data:
+        await update.message.reply_text("❌ Tarjeta inválida (Luhn, fecha o CVV incorrecto)")
+        return
+
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    sites = user_data["sites"]
+    proxies = user_data["proxies"]
+
+    if not sites or not proxies:
+        await update.message.reply_text("❌ Faltan sitios o proxies.")
+        return
+
+    learning = LearningSystem(db, user_id)
+    site, proxy = await learning.choose_combination(sites, proxies)
+
+    msg = await update.message.reply_text("⏳ Verificando...")
+    result = await card_service.check_single(user_id, card_data, site, proxy)
+
+    icon = "✅" if result.success else "❌"
+    await msg.edit_text(
+        f"{icon} *Resultado*\n"
+        f"• BIN: `{card_data['bin']}`\n"
+        f"• Estado: `{result.status.value}`\n"
+        f"• Tiempo: `{result.response_time:.2f}s`\n"
+        f"• Sitio: `{site[:50]}...`\n"
+        f"• Respuesta: `{result.response_text[:100]}`",
+        parse_mode="Markdown"
+    )
+
+async def mass_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verificación masiva con barra de progreso en tiempo real"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    valid_cards = []
+    for card_str in user_data["cards"]:
+        card_data = CardValidator.parse_card(card_str)
+        if card_data:
+            valid_cards.append(card_data)
+    
+    sites = user_data["sites"]
+    proxies = user_data["proxies"]
+
+    if not valid_cards:
+        await update.message.reply_text("❌ No hay tarjetas válidas cargadas.")
+        return
+    if not sites:
+        await update.message.reply_text("❌ No hay sitios guardados.")
+        return
+    if not proxies:
+        await update.message.reply_text("❌ No hay proxies guardados.")
+        return
+
+    num_workers = min(MAX_WORKERS_PER_USER, len(valid_cards))
+    if context.args:
+        try: num_workers = min(int(context.args[0]), MAX_WORKERS_PER_USER)
+        except: pass
+
+    # Mensaje inicial con barra vacía
+    progress_msg = await update.message.reply_text(
+        f"🚀 *Iniciando masivo*\n"
+        f"📊 Progreso: {create_progress_bar(0, len(valid_cards))} 0/{len(valid_cards)}\n"
+        f"✅ Aprobadas: 0 | ❌ Fallidas: 0 | ⚡ 0.0 cards/s\n"
+        f"⚙️ Workers: {num_workers} | Usa /stop para cancelar",
+        parse_mode="Markdown"
+    )
+
+    queue = asyncio.Queue()
+    for card in valid_cards:
+        await queue.put(card)
+
+    results = []
+    processed = 0
+    success_count = 0
+    start_time = time.time()
+    last_update = time.time()
+    
+    learning = LearningSystem(db, user_id)
+    cancel_mass[user_id] = False
+
+    async def progress_callback(proc: int, succ: int, total: int):
+        nonlocal last_update
+        current_time = time.time()
+        if current_time - last_update > 0.5:  # Actualizar cada 0.5 segundos
+            elapsed = current_time - start_time
+            speed = proc / elapsed if elapsed > 0 else 0
+            fail = proc - succ
+            bar = create_progress_bar(proc, total)
+            
+            await progress_msg.edit_text(
+                f"📊 *Progreso:* {bar} {proc}/{total}\n"
+                f"✅ Aprobadas: {succ} | ❌ Fallidas: {fail} | ⚡ {speed:.1f} cards/s\n"
+                f"⚙️ Workers: {num_workers} | Usa /stop para cancelar",
+                parse_mode="Markdown"
+            )
+            last_update = current_time
+
+    # Ejecutar verificación masiva con callbacks de progreso
+    try:
+        results, success_count, elapsed = await card_service.check_mass(
+            user_id=user_id,
+            cards=valid_cards,
+            sites=sites,
+            proxies=proxies,
+            num_workers=num_workers,
+            progress_callback=progress_callback
+        )
+        
+        # Si se canceló, no mostrar resumen final
+        if cancel_mass.get(user_id, False):
+            cancel_mass[user_id] = False
+            return
+        
+        speed = len(valid_cards) / elapsed if elapsed > 0 else 0
+        
+        # Mensaje final con barra completa
+        bar = create_progress_bar(len(valid_cards), len(valid_cards))
+        summary = (f"✅ *¡PROCESO COMPLETADO!*\n"
+                   f"📊 Progreso: {bar} {len(valid_cards)}/{len(valid_cards)}\n"
+                   f"✅ Aprobadas: {success_count}\n"
+                   f"❌ Fallidas: {len(valid_cards) - success_count}\n"
+                   f"⚡ Velocidad: {speed:.1f} cards/s\n"
+                   f"⏱️ Tiempo: {elapsed:.1f}s")
+        
+        await progress_msg.edit_text(summary, parse_mode="Markdown")
+        
+        # Mostrar algunas aprobadas si hay
+        if success_count > 0:
+            aprobadas = [r for r in results if r.success]
+            if len(aprobadas) > 10:
+                muestra = aprobadas[:10]
+                lines = ["✅ *Tarjetas aprobadas (primeras 10):*"]
+                for r in muestra:
+                    lines.append(f"• `{r.card_bin}xxxxxx{r.card_last4}` - {r.response_time:.2f}s")
+                lines.append(f"... y {len(aprobadas)-10} más.")
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            elif aprobadas:
+                lines = ["✅ *Tarjetas aprobadas:*"]
+                for r in aprobadas:
+                    lines.append(f"• `{r.card_bin}xxxxxx{r.card_last4}` - {r.response_time:.2f}s")
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        
+    except asyncio.CancelledError:
+        await progress_msg.edit_text("⏹️ Proceso cancelado por el usuario", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error en mass: {e}", exc_info=True)
+        await progress_msg.edit_text(f"❌ Error: {str(e)[:100]}", parse_mode="Markdown")
+
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    rows = await db.fetch_all(
+        """SELECT * FROM learning 
+           WHERE user_id = ? 
+           ORDER BY attempts DESC, last_seen DESC 
+           LIMIT 20""",
+        (user_id,)
+    )
+    
+    if not rows:
+        await update.message.reply_text("📭 Aún no hay datos de aprendizaje.")
+        return
+
+    learning = LearningSystem(db, user_id)
+    lines = ["🧠 *Top combinaciones:*"]
+    
+    for row in rows:
+        site = row["site"][:30] + "..." if len(row["site"]) > 30 else row["site"]
+        proxy = row["proxy"][:30] + "..." if len(row["proxy"]) > 30 else row["proxy"]
+        score = await learning.get_score(row["site"], row["proxy"])
+        success_rate = (row["charged"] / row["attempts"]) * 100 if row["attempts"] > 0 else 0
+        avg_time = row["total_time"] / row["attempts"] if row["attempts"] > 0 else 0
+        
+        lines.append(f"• `{site}` | `{proxy}`")
+        lines.append(f"  Intentos: {row['attempts']} | ✅ {success_rate:.1f}% | "
+                    f"⏱️ {avg_time:.2f}s | Score: {score:.3f}")
+
+    message = "\n".join(lines)
+    
+    if len(message) > 4000:
+        filename = f"learn_{user_id}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(message.replace("*", ""))
+        await update.message.reply_document(
+            document=open(filename, "rb"),
+            filename=filename,
+            caption="🧠 *Aprendizaje completo* (en archivo)",
+            parse_mode="Markdown"
+        )
+        os.remove(filename)
+    else:
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    total = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ?",
+        (user_id,)
+    )
+    total_count = total["count"] if total else 0
+    
+    charged = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status = 'charged'",
+        (user_id,)
+    )
+    charged_count = charged["count"] if charged else 0
+    
+    timeouts = await db.fetch_one(
+        "SELECT COUNT(*) as count FROM results WHERE user_id = ? AND status = 'timeout'",
+        (user_id,)
+    )
+    timeout_count = timeouts["count"] if timeouts else 0
+    
+    avg_time = await db.fetch_one(
+        "SELECT AVG(response_time) as avg FROM results WHERE user_id = ?",
+        (user_id,)
+    )
+    avg_response = avg_time["avg"] if avg_time and avg_time["avg"] else 0
+    
+    rate = await db.fetch_one(
+        "SELECT checks_today FROM rate_limits WHERE user_id = ?",
+        (user_id,)
+    )
+    checks_today = rate["checks_today"] if rate else 0
+    
+    text = (f"📊 *Estadísticas*\n"
+            f"Total verificaciones: {total_count}\n"
+            f"✅ Charged: {charged_count}\n"
+            f"⏱️ Timeouts: {timeout_count}\n"
+            f"⚡ Tiempo medio: {avg_response:.2f}s\n"
+            f"📅 Hoy: {checks_today}/{DAILY_LIMIT_CHECKS}")
+    
+    if len(text) > 4000:
+        text = text[:4000] + "..."
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cancel_mass[user_id] = True
+    await user_manager.cancel_user_tasks(user_id)
+    await update.message.reply_text("⏹️ Proceso cancelado (deteniéndose...)")
+
+async def reset_learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await db.execute("DELETE FROM learning WHERE user_id = ?", (user_id,))
+    await update.message.reply_text("🔄 Aprendizaje reiniciado")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    if not document.file_name.endswith('.txt'):
+        await update.message.reply_text("❌ Solo acepto archivos .txt")
+        return
+
+    file = await context.bot.get_file(document.file_id)
+    file_content = await file.download_as_bytearray()
+    text = file_content.decode('utf-8', errors='ignore')
+    lines = text.splitlines()
+
+    sites_added = []
+    proxies_added = []
+    cards_added = []
+    invalid_cards = []
+    unknown = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        line_type, normalized = detect_line_type(line)
+        
+        if line_type == 'site':
+            sites_added.append(normalized)
+        elif line_type == 'proxy':
+            proxies_added.append(normalized)
+        elif line_type == 'card':
+            card_data = CardValidator.parse_card(normalized)
+            if card_data:
+                cards_added.append(normalized)
+            else:
+                invalid_cards.append(normalized)
+        else:
+            unknown.append(line)
+
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    updated = False
+
+    if sites_added:
+        user_data["sites"].extend(sites_added)
+        updated = True
+    if proxies_added:
+        normalized_proxies = []
+        for p in proxies_added:
+            if p.count(':') == 1:
+                normalized_proxies.append(f"{p}::")
+            else:
+                normalized_proxies.append(p)
+        user_data["proxies"].extend(normalized_proxies)
+        updated = True
+    if cards_added:
+        user_data["cards"].extend(cards_added)
+        updated = True
+
+    if updated:
+        await user_manager.update_user_data(
+            user_id, 
+            sites=user_data["sites"], 
+            proxies=user_data["proxies"], 
+            cards=user_data["cards"]
+        )
+
+    msg_parts = []
+    if sites_added:
+        msg_parts.append(f"✅ {len(sites_added)} sitio(s) añadido(s)")
+    if proxies_added:
+        msg_parts.append(f"✅ {len(proxies_added)} proxy(s) añadido(s)")
+    if cards_added:
+        msg_parts.append(f"✅ {len(cards_added)} tarjeta(s) válida(s) añadida(s)")
+    if invalid_cards:
+        msg_parts.append(f"⚠️ {len(invalid_cards)} tarjeta(s) inválida(s) rechazada(s)")
+    if unknown:
+        msg_parts.append(f"⚠️ {len(unknown)} línea(s) no reconocida(s)")
+
+    if not msg_parts:
+        await update.message.reply_text("❌ No se encontraron datos válidos.")
+    else:
+        await update.message.reply_text("\n".join(msg_parts))
 
 # ================== MAIN ==================
 async def shutdown(application: Application):
-    logger.info("🛑 Cerrando conexiones...")
+    """Limpieza al cerrar - VERSIÓN MEJORADA"""
+    logger.info(f"🛑 Iniciando shutdown graceful [Instancia: {INSTANCE_ID}]...")
+    
+    # Cancelar todas las tareas de usuarios
+    if user_manager:
+        await user_manager.cancel_all_tasks()
+    
+    # Cerrar checker
     if checker:
         await checker.shutdown()
+    
+    # Cerrar base de datos
     if db:
         await db.shutdown()
-    logger.info("✅ Conexiones cerradas")
+    
+    logger.info(f"✅ Shutdown completado [Instancia: {INSTANCE_ID}]")
 
 async def post_init(application: Application):
+    """Inicialización post-loop con ID único"""
     global db, user_manager, checker, card_service
+    
+    logger.info(f"🚀 Iniciando instancia {INSTANCE_ID}")
     
     db = Database()
     await db.initialize()
@@ -1105,16 +1785,35 @@ async def post_init(application: Application):
     card_service = CardCheckService(db, user_manager, checker)
     
     await db.cleanup_old_results()
-    logger.info("✅ Bot Élite inicializado correctamente")
+    logger.info(f"✅ Instancia {INSTANCE_ID} inicializada correctamente")
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.post_shutdown = shutdown
 
-    # Registrar todos los handlers aquí
-    # ...
+    # Registrar comandos
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("addsite", addsite))
+    app.add_handler(CommandHandler("addproxy", addproxy))
+    app.add_handler(CommandHandler("sites", listsites))
+    app.add_handler(CommandHandler("proxies", listproxies))
+    app.add_handler(CommandHandler("cards", listcards))
+    app.add_handler(CommandHandler("delsite", delsite))
+    app.add_handler(CommandHandler("delproxy", delproxy))
+    app.add_handler(CommandHandler("delcard", delcard))
+    app.add_handler(CommandHandler("clearsites", clearsites))
+    app.add_handler(CommandHandler("clearproxies", clearproxies))
+    app.add_handler(CommandHandler("clearcards", clearcards))
+    app.add_handler(CommandHandler("clearall", clearall))
+    app.add_handler(CommandHandler("check", check_command))
+    app.add_handler(CommandHandler("mass", mass_command))
+    app.add_handler(CommandHandler("learn", learn_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("reset_learn", reset_learn_command))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_document))
 
-    logger.info("🚀 Bot Élite iniciado")
+    logger.info(f"🚀 Bot Élite iniciado [Instancia: {INSTANCE_ID}]")
     app.run_polling()
 
 if __name__ == "__main__":
