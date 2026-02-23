@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA CORREGIDA
-Con detección inteligente de archivos (proxies > tarjetas), clase Settings, y todos los menús.
+Bot de Telegram para verificar tarjetas - VERSIÓN PROFESIONAL CORREGIDA
+Con timeouts inteligentes, caché de BIN, múltiples APIs y barra de progreso independiente.
 """
 
 import os
@@ -42,8 +42,11 @@ class Settings:
     if not TOKEN:
         raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
 
+    # Múltiples endpoints para rotación (reduce saturación)
     API_ENDPOINTS = [
         os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
+        os.environ.get("API_URL2", "https://auto-shopify-api-production.up.railway.app/index.php"),  # Mismo por ahora
+        os.environ.get("API_URL3", "https://auto-shopify-api-production.up.railway.app/index.php"),  # Mismo por ahora
     ]
 
     DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
@@ -59,6 +62,7 @@ class Settings:
         "connect": 3,
         "sock_read": 5,
         "total": 8,
+        "response_body": 3,  # Timeout para leer el body
     }
 
     # Configuración de confianza
@@ -77,6 +81,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
+
+# ================== CACHÉ DE BIN ==================
+BIN_CACHE = {}
+BIN_CACHE_LOCK = asyncio.Lock()
 
 # ================== ENUMS ==================
 class CheckStatus(Enum):
@@ -310,21 +318,47 @@ def format_time(seconds: float) -> str:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
 
+# ================== BIN LOOKUP CON CACHÉ ==================
 async def get_bin_info(bin_code: str) -> Dict:
+    """Consulta información de BIN con caché en memoria"""
+    global BIN_CACHE
+    
+    # Verificar caché
+    async with BIN_CACHE_LOCK:
+        if bin_code in BIN_CACHE:
+            cache_time, data = BIN_CACHE[bin_code]
+            # Caché válido por 24 horas
+            if (datetime.now() - cache_time).total_seconds() < 86400:
+                return data
+    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://lookup.binlist.net/{bin_code}", timeout=5) as resp:
+            async with session.get(f"https://lookup.binlist.net/{bin_code}", timeout=3) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return {
+                    result = {
                         "bank": data.get("bank", {}).get("name", "Unknown"),
                         "brand": data.get("scheme", "Unknown").upper(),
                         "country": data.get("country", {}).get("alpha2", "UN"),
                         "type": data.get("type", "Unknown"),
                     }
-    except:
-        pass
-    return {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
+                    
+                    # Guardar en caché
+                    async with BIN_CACHE_LOCK:
+                        BIN_CACHE[bin_code] = (datetime.now(), result)
+                    
+                    return result
+    except Exception as e:
+        logger.debug(f"Error consultando BIN {bin_code}: {e}")
+    
+    # Resultado por defecto
+    default = {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
+    
+    # Guardar en caché también (para no repetir errores)
+    async with BIN_CACHE_LOCK:
+        BIN_CACHE[bin_code] = (datetime.now(), default)
+    
+    return default
 
 # ================== VALIDACIÓN DE TARJETAS ==================
 class CardValidator:
@@ -383,7 +417,7 @@ class CardValidator:
             "last4": number[-4:]
         }
 
-# ================== DETECCIÓN INTELIGENTE CORREGIDA ==================
+# ================== DETECCIÓN INTELIGENTE ==================
 def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
     """
     Detección INTELIGENTE de tipo de línea.
@@ -399,7 +433,7 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
         if '.' in rest and not rest.startswith('.') and ' ' not in rest:
             return 'site', line
 
-    # ===== 2. DETECTAR PROXIES (AHORA PRIMERO) =====
+    # ===== 2. DETECTAR PROXIES =====
     if not line.startswith(('http://', 'https://')):
         parts = line.split(':')
         
@@ -731,7 +765,7 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== CHECKER ==================
+# ================== CHECKER CORREGIDO ==================
 class UltraFastChecker:
     def __init__(self):
         self.connector = None
@@ -786,13 +820,46 @@ class UltraFastChecker:
         
         session = await self.get_session()
         start_time = time.time()
+        
+        # Obtener BIN info con caché
         bin_info = await get_bin_info(card_data['bin'])
         redirect_count = 0
         
         try:
-            async with session.get(Settings.API_ENDPOINTS[0], params=params) as resp:
+            # Rotar entre múltiples endpoints
+            api_endpoint = random.choice(Settings.API_ENDPOINTS)
+            
+            async with session.get(api_endpoint, params=params) as resp:
                 elapsed = time.time() - start_time
-                response_text = await resp.text()
+                
+                # Timeout específico para leer el body (no bloquea)
+                try:
+                    response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                except asyncio.TimeoutError:
+                    # Timeout leyendo body
+                    elapsed = time.time() - start_time
+                    context = CheckContext(
+                        card_bin=card_data['bin'],
+                        card_last4=card_data['last4'],
+                        site=site,
+                        proxy=proxy,
+                        response_time=elapsed,
+                        http_code=resp.status,
+                        response_text="",
+                        response_size=0,
+                        redirect_count=redirect_count,
+                        timestamp=datetime.now()
+                    )
+                    
+                    return CheckResult(
+                        context=context,
+                        status=CheckStatus.READ_TIMEOUT,
+                        confidence=Confidence.CONFIRMED,
+                        reason="body read timeout",
+                        success=False,
+                        bin_info=bin_info
+                    )
+                
                 response_size = len(response_text)
                 
                 if resp.history:
@@ -819,7 +886,8 @@ class UltraFastChecker:
             elapsed = time.time() - start_time
             error_str = str(e).lower()
             
-            if "connect" in error_str:
+            # Clasificar timeout por tiempo, no por mensaje
+            if elapsed < Settings.TIMEOUT_CONFIG["connect"]:
                 status = CheckStatus.CONNECT_TIMEOUT
                 reason = "proxy connection timeout"
             else:
@@ -996,7 +1064,7 @@ class UserManager:
     async def is_admin(self, user_id: int) -> bool:
         return user_id in Settings.ADMIN_IDS
 
-# ================== CARD CHECK SERVICE ==================
+# ================== CARD CHECK SERVICE CON PROGRESS INDEPENDIENTE ==================
 class CardCheckService:
     def __init__(self, db: Database, user_manager: UserManager, checker: UltraFastChecker):
         self.db = db
@@ -1018,79 +1086,137 @@ class CardCheckService:
         progress_callback=None
     ) -> Tuple[List[CheckResult], int, int, int, float]:
         
-        optimal_workers = await self.user_manager.get_optimal_workers(user_id, proxies)
-        
+        total_cards = len(cards)
         queue = asyncio.Queue()
         for card in cards:
             await queue.put(card)
         
-        result_queue = asyncio.Queue()
+        # Resultados (usamos lista para mantener orden aproximado)
+        results = []
+        
+        # Contadores atómicos
         processed = 0
         approved = 0
         declined = 0
         timeout = 0
         start_time = time.time()
-        last_update = time.time()
         
+        # Locks
+        counter_lock = asyncio.Lock()
+        results_lock = asyncio.Lock()
+        
+        # Flag de ejecución
+        running = True
+        
+        # Rotación de proxies
         proxy_cycle = deque(proxies)
         proxy_lock = asyncio.Lock()
         
+        # Número óptimo de workers
+        num_workers = min(len(proxies), Settings.MAX_WORKERS_PER_USER, total_cards)
+        
+        # ===== WORKER INDEPENDIENTE DE UI =====
+        async def progress_updater():
+            """Actualiza la barra de progreso independientemente de los workers"""
+            last_update = time.time()
+            while running or processed < total_cards:
+                await asyncio.sleep(0.5)
+                
+                if progress_callback:
+                    current_processed = processed
+                    current_approved = approved
+                    current_declined = declined
+                    current_timeout = timeout
+                    
+                    try:
+                        await progress_callback(
+                            current_processed, 
+                            current_approved, 
+                            current_declined, 
+                            current_timeout, 
+                            total_cards
+                        )
+                    except Exception as e:
+                        logger.error(f"Error en progress_callback: {e}")
+        
+        # ===== WORKER DE VERIFICACIÓN =====
         async def worker(worker_id: int):
             nonlocal processed, approved, declined, timeout
             
-            while not queue.empty() and not cancel_mass.get(user_id, False):
-                try:
-                    card_data = await asyncio.wait_for(queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
+            while True:
+                # Verificar cancelación
+                if cancel_mass.get(user_id, False):
                     break
                 
+                # Obtener siguiente tarjeta (sin timeout)
+                try:
+                    card_data = await queue.get()
+                except asyncio.QueueEmpty:
+                    break
+                
+                # Obtener proxy (rotación)
                 async with proxy_lock:
                     proxy = proxy_cycle[0]
                     proxy_cycle.rotate(1)
                 
+                # Usar el primer sitio (o rotar si quieres)
                 site = sites[0]
                 
+                # Verificar tarjeta
                 result = await self.checker.check_card(site, proxy, card_data)
                 
-                await result_queue.put(result)
+                # Guardar resultado
+                async with results_lock:
+                    results.append(result)
                 
-                if result.success:
-                    approved += 1
-                elif "timeout" in result.status.value:
-                    timeout += 1
-                else:
-                    declined += 1
+                # Actualizar contadores con lock
+                async with counter_lock:
+                    if result.success:
+                        approved += 1
+                    elif "timeout" in result.status.value:
+                        timeout += 1
+                    else:
+                        declined += 1
+                    
+                    processed += 1
                 
-                processed += 1
+                # Guardar en BD (en batch)
+                await self.db.save_result(user_id, result)
+                await self.db.update_learning(user_id, result)
                 
-                current_time = time.time()
-                if progress_callback and (current_time - last_update >= 0.5 or processed % 5 == 0):
-                    await progress_callback(processed, approved, declined, timeout, len(cards))
-                    last_update = current_time
-            
-            return processed
+                # Marcar tarea como completada
+                queue.task_done()
         
-        tasks = [asyncio.create_task(worker(i)) for i in range(optimal_workers)]
+        # Iniciar updater de progreso
+        updater_task = asyncio.create_task(progress_updater())
         
-        results = []
+        # Crear y lanzar workers
+        tasks = []
+        for i in range(num_workers):
+            task = asyncio.create_task(worker(i))
+            tasks.append(task)
         
-        while len(results) < len(cards) and not all(t.done() for t in tasks):
-            try:
-                result = await asyncio.wait_for(result_queue.get(), timeout=0.1)
-                results.append(result)
-            except asyncio.TimeoutError:
-                if progress_callback and time.time() - last_update >= 0.5:
-                    await progress_callback(processed, approved, declined, timeout, len(cards))
-                    last_update = time.time()
-                continue
+        # Esperar a que la cola se vacíe (TODAS las tarjetas procesadas)
+        await queue.join()
         
+        # Detener updater
+        running = False
+        await updater_task
+        
+        # Cancelar workers si es necesario
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Esperar a que todos los workers terminen
         await asyncio.gather(*tasks, return_exceptions=True)
         
-        while not result_queue.empty():
-            result = await result_queue.get()
-            results.append(result)
-        
         elapsed = time.time() - start_time
+        
+        # Actualización final
+        if progress_callback:
+            await progress_callback(processed, approved, declined, timeout, total_cards)
+        
         return results, approved, declined, timeout, elapsed
 
 # ================== VARIABLES GLOBALES ==================
@@ -1654,7 +1780,8 @@ async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s`\n"
         f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s`\n"
-        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n\n"
+        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n"
+        f"Body read timeout: `{Settings.TIMEOUT_CONFIG['response_body']}s`\n\n"
         "These values are optimized for balance between speed and reliability."
     )
     
@@ -2123,7 +2250,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== MANEJO DE ARCHIVOS CORREGIDO ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesa archivos .txt con detección inteligente (proxiles primero)"""
+    """Procesa archivos .txt con detección inteligente (proxies primero)"""
     user_id = update.effective_user.id
     document = update.message.document
     
@@ -2212,6 +2339,13 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== COMANDO START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando de inicio - SIEMPRE muestra el menú principal"""
+    user_id = update.effective_user.id
+    
+    # Limpiar cualquier estado residual
+    if user_id in active_mass:
+        active_mass.discard(user_id)
+    
     await show_main_menu(update, context, edit=False)
 
 # ================== COMANDO STOP ==================
@@ -2272,7 +2406,7 @@ async def post_init(application: Application):
     
     card_service = CardCheckService(db, user_manager, checker)
     
-    logger.info("✅ Bot inicializado con clase Settings y detección corregida")
+    logger.info("✅ Bot inicializado con correcciones de timeout y caché")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2290,7 +2424,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado con detección inteligente corregida")
+    logger.info("🚀 Bot iniciado con todas las correcciones")
     app.run_polling()
 
 if __name__ == "__main__":
