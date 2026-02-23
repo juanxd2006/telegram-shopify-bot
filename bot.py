@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN ÉLITE
+Bot de Telegram para verificar tarjetas - VERSIÓN ÉLITE CORREGIDA
 Con UltraHealth para proxies, formato profesional y todas las optimizaciones.
 """
 
@@ -266,121 +266,6 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
-# ================== ULTRAHEALTH PARA PROXIES ==================
-class ProxyHealthChecker:
-    def __init__(self, db: Database, user_id: int):
-        self.db = db
-        self.user_id = user_id
-        self.test_url = "https://httpbin.org/ip"  # URL de prueba confiable
-        self.timeout = 8  # Timeout rápido para health check
-        self._lock = asyncio.Lock()
-        
-    async def check_proxy(self, proxy: str) -> Dict:
-        """Verifica si un proxy está vivo y mide su rendimiento (ultra rápido)"""
-        start_time = time.time()
-        result = {
-            "proxy": proxy,
-            "alive": False,
-            "response_time": 0,
-            "error": None,
-            "ip": None
-        }
-        
-        try:
-            # Configurar el proxy para aiohttp
-            proxy_parts = proxy.split(':')
-            if len(proxy_parts) == 4:  # host:port:user:pass
-                proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-            else:  # host:port o host:port::
-                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-            
-            # Timeout más agresivo para health check
-            timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
-            
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(self.test_url, proxy=proxy_url) as resp:
-                    if resp.status == 200:
-                        elapsed = time.time() - start_time
-                        result["alive"] = True
-                        result["response_time"] = elapsed
-                        # Intentar obtener la IP asignada
-                        try:
-                            data = await resp.json()
-                            result["ip"] = data.get("origin", "Unknown")
-                        except:
-                            pass
-                    else:
-                        result["error"] = f"HTTP {resp.status}"
-        except asyncio.TimeoutError:
-            result["error"] = "Timeout"
-        except aiohttp.ClientProxyConnectionError:
-            result["error"] = "Proxy connection failed"
-        except aiohttp.ClientHttpProxyError:
-            result["error"] = "HTTP proxy error"
-        except Exception as e:
-            result["error"] = str(e)[:50]
-        
-        return result
-    
-    async def check_all_proxies(self, proxies: List[str], max_concurrent: int = 20) -> List[Dict]:
-        """Verifica todos los proxies en paralelo (ULTRA RÁPIDO)"""
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def check_with_semaphore(proxy):
-            async with semaphore:
-                return await self.check_proxy(proxy)
-        
-        tasks = [check_with_semaphore(p) for p in proxies]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Procesar resultados
-        final_results = []
-        for i, res in enumerate(results):
-            if isinstance(res, Exception):
-                final_results.append({
-                    "proxy": proxies[i],
-                    "alive": False,
-                    "response_time": 0,
-                    "error": str(res),
-                    "ip": None
-                })
-            else:
-                final_results.append(res)
-        
-        return final_results
-    
-    async def update_proxy_stats(self, results: List[Dict]):
-        """Actualiza estadísticas de proxies en la base de datos"""
-        async with self._lock:
-            # Crear tabla si no existe
-            await self.db.execute('''
-                CREATE TABLE IF NOT EXISTS proxy_stats (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    proxy TEXT,
-                    alive INTEGER DEFAULT 0,
-                    response_time REAL DEFAULT 0,
-                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    ip TEXT,
-                    error TEXT,
-                    UNIQUE(user_id, proxy)
-                )
-            ''')
-            
-            for r in results:
-                await self.db.execute('''
-                    INSERT OR REPLACE INTO proxy_stats 
-                    (user_id, proxy, alive, response_time, last_check, ip, error)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
-                ''', (
-                    self.user_id, 
-                    r["proxy"], 
-                    1 if r["alive"] else 0,
-                    r["response_time"],
-                    r["ip"],
-                    r["error"]
-                ))
-
 # ================== BASE DE DATOS OPTIMIZADA CON MIGRACIÓN ==================
 class Database:
     def __init__(self, db_path=DB_FILE):
@@ -439,7 +324,7 @@ class Database:
                 )
             ''')
             
-            # Tabla learning
+            # Tabla learning (versión básica)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS learning (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,12 +336,8 @@ class Database:
                     timeouts INTEGER DEFAULT 0,
                     declines INTEGER DEFAULT 0,
                     charged INTEGER DEFAULT 0,
-                    captcha INTEGER DEFAULT 0,
-                    three_ds INTEGER DEFAULT 0,
                     total_time REAL DEFAULT 0,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_success TIMESTAMP,
-                    consecutive_fails INTEGER DEFAULT 0,
                     UNIQUE(user_id, site, proxy)
                 )
             ''')
@@ -656,6 +537,121 @@ class Database:
             except asyncio.CancelledError:
                 pass
 
+# ================== ULTRAHEALTH PARA PROXIES ==================
+class ProxyHealthChecker:
+    def __init__(self, db: Database, user_id: int):
+        self.db = db
+        self.user_id = user_id
+        self.test_url = "https://httpbin.org/ip"
+        self.timeout = 8
+        self._lock = asyncio.Lock()
+        
+    async def check_proxy(self, proxy: str) -> Dict:
+        """Verifica si un proxy está vivo y mide su rendimiento (ultra rápido)"""
+        start_time = time.time()
+        result = {
+            "proxy": proxy,
+            "alive": False,
+            "response_time": 0,
+            "error": None,
+            "ip": None
+        }
+        
+        try:
+            # Configurar el proxy para aiohttp
+            proxy_parts = proxy.split(':')
+            if len(proxy_parts) == 4:  # host:port:user:pass
+                proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+            else:  # host:port o host:port::
+                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+            
+            # Timeout más agresivo para health check
+            timeout = aiohttp.ClientTimeout(total=self.timeout, connect=5)
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.test_url, proxy=proxy_url) as resp:
+                    if resp.status == 200:
+                        elapsed = time.time() - start_time
+                        result["alive"] = True
+                        result["response_time"] = elapsed
+                        # Intentar obtener la IP asignada
+                        try:
+                            data = await resp.json()
+                            result["ip"] = data.get("origin", "Unknown")
+                        except:
+                            pass
+                    else:
+                        result["error"] = f"HTTP {resp.status}"
+        except asyncio.TimeoutError:
+            result["error"] = "Timeout"
+        except aiohttp.ClientProxyConnectionError:
+            result["error"] = "Proxy connection failed"
+        except aiohttp.ClientHttpProxyError:
+            result["error"] = "HTTP proxy error"
+        except Exception as e:
+            result["error"] = str(e)[:50]
+        
+        return result
+    
+    async def check_all_proxies(self, proxies: List[str], max_concurrent: int = 20) -> List[Dict]:
+        """Verifica todos los proxies en paralelo (ULTRA RÁPIDO)"""
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def check_with_semaphore(proxy):
+            async with semaphore:
+                return await self.check_proxy(proxy)
+        
+        tasks = [check_with_semaphore(p) for p in proxies]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Procesar resultados
+        final_results = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                final_results.append({
+                    "proxy": proxies[i],
+                    "alive": False,
+                    "response_time": 0,
+                    "error": str(res),
+                    "ip": None
+                })
+            else:
+                final_results.append(res)
+        
+        return final_results
+    
+    async def update_proxy_stats(self, results: List[Dict]):
+        """Actualiza estadísticas de proxies en la base de datos"""
+        async with self._lock:
+            # Crear tabla si no existe
+            await self.db.execute('''
+                CREATE TABLE IF NOT EXISTS proxy_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    proxy TEXT,
+                    alive INTEGER DEFAULT 0,
+                    response_time REAL DEFAULT 0,
+                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip TEXT,
+                    error TEXT,
+                    UNIQUE(user_id, proxy)
+                )
+            ''')
+            
+            for r in results:
+                await self.db.execute('''
+                    INSERT OR REPLACE INTO proxy_stats 
+                    (user_id, proxy, alive, response_time, last_check, ip, error)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+                ''', (
+                    self.user_id, 
+                    r["proxy"], 
+                    1 if r["alive"] else 0,
+                    r["response_time"],
+                    r["ip"],
+                    r["error"]
+                ))
+
 # ================== SISTEMA DE APRENDIZAJE DINÁMICO ==================
 class LearningSystem:
     def __init__(self, db: Database, user_id: int):
@@ -669,6 +665,7 @@ class LearningSystem:
         self._stats_lock = asyncio.Lock()
 
     def _get_dynamic_epsilon(self, total_attempts: int) -> float:
+        """Epsilon dinámico: baja con más datos"""
         if total_attempts < 50:
             return self.BASE_EPSILON
         decay = max(0, 1 - (total_attempts - 50) / 500)
@@ -698,6 +695,7 @@ class LearningSystem:
                 three_ds = int(existing["three_ds"] * decay) + (1 if result.status == CheckStatus.THREE_DS else 0)
                 total_time = existing["total_time"] * decay + elapsed
                 
+                # Conteo de fallos consecutivos
                 consecutive_fails = existing["consecutive_fails"] + 1 if not result.success else 0
                 
                 await self.db.execute(
@@ -770,6 +768,8 @@ class LearningSystem:
         return score
 
     async def choose_combination(self, sites: List[str], proxies: List[str]) -> Tuple[str, str]:
+        """Elige combinación con epsilon dinámico"""
+        # Obtener total de intentos para ajustar epsilon
         total = await self.db.fetch_one(
             "SELECT SUM(attempts) as total FROM learning WHERE user_id = ?",
             (self.user_id,)
@@ -800,7 +800,6 @@ class UltraFastChecker:
         self._active_requests = 0
         self._request_lock = asyncio.Lock()
         self._api_stats = defaultdict(lambda: {"success": 0, "fail": 0, "times": []})
-        self._current_api_index = 0
 
     async def initialize(self):
         if self._initialized:
@@ -869,6 +868,37 @@ class UltraFastChecker:
         if self.connector:
             await self.connector.close()
 
+    async def _check_api_health(self, endpoint: str) -> bool:
+        """Health check rápido antes de usar"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(endpoint, timeout=5) as resp:
+                    return resp.status < 500
+        except:
+            return False
+
+    async def _get_best_api(self) -> str:
+        """Selecciona el mejor API basado en estadísticas"""
+        if not self._api_stats:
+            return API_ENDPOINTS[0]
+        
+        # Calcular puntuación para cada API
+        scores = []
+        for i, endpoint in enumerate(API_ENDPOINTS):
+            stats = self._api_stats[endpoint]
+            total = stats["success"] + stats["fail"]
+            if total == 0:
+                scores.append((1.0, i, endpoint))
+                continue
+            
+            success_rate = stats["success"] / total
+            avg_time = statistics.mean(stats["times"][-10:]) if stats["times"] else 1.0
+            score = success_rate * 2.0 - (avg_time / 2.0)
+            scores.append((score, i, endpoint))
+        
+        scores.sort(reverse=True)
+        return scores[0][2]
+
     async def check_card(self, site: str, proxy: str, card_data: Dict) -> CheckResult:
         card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
         
@@ -880,6 +910,7 @@ class UltraFastChecker:
         api_used = API_ENDPOINTS[0]
         
         try:
+            # Probar APIs en orden hasta que una funcione
             for endpoint in API_ENDPOINTS:
                 api_used = endpoint
                 params = {"site": site, "cc": card_str, "proxy": proxy}
@@ -889,17 +920,20 @@ class UltraFastChecker:
                         elapsed = time.time() - start_time
                         response_text = await resp.text()
                         
+                        # Actualizar estadísticas del API
                         self._api_stats[endpoint]["times"].append(elapsed)
                         if resp.status < 500:
                             self._api_stats[endpoint]["success"] += 1
                         else:
                             self._api_stats[endpoint]["fail"] += 1
                         
+                        # Determinar tipo de respuesta
                         status = CheckStatus.ERROR
                         success = False
                         
                         if resp.status >= 500:
                             status = CheckStatus.ERROR
+                            # Probar siguiente API
                             continue
                         elif resp.status >= 400:
                             status = CheckStatus.DECLINED
@@ -939,6 +973,7 @@ class UltraFastChecker:
                     logger.error(f"Error inesperado con API {endpoint}: {e}")
                     continue
             
+            # Si todas las APIs fallaron
             elapsed = time.time() - start_time
             return CheckResult(
                 card_bin=card_data["bin"],
@@ -966,9 +1001,11 @@ class UserManager:
         self._load_users()
 
     def _load_users(self):
+        """Carga usuarios de la BD"""
         pass
 
     async def check_rate_limit(self, user_id: int, command: str) -> Tuple[bool, str]:
+        """Rate limit por comando específico"""
         today = datetime.now().date()
         
         row = await self.db.fetch_one(
@@ -985,12 +1022,14 @@ class UserManager:
             )
             return True, ""
         
+        # Verificar si está baneado
         if row.get("banned_until"):
             ban_time = datetime.fromisoformat(row["banned_until"])
             if ban_time > datetime.now():
                 remaining = (ban_time - datetime.now()).seconds
                 return False, f"⛔ Baneado por {remaining//60}m {remaining%60}s"
         
+        # Reset diario
         last_reset = datetime.fromisoformat(row["last_reset"]).date()
         if last_reset < today:
             await self.db.execute(
@@ -1003,22 +1042,26 @@ class UserManager:
             checks_today = row["checks_today"]
             mass_hour = row["mass_hour"]
         
+        # Límite diario general
         if checks_today >= DAILY_LIMIT_CHECKS:
             return False, f"📅 Límite diario alcanzado ({DAILY_LIMIT_CHECKS})"
         
+        # Límites específicos por comando
         if command == "mass":
             if mass_hour >= MASS_LIMIT_PER_HOUR:
                 return False, f"⚠️ Máximo {MASS_LIMIT_PER_HOUR} mass/hora"
             
+            # Cooldown progresivo para mass
             if row.get("last_mass"):
                 last_mass = datetime.fromisoformat(row["last_mass"])
                 elapsed = (datetime.now() - last_mass).seconds
-                required_cooldown = 30 + (mass_hour * 10)
+                required_cooldown = 30 + (mass_hour * 10)  # Progresivo: 30s, 40s, 50s...
                 if elapsed < required_cooldown:
                     wait = required_cooldown - elapsed
                     return False, f"⏳ Espera {wait}s para otro mass"
         
         elif command == "check":
+            # Cooldown normal para check
             last_command = datetime.fromisoformat(row["last_command"])
             seconds_since = (datetime.now() - last_command).seconds
             if seconds_since < RATE_LIMIT_SECONDS:
@@ -1027,6 +1070,7 @@ class UserManager:
         return True, ""
 
     async def increment_checks(self, user_id: int, command: str, success: bool = True):
+        """Incrementa contadores según el comando"""
         now = datetime.now()
         
         if command == "mass":
@@ -1047,12 +1091,14 @@ class UserManager:
                 (now, user_id)
             )
         
+        # Registrar timeout para detección de abuso
         if not success:
             await self.db.execute(
                 "UPDATE rate_limits SET timeout_count = timeout_count + 1 WHERE user_id = ?",
                 (user_id,)
             )
             
+            # Verificar si hay abuso
             row = await self.db.fetch_one(
                 "SELECT timeout_count FROM rate_limits WHERE user_id = ?",
                 (user_id,)
@@ -1062,6 +1108,7 @@ class UserManager:
                 logger.warning(f"Usuario {user_id} baneado por abuso (10+ timeouts)")
 
     async def ban_user(self, user_id: int, minutes: int = 30):
+        """Banea a un usuario por abuso"""
         ban_until = datetime.now() + timedelta(minutes=minutes)
         await self.db.execute(
             "UPDATE rate_limits SET banned_until = ?, abuse_warnings = abuse_warnings + 1 WHERE user_id = ?",
@@ -1120,6 +1167,7 @@ class UserManager:
             self.users[user_id].tasks.clear()
 
     async def cancel_all_tasks(self):
+        """Cancela todas las tareas de todos los usuarios"""
         logger.info("🛑 Cancelando todas las tareas de usuarios...")
         for user_id in list(self.users.keys()):
             await self.cancel_user_tasks(user_id)
@@ -1165,6 +1213,7 @@ class CardCheckService:
         
         learning = LearningSystem(self.db, user_id)
         
+        # Lock para estadísticas compartidas
         stats_lock = asyncio.Lock()
         
         async def worker(worker_id: int):
@@ -1182,6 +1231,7 @@ class CardCheckService:
                 
                 result = await self.checker.check_card(site, proxy, card_data)
                 
+                # Actualizar estadísticas locales
                 worker_processed += 1
                 if result.success:
                     worker_success += 1
@@ -1190,6 +1240,7 @@ class CardCheckService:
                 await learning.update(result)
                 await self.db.queue_result(user_id, result)
                 
+                # Actualizar estadísticas globales con lock
                 async with stats_lock:
                     processed += 1
                     if result.success:
@@ -1216,6 +1267,7 @@ class CardCheckService:
         except asyncio.CancelledError:
             pass
         
+        # Incrementar contador de mass
         await self.user_manager.increment_checks(user_id, "mass", success_count > 0)
         
         elapsed = time.time() - start_time
