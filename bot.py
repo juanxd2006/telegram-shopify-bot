@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN OPTIMIZADA
-Con una sesión por worker, timeout total en requests y proxy real.
+Bot de Telegram para verificar tarjetas - VERSIÓN FINAL OPTIMIZADA
+Con timeouts en resp.text(), BIN lookup no bloqueante y manejo real de proxies.
 """
 
 import os
@@ -62,6 +62,7 @@ class Settings:
         "sock_read": 5,
         "total": 8,
         "response_body": 3,
+        "bin_lookup": 2,  # Timeout para BIN lookup (más bajo)
     }
 
     CONFIDENCE_CONFIG = {
@@ -80,9 +81,55 @@ logger = logging.getLogger(__name__)
 
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
 
-# ================== CACHÉ DE BIN ==================
+# ================== CACHÉ DE BIN (CON SESIÓN COMPARTIDA) ==================
 BIN_CACHE = {}
 BIN_CACHE_LOCK = asyncio.Lock()
+BIN_SESSION = None
+BIN_SESSION_LOCK = asyncio.Lock()
+
+async def get_bin_session() -> aiohttp.ClientSession:
+    """Obtiene o crea una sesión compartida para BIN lookup"""
+    global BIN_SESSION
+    async with BIN_SESSION_LOCK:
+        if BIN_SESSION is None or BIN_SESSION.closed:
+            timeout = aiohttp.ClientTimeout(total=Settings.TIMEOUT_CONFIG["bin_lookup"])
+            BIN_SESSION = aiohttp.ClientSession(timeout=timeout)
+        return BIN_SESSION
+
+async def get_bin_info(bin_code: str) -> Dict:
+    """Consulta información de BIN con caché y sesión compartida"""
+    async with BIN_CACHE_LOCK:
+        if bin_code in BIN_CACHE:
+            cache_time, data = BIN_CACHE[bin_code]
+            if (datetime.now() - cache_time).total_seconds() < 86400:
+                return data
+    
+    try:
+        session = await get_bin_session()
+        async with session.get(f"https://lookup.binlist.net/{bin_code}") as resp:
+            if resp.status == 200:
+                try:
+                    data = await asyncio.wait_for(resp.json(), timeout=Settings.TIMEOUT_CONFIG["bin_lookup"])
+                    result = {
+                        "bank": data.get("bank", {}).get("name", "Unknown"),
+                        "brand": data.get("scheme", "Unknown").upper(),
+                        "country": data.get("country", {}).get("alpha2", "UN"),
+                        "type": data.get("type", "Unknown"),
+                    }
+                    
+                    async with BIN_CACHE_LOCK:
+                        BIN_CACHE[bin_code] = (datetime.now(), result)
+                    
+                    return result
+                except asyncio.TimeoutError:
+                    logger.debug(f"Timeout leyendo BIN {bin_code}")
+    except Exception as e:
+        logger.debug(f"Error consultando BIN {bin_code}: {e}")
+    
+    default = {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
+    async with BIN_CACHE_LOCK:
+        BIN_CACHE[bin_code] = (datetime.now(), default)
+    return default
 
 # ================== ENUMS ==================
 class CheckStatus(Enum):
@@ -98,7 +145,8 @@ class CheckStatus(Enum):
     CAPTCHA = "captcha"
     CONNECT_TIMEOUT = "connect_timeout"
     READ_TIMEOUT = "read_timeout"
-    API_TIMEOUT = "api_timeout"  # Nuevo: timeout de request completa
+    API_TIMEOUT = "api_timeout"
+    BODY_TIMEOUT = "body_timeout"  # Nuevo: timeout en lectura de body
     POSSIBLE_APPROVAL = "possible_approval"
     AMBIGUOUS = "ambiguous"
     UNKNOWN = "unknown"
@@ -272,6 +320,7 @@ def get_status_emoji(status: CheckStatus) -> str:
         CheckStatus.CONNECT_TIMEOUT: "⏱️",
         CheckStatus.READ_TIMEOUT: "⏱️",
         CheckStatus.API_TIMEOUT: "⏱️",
+        CheckStatus.BODY_TIMEOUT: "⏱️",
         CheckStatus.AMBIGUOUS: "❓",
         CheckStatus.UNKNOWN: "❓",
     }
@@ -298,38 +347,6 @@ def extract_price(text: str) -> str:
     except:
         pass
     return "N/A"
-
-# ================== BIN LOOKUP CON CACHÉ ==================
-async def get_bin_info(bin_code: str) -> Dict:
-    async with BIN_CACHE_LOCK:
-        if bin_code in BIN_CACHE:
-            cache_time, data = BIN_CACHE[bin_code]
-            if (datetime.now() - cache_time).total_seconds() < 86400:
-                return data
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://lookup.binlist.net/{bin_code}", timeout=3) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    result = {
-                        "bank": data.get("bank", {}).get("name", "Unknown"),
-                        "brand": data.get("scheme", "Unknown").upper(),
-                        "country": data.get("country", {}).get("alpha2", "UN"),
-                        "type": data.get("type", "Unknown"),
-                    }
-                    
-                    async with BIN_CACHE_LOCK:
-                        BIN_CACHE[bin_code] = (datetime.now(), result)
-                    
-                    return result
-    except Exception as e:
-        logger.debug(f"Error consultando BIN {bin_code}: {e}")
-    
-    default = {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
-    async with BIN_CACHE_LOCK:
-        BIN_CACHE[bin_code] = (datetime.now(), default)
-    return default
 
 # ================== VALIDACIÓN DE TARJETAS ==================
 class CardValidator:
@@ -662,6 +679,9 @@ class Database:
                 await self._batch_task
             except asyncio.CancelledError:
                 pass
+        global BIN_SESSION
+        if BIN_SESSION and not BIN_SESSION.closed:
+            await BIN_SESSION.close()
 
 # ================== PROXY HEALTH CHECKER ==================
 class ProxyHealthChecker:
@@ -734,7 +754,7 @@ class ProxyHealthChecker:
         
         return final_results
 
-# ================== EJECUTOR DE JOBS (AHORA RECIBE SESSION) ==================
+# ================== EJECUTOR DE JOBS ==================
 class JobExecutor:
     """Ejecuta un job usando una sesión HTTP existente (compartida por worker)"""
     
@@ -747,14 +767,14 @@ class JobExecutor:
         
         start_time = time.time()
         
-        # Obtener info de BIN (con caché)
+        # Obtener info de BIN (con caché y sesión compartida)
         bin_info = await get_bin_info(card_data['bin'])
         
         try:
             # Rotar endpoint
             api_endpoint = random.choice(Settings.API_ENDPOINTS)
             
-            # CONEXIÓN CON PROXY REAL (si el proxy lo requiere)
+            # Configurar proxy real
             proxy_parts = job.proxy.split(':')
             if len(proxy_parts) == 4:
                 proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
@@ -765,17 +785,48 @@ class JobExecutor:
             else:
                 proxy_url = None
             
-            # TIMEOUT TOTAL EN LA REQUEST (ANTI-CUELGUE)
+            # TIMEOUT TOTAL EN LA REQUEST
             try:
                 async with asyncio.timeout(Settings.TIMEOUT_CONFIG["total"]):
                     if proxy_url:
                         async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
                             elapsed = time.time() - start_time
-                            response_text = await resp.text()
+                            # TIMEOUT ESPECÍFICO PARA LEER EL BODY
+                            try:
+                                response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                            except asyncio.TimeoutError:
+                                response_text = ""
+                                return JobResult(
+                                    job=job,
+                                    status=CheckStatus.BODY_TIMEOUT,
+                                    confidence=Confidence.CONFIRMED,
+                                    reason="body read timeout",
+                                    response_time=time.time() - start_time,
+                                    http_code=resp.status,
+                                    response_text="",
+                                    success=False,
+                                    bin_info=bin_info,
+                                    price="N/A"
+                                )
                     else:
                         async with session.get(api_endpoint, params=params) as resp:
                             elapsed = time.time() - start_time
-                            response_text = await resp.text()
+                            try:
+                                response_text = await asyncio.wait_for(resp.text(), timeout=Settings.TIMEOUT_CONFIG["response_body"])
+                            except asyncio.TimeoutError:
+                                response_text = ""
+                                return JobResult(
+                                    job=job,
+                                    status=CheckStatus.BODY_TIMEOUT,
+                                    confidence=Confidence.CONFIRMED,
+                                    reason="body read timeout",
+                                    response_time=time.time() - start_time,
+                                    http_code=resp.status,
+                                    response_text="",
+                                    success=False,
+                                    bin_info=bin_info,
+                                    price="N/A"
+                                )
             except asyncio.TimeoutError:
                 elapsed = time.time() - start_time
                 return JobResult(
@@ -822,21 +873,6 @@ class JobExecutor:
                 bin_info=bin_info,
                 price=price,
                 patterns_detected=patterns
-            )
-            
-        except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
-            return JobResult(
-                job=job,
-                status=CheckStatus.READ_TIMEOUT,
-                confidence=Confidence.CONFIRMED,
-                reason="read timeout",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=bin_info,
-                price="N/A"
             )
             
         except Exception as e:
@@ -1699,7 +1735,9 @@ async def settings_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Connect timeout: `{Settings.TIMEOUT_CONFIG['connect']}s`\n"
         f"Read timeout: `{Settings.TIMEOUT_CONFIG['sock_read']}s`\n"
-        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n\n"
+        f"Total timeout: `{Settings.TIMEOUT_CONFIG['total']}s`\n"
+        f"Body read timeout: `{Settings.TIMEOUT_CONFIG['response_body']}s`\n"
+        f"BIN lookup timeout: `{Settings.TIMEOUT_CONFIG['bin_lookup']}s`\n\n"
         "These values are optimized for balance between speed and reliability."
     )
     
@@ -2307,7 +2345,7 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado con sesiones por worker")
+    logger.info("✅ Bot inicializado con timeouts completos y BIN compartido")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2322,7 +2360,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado sin saturación de conexiones")
+    logger.info("🚀 Bot iniciado sin timeouts fantasma")
     app.run_polling()
 
 if __name__ == "__main__":
