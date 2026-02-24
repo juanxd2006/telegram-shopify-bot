@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN ANTI-BLOQUEO
-Con Shopify + GiveWP, detección inteligente de archivos y rotación de proxies
+Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA
+Con Shopify + GiveWP, detección inteligente de archivos, rotación de proxies
+y ANALIZADOR DE CAPTCHA
 """
 
 import os
@@ -344,6 +345,266 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
+# ================== NUEVO: CAPTCHA DETECTOR ==================
+class CaptchaDetector:
+    """Detecta si un sitio web tiene CAPTCHA y de qué tipo"""
+    
+    # Patrones de detección
+    CAPTCHA_PATTERNS = {
+        'recaptcha_v2': [
+            r'google\.com/recaptcha/api\.js',
+            r'g-recaptcha',
+            r'data-sitekey=',
+            r'recaptcha\.js',
+            r'recaptcha\/api\.js'
+        ],
+        'recaptcha_v3': [
+            r'recaptcha\/api\.js.*render=',
+            r'g-recaptcha.*v3',
+            r'recaptcha.*v3'
+        ],
+        'hcaptcha': [
+            r'hcaptcha\.com',
+            r'h-captcha',
+            r'js\.hcaptcha\.com',
+            r'hcaptcha.*sitekey'
+        ],
+        'cloudflare_turnstile': [
+            r'challenges\.cloudflare\.com',
+            r'turnstile',
+            r'cf-challenge'
+        ],
+        'geetest': [
+            r'geetest\.com',
+            r'gt\.geetest\.com',
+            r'geetest\.js'
+        ],
+        'funcaptcha': [
+            r'funcaptcha\.com',
+            r'arkoselabs\.com',
+            r'cdn\.arkoselabs\.com'
+        ],
+        'datadome': [
+            r'datadome\.co',
+            r'js\.datadome\.co',
+            r'geo\.datadome\.co'
+        ],
+        'aws_waf': [
+            r'aws-waf-captcha',
+            r'awswaf',
+            r'captcha\.aws'
+        ],
+        'generic': [
+            r'captcha',
+            r'challenge',
+            r'verify',
+            r'robot',
+            r'security.*check'
+        ]
+    }
+    
+    # Servicios de resolución de CAPTCHA (para referencia)
+    CAPTCHA_SERVICES = {
+        'recaptcha_v2': 'Google reCAPTCHA v2 (casilla/imágenes)',
+        'recaptcha_v3': 'Google reCAPTCHA v3 (invisible, basado en puntuación)',
+        'hcaptcha': 'hCaptcha (alternativa a reCAPTCHA)',
+        'cloudflare_turnstile': 'Cloudflare Turnstile',
+        'geetest': 'GeeTest (deslizador/rompecabezas)',
+        'funcaptcha': 'FunCaptcha (Arkoselabs)',
+        'datadome': 'DataDome (protección avanzada)',
+        'aws_waf': 'AWS WAF Captcha',
+        'generic': 'CAPTCHA genérico'
+    }
+    
+    @staticmethod
+    async def detect_from_html(url: str, html: str) -> Dict:
+        """
+        Detecta CAPTCHA analizando el HTML de la página
+        
+        Args:
+            url: URL del sitio analizado
+            html: Contenido HTML de la página
+            
+        Returns:
+            Dict con resultados de detección
+        """
+        results = {
+            'url': url,
+            'has_captcha': False,
+            'detected_types': [],
+            'details': {},
+            'sitekeys': {},
+            'confidence': 'LOW',
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        html_lower = html.lower()
+        
+        # Buscar patrones
+        for captcha_type, patterns in CaptchaDetector.CAPTCHA_PATTERNS.items():
+            matches = []
+            for pattern in patterns:
+                found = re.findall(pattern, html_lower)
+                if found:
+                    matches.extend(found)
+                    # Intentar extraer sitekey
+                    sitekey_match = re.search(r'sitekey["\']?:\s*["\']([^"\']+)["\']', html_lower)
+                    if sitekey_match:
+                        results['sitekeys'][captcha_type] = sitekey_match.group(1)
+            
+            if matches:
+                results['has_captcha'] = True
+                results['detected_types'].append(captcha_type)
+                results['details'][captcha_type] = {
+                    'matches': len(matches),
+                    'service': CaptchaDetector.CAPTCHA_SERVICES.get(captcha_type, 'Desconocido')
+                }
+        
+        # Calcular confianza
+        if len(results['detected_types']) > 0:
+            if len(results['detected_types']) >= 2 or 'recaptcha_v2' in results['detected_types']:
+                results['confidence'] = 'HIGH'
+            elif len(results['detected_types']) == 1:
+                results['confidence'] = 'MEDIUM'
+        
+        return results
+    
+    @staticmethod
+    async def analyze_headers(headers: Dict) -> Dict:
+        """
+        Analiza headers HTTP en busca de indicadores de seguridad
+        
+        Args:
+            headers: Headers de la respuesta HTTP
+            
+        Returns:
+            Dict con indicadores de seguridad
+        """
+        indicators = {
+            'has_security_headers': False,
+            'server': headers.get('Server', 'Desconocido'),
+            'cf_ray': 'cf-ray' in headers,
+            'cloudflare': 'cloudflare' in headers.get('Server', '').lower(),
+            'datadome': 'datadome' in str(headers).lower(),
+            'akamai': 'akamai' in headers.get('Server', '').lower()
+        }
+        
+        indicators['has_security_headers'] = any([
+            indicators['cf_ray'],
+            indicators['cloudflare'],
+            indicators['datadome'],
+            indicators['akamai']
+        ])
+        
+        return indicators
+    
+    @staticmethod
+    async def check_site(url: str, timeout: int = 15) -> Dict:
+        """
+        Analiza un sitio web completo para detectar CAPTCHA
+        
+        Args:
+            url: URL del sitio a analizar
+            timeout: Timeout en segundos
+            
+        Returns:
+            Dict con análisis completo
+        """
+        logger.info(f"🔍 Analizando sitio: {url}")
+        
+        # Normalizar URL
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                start_time = time.time()
+                
+                # Headers como navegador real
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1'
+                }
+                
+                async with session.get(url, headers=headers, timeout=timeout, ssl=False) as resp:
+                    html = await resp.text()
+                    elapsed = time.time() - start_time
+                    
+                    logger.info(f"✅ Sitio cargado en {elapsed:.2f}s - Status: {resp.status}")
+                    
+                    # Analizar HTML
+                    html_analysis = await CaptchaDetector.detect_from_html(url, html)
+                    
+                    # Analizar headers
+                    headers_analysis = await CaptchaDetector.analyze_headers(dict(resp.headers))
+                    
+                    # Análisis de scripts externos
+                    external_scripts = re.findall(r'<script[^>]*src=["\'](https?://[^"\']+)["\']', html)
+                    
+                    # Detectar servicios de resolución (para debug)
+                    resolution_services = []
+                    if 'capsolver' in html.lower():
+                        resolution_services.append('CapSolver detectado')
+                    if '2captcha' in html.lower():
+                        resolution_services.append('2Captcha detectado')
+                    if 'anti-captcha' in html.lower():
+                        resolution_services.append('Anti-Captcha detectado')
+                    
+                    return {
+                        'success': True,
+                        'url': url,
+                        'status_code': resp.status,
+                        'response_time': elapsed,
+                        'page_size': len(html),
+                        'security_headers': headers_analysis,
+                        'captcha': html_analysis,
+                        'external_scripts': len(external_scripts),
+                        'resolution_services': resolution_services,
+                        'recommendation': CaptchaDetector._get_recommendation(html_analysis)
+                    }
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ Timeout al analizar {url}")
+            return {
+                'success': False,
+                'url': url,
+                'error': 'Timeout',
+                'recommendation': 'El sitio no responde o es muy lento'
+            }
+        except Exception as e:
+            logger.error(f"❌ Error analizando {url}: {e}")
+            return {
+                'success': False,
+                'url': url,
+                'error': str(e)[:100],
+                'recommendation': 'No se pudo acceder al sitio'
+            }
+    
+    @staticmethod
+    def _get_recommendation(analysis: Dict) -> str:
+        """Genera recomendación basada en el análisis"""
+        if not analysis['has_captcha']:
+            return "✅ Sitio sin CAPTCHA detectable - Ideal para el bot"
+        
+        types = analysis['detected_types']
+        if 'recaptcha_v2' in types:
+            return "⚠️ Tiene reCAPTCHA v2 - Requiere resolución, posible con servicios como CapSolver"
+        elif 'recaptcha_v3' in types:
+            return "⚠️ Tiene reCAPTCHA v3 (invisible) - Más difícil de detectar, requiere tokens de alta puntuación"
+        elif 'hcaptcha' in types:
+            return "⚠️ Tiene hCaptcha - Alternativa común, requiere resolución"
+        elif 'cloudflare_turnstile' in types:
+            return "⚠️ Tiene Cloudflare Turnstile - Desafío moderno, requiere proxy"
+        elif len(types) > 1:
+            return "⚠️ Múltiples sistemas de protección detectados"
+        else:
+            return f"⚠️ Posible CAPTCHA detectado ({types[0] if types else 'desconocido'})"
+
 # ================== CACHÉ DE BIN ==================
 BIN_CACHE = {}
 BIN_CACHE_LOCK = asyncio.Lock()
@@ -665,7 +926,7 @@ class Database:
         if BIN_SESSION and not BIN_SESSION.closed:
             await BIN_SESSION.close()
 
-# ================== ANTI-BLOCK GIVEWP HANDLER (CORREGIDO) ==================
+# ================== ANTI-BLOCK GIVEWP HANDLER ==================
 class AntiBlockGiveWPDonationHandler:
     """Maneja donaciones con técnicas anti-bloqueo - VERSIÓN CORREGIDA"""
     
@@ -1389,6 +1650,124 @@ class CardCheckService:
         finally:
             await handler.close()
 
+# ================== NUEVOS COMANDOS DE ANÁLISIS ==================
+async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analiza un sitio web en busca de CAPTCHA"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /analyze <url>\n"
+            "Ejemplo: /analyze https://donate.schf.org.au"
+        )
+        return
+    
+    url = context.args[0]
+    
+    msg = await update.message.reply_text(f"🔍 Analizando {url}...")
+    
+    result = await CaptchaDetector.check_site(url)
+    
+    if not result['success']:
+        await msg.edit_text(f"❌ Error: {result.get('error', 'Desconocido')}")
+        return
+    
+    # Formatear resultado
+    response = []
+    response.append(f"🔍 *ANÁLISIS DE SITIO*\n━━━━━━━━━━━━━━━━━━\n")
+    response.append(f"📍 URL: `{result['url']}`")
+    response.append(f"📊 Status: {result['status_code']} ({result['response_time']:.2f}s)")
+    
+    # Resultado de CAPTCHA
+    captcha = result['captcha']
+    if captcha['has_captcha']:
+        response.append(f"\n🚫 *CAPTCHA DETECTADO*")
+        for ct in captcha['detected_types']:
+            service = captcha['details'].get(ct, {}).get('service', 'Desconocido')
+            response.append(f"• {service}")
+        response.append(f"\n🎯 Confianza: {captcha['confidence']}")
+    else:
+        response.append(f"\n✅ *NO SE DETECTARON CAPTCHAS*")
+    
+    # Headers de seguridad
+    headers = result['security_headers']
+    if headers['has_security_headers']:
+        response.append(f"\n🛡️ *PROTECCIÓN DETECTADA*")
+        if headers['cloudflare']:
+            response.append(f"• Cloudflare")
+        if headers['datadome']:
+            response.append(f"• DataDome")
+        if headers['akamai']:
+            response.append(f"• Akamai")
+    
+    # Recomendación
+    response.append(f"\n💡 *RECOMENDACIÓN*")
+    response.append(f"{result['recommendation']}")
+    
+    # Servicios de resolución (debug)
+    if result['resolution_services']:
+        response.append(f"\n🔧 *Servicios de resolución detectados*")
+        for svc in result['resolution_services']:
+            response.append(f"• {svc}")
+    
+    await msg.edit_text("\n".join(response), parse_mode="Markdown")
+
+async def find_similar_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Busca sitios similares al actual (hospitales infantiles)"""
+    
+    # Lista de sitios de hospitales infantiles (basado en búsqueda)
+    hospitals = [
+        {
+            'name': 'Royal Children\'s Hospital Foundation (Australia)',
+            'url': 'https://www.rchfoundation.org.au',
+            'note': 'Mismo país que el actual, probablemente sin captcha'
+        },
+        {
+            'name': 'St. Jude Children\'s Research Hospital (EE.UU.)',
+            'url': 'https://www.stjude.org/donate',
+            'note': 'Sistema propio de donaciones'
+        },
+        {
+            'name': 'BC Children\'s Hospital Foundation (Canadá)',
+            'url': 'https://secure.bcchf.ca/donate',
+            'note': 'Sistema canadiense de donaciones'
+        },
+        {
+            'name': 'Texas Children\'s Hospital',
+            'url': 'https://www.texaschildrens.org/support',
+            'note': 'Sistema propio'
+        },
+        {
+            'name': 'Children\'s Minnesota',
+            'url': 'https://www.childrensmn.org/support-childrens',
+            'note': 'Sistema de salud sin fines de lucro'
+        },
+        {
+            'name': 'Alberta Children\'s Hospital Foundation',
+            'url': 'https://www.childrenshospital.ab.ca/ways-to-help/donate',
+            'note': 'Aceptan donaciones internacionales'
+        },
+        {
+            'name': 'Sydney Children\'s Hospital (actual)',
+            'url': 'https://donate.schf.org.au',
+            'note': 'El que ya funciona'
+        }
+    ]
+    
+    response = []
+    response.append("🏥 *HOSPITALES INFANTILES PARA PROBAR*\n")
+    response.append("Estos sitios son similares al que ya usas:\n")
+    
+    for i, hospital in enumerate(hospitals, 1):
+        response.append(f"{i}. *{hospital['name']}*")
+        response.append(f"   🔗 {hospital['url']}")
+        response.append(f"   💡 {hospital['note']}")
+        response.append("")
+    
+    response.append("Usa `/analyze <url>` para verificar si tienen CAPTCHA")
+    
+    await update.message.reply_text("\n".join(response), parse_mode="Markdown")
+
 # ================== VARIABLES GLOBALES ==================
 db = None
 user_manager = None
@@ -1414,6 +1793,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         [InlineKeyboardButton("🧾 CARDS", callback_data="menu_cards")],
         [InlineKeyboardButton("📊 STATS", callback_data="menu_stats")],
         [InlineKeyboardButton("⚙️ SETTINGS", callback_data="menu_settings")],
+        [InlineKeyboardButton("🔍 ANALYZER", callback_data="menu_analyzer")],
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1424,6 +1804,24 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         )
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+
+# ================== SUBMENÚ ANALYZER ==================
+async def show_analyzer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🔍 *HERRAMIENTA DE ANÁLISIS*\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "Analiza sitios web para detectar CAPTCHA:\n\n"
+        "• `/analyze <url>` - Analizar un sitio específico\n"
+        "• `/findsites` - Ver sitios recomendados\n\n"
+        "Ejemplo:\n"
+        "`/analyze https://donate.schf.org.au`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text, parse_mode="Markdown", reply_markup=reply_markup
+    )
 
 # ================== SUBMENÚ DONATE ==================
 async def show_donate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1747,6 +2145,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_mass_menu(update, context)
     elif data == "menu_donate":
         await show_donate_menu(update, context)
+    elif data == "menu_analyzer":
+        await show_analyzer_menu(update, context)
     elif data == "menu_sites":
         await show_sites_menu(update, context)
     elif data == "menu_proxies":
@@ -2021,7 +2421,7 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado - Shopify + GiveWP + Anti-bloqueo")
+    logger.info("✅ Bot inicializado - Shopify + GiveWP + Anti-bloqueo + Analyzer")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -2040,6 +2440,10 @@ def main():
     app.add_handler(CommandHandler("donate10", donate10))
     app.add_handler(CommandHandler("donate20", donate20))
     
+    # Comandos de análisis
+    app.add_handler(CommandHandler("analyze", analyze_site))
+    app.add_handler(CommandHandler("findsites", find_similar_sites))
+    
     # Callbacks
     app.add_handler(CallbackQueryHandler(button_handler))
     
@@ -2047,7 +2451,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Anti-bloqueo - Detección inteligente")
+    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Anti-bloqueo - Detección inteligente - Analyzer")
     app.run_polling()
 
 if __name__ == "__main__":
