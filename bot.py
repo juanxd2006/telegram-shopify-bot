@@ -665,9 +665,9 @@ class Database:
         if BIN_SESSION and not BIN_SESSION.closed:
             await BIN_SESSION.close()
 
-# ================== ANTI-BLOCK GIVEWP HANDLER ==================
+# ================== ANTI-BLOCK GIVEWP HANDLER (CORREGIDO) ==================
 class AntiBlockGiveWPDonationHandler:
-    """Maneja donaciones con técnicas anti-bloqueo"""
+    """Maneja donaciones con técnicas anti-bloqueo - VERSIÓN CORREGIDA"""
     
     def __init__(self, user_id: int, proxies: List[str] = None, session_cookies: str = None):
         self.user_id = user_id
@@ -722,11 +722,13 @@ class AntiBlockGiveWPDonationHandler:
     async def get_session(self) -> aiohttp.ClientSession:
         """Obtiene sesión con proxy y headers rotados"""
         timeout = aiohttp.ClientTimeout(total=60)
+        
+        # 🔥 SOLUCIÓN CLAVE: Eliminar 'br' del Accept-Encoding
         headers = {
             'User-Agent': self._get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate',  # ← ELIMINADO 'br' (Brotli)
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
