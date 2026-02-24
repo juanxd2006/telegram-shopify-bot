@@ -49,7 +49,7 @@ class Settings:
     RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
     DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
     MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
-    MASS_COOLDOWN_MINUTES = 0  # 👈 SIN COOLDOWN
+    MASS_COOLDOWN_MINUTES = 0  # SIN COOLDOWN
     ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
 
     # Configuración de timeouts
@@ -698,6 +698,47 @@ class Database:
         if BIN_SESSION and not BIN_SESSION.closed:
             await BIN_SESSION.close()
 
+    # ===== NUEVO MÉTODO get_stats DENTRO DE LA CLASE =====
+    async def get_stats(self, user_id: int) -> Dict:
+        """Obtiene estadísticas del usuario"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ?", (user_id,))
+            total = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'charged'", (user_id,))
+            charged = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined'", (user_id,))
+            declined = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined_likely'", (user_id,))
+            declined_likely = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status LIKE '%timeout%'", (user_id,))
+            timeout = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'captcha_required'", (user_id,))
+            captcha = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = '3ds_required'", (user_id,))
+            three_ds = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'unknown'", (user_id,))
+            unknown = cursor.fetchone()[0]
+            
+            return {
+                "total": total,
+                "charged": charged,
+                "declined": declined,
+                "declined_likely": declined_likely,
+                "timeout": timeout,
+                "captcha": captcha,
+                "three_ds": three_ds,
+                "unknown": unknown
+            }
+
 # ================== PROXY HEALTH CHECKER ==================
 class ProxyHealthChecker:
     def __init__(self, db: Database, user_id: int):
@@ -892,10 +933,39 @@ class UserManager:
         self._rate_lock = asyncio.Lock()
 
     async def get_user_data(self, user_id: int) -> Dict:
-        return await self.db.get_user_data(user_id)
+        row = await self.db.fetch_one(
+            "SELECT sites, proxies, cards FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        
+        if not row:
+            await self.db.execute(
+                "INSERT INTO users (user_id, sites, proxies, cards) VALUES (?, ?, ?, ?)",
+                (user_id, '[]', '[]', '[]')
+            )
+            return {"sites": [], "proxies": [], "cards": []}
+        
+        return {
+            "sites": json.loads(row["sites"]),
+            "proxies": json.loads(row["proxies"]),
+            "cards": json.loads(row["cards"])
+        }
 
     async def update_user_data(self, user_id: int, sites=None, proxies=None, cards=None):
-        await self.db.update_user_data(user_id, sites, proxies, cards)
+        current = await self.get_user_data(user_id)
+        
+        if sites is not None:
+            current["sites"] = sites
+        if proxies is not None:
+            current["proxies"] = proxies
+        if cards is not None:
+            current["cards"] = cards
+        
+        await self.db.execute(
+            "UPDATE users SET sites = ?, proxies = ?, cards = ? WHERE user_id = ?",
+            (json.dumps(current["sites"]), json.dumps(current["proxies"]), 
+             json.dumps(current["cards"]), user_id)
+        )
 
     async def check_rate_limit(self, user_id: int, command: str) -> Tuple[bool, str]:
         async with self._rate_lock:
@@ -930,7 +1000,7 @@ class UserManager:
             if command == "mass":
                 if mass_count_hour >= Settings.MASS_LIMIT_PER_HOUR:
                     return False, f"⚠️ Máximo {Settings.MASS_LIMIT_PER_HOUR} mass/hora"
-                # 👇 COOLDOWN ELIMINADO - no hay espera entre mass
+                # COOLDOWN ELIMINADO - no hay espera entre mass
             
             elif command == "check":
                 if checks_today >= Settings.DAILY_LIMIT_CHECKS:
@@ -2275,47 +2345,6 @@ async def setworkers_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ Value must be between 1 and 20.")
     except ValueError:
         await update.message.reply_text("❌ Invalid number.")
-
-# ================== MÉTODO PARA OBTENER ESTADÍSTICAS (añadido a Database) ==================
-async def Database.get_stats(self, user_id: int) -> Dict:
-    """Obtiene estadísticas del usuario"""
-    with sqlite3.connect(self.db_path) as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ?", (user_id,))
-        total = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'charged'", (user_id,))
-        charged = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined'", (user_id,))
-        declined = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined_likely'", (user_id,))
-        declined_likely = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status LIKE '%timeout%'", (user_id,))
-        timeout = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'captcha_required'", (user_id,))
-        captcha = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = '3ds_required'", (user_id,))
-        three_ds = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'unknown'", (user_id,))
-        unknown = cursor.fetchone()[0]
-        
-        return {
-            "total": total,
-            "charged": charged,
-            "declined": declined,
-            "declined_likely": declined_likely,
-            "timeout": timeout,
-            "captcha": captcha,
-            "three_ds": three_ds,
-            "unknown": unknown
-        }
 
 # ================== MAIN ==================
 async def shutdown(application: Application):
