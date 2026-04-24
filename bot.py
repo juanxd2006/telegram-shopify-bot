@@ -114,6 +114,7 @@ hits_list = []
 stripe_hits_list = []
 sc_hits_list = []
 last_dead_proxies = []
+pending_file_cards = {}
 
 # Connection pooling - reusable HTTP session
 http_session = requests.Session()
@@ -1885,6 +1886,7 @@ def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None):
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
+    global pending_file_cards
     processing_msg = bot.reply_to(message, "⏳ Analyzing file...")
     try:
         file_info = bot.get_file(message.document.file_id)
@@ -1900,105 +1902,125 @@ def handle_document(message):
             bot.edit_message_text("❌ Could not read file", chat_id=message.chat.id, message_id=processing_msg.message_id)
             return
         
-        file_name = message.document.file_name.lower()
-        
-        # Detectar gateway por nombre
-        if 'charge' in file_name or 'sc' in file_name:
-            gateway = "stripe_charge"
-        elif 'au' in file_name or 'stripe' in file_name:
-            gateway = "stripe_auth"
-        else:
-            gateway = "shopify"
-        
         lines = file_content.split('\n')
-        cards_added = 0
-        cards_dup = 0
-        sites_added = 0
-        proxies_added = 0
+        cards_list = []
+        sites_list = []
+        proxies_list = []
         
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
             line_type = detect_line_type(line)
-            
             if line_type == 'card':
                 parts = line.split('|')
                 if len(parts) >= 4:
-                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-                    if gateway == "stripe_charge":
-                        if add_sc_card(cc, month, year, cvv):
-                            cards_added += 1
-                        else:
-                            cards_dup += 1
-                    elif gateway == "stripe_auth":
-                        if add_stripe_card(cc, month, year, cvv):
-                            cards_added += 1
-                        else:
-                            cards_dup += 1
-                    else:
-                        if add_card(cc, month, year, cvv):
-                            cards_added += 1
-                        else:
-                            cards_dup += 1
-            elif line_type == 'site' and gateway == "shopify":
+                    cards_list.append(line)
+            elif line_type == 'site':
                 url = extract_url_from_text(line)
                 if not url:
                     url = normalize_url(line)
-                if url and add_site(url):
-                    sites_added += 1
-            elif line_type == 'proxy' and gateway == "shopify":
-                if add_proxy(line):
-                    proxies_added += 1
+                if url:
+                    sites_list.append(url)
+            elif line_type == 'proxy':
+                proxies_list.append(line)
         
-        gateway_names = {
-            "shopify": "Shopify",
-            "stripe_auth": "Stripe Auth (FREE)",
-            "stripe_charge": "Stripe Charge"
-        }
+        sites_added = 0
+        proxies_added = 0
+        for url in sites_list:
+            if add_site(url):
+                sites_added += 1
+        for proxy in proxies_list:
+            if add_proxy(proxy):
+                proxies_added += 1
         
-        gw_icon = "💳" if gateway == "stripe_charge" else ("🔓" if gateway == "stripe_auth" else "🛒")
-        response = f"""
+        if not cards_list:
+            response = f"""
 {LINE_DASH}
 📂 *FILE PROCESSED*
 {LINE_DASH}
 
-{gw_icon} *Gateway:* {gateway_names.get(gateway, 'Unknown')}
-
-💳 *Cards Added:* +{cards_added}
-🔄 *Duplicates:* {cards_dup}"""
+💳 *Cards found:* 0"""
+            if sites_added > 0 or proxies_added > 0:
+                response += f"\n🌐 *Sites Added:* +{sites_added}\n📡 *Proxies Added:* +{proxies_added}"
+            else:
+                response += "\n\n❌ No cards, sites or proxies found in file"
+            try:
+                bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+            except:
+                bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+            return
         
-        if gateway == "shopify":
+        chat_id = str(message.chat.id)
+        pending_file_cards[chat_id] = {
+            'cards': cards_list,
+            'sites_added': sites_added,
+            'proxies_added': proxies_added,
+            'timestamp': time.time()
+        }
+        
+        response = f"""
+{LINE_DASH}
+📂 *FILE ANALYZED*
+{LINE_DASH}
+
+💳 *Cards found:* {len(cards_list)}"""
+        if sites_added > 0 or proxies_added > 0:
             response += f"\n🌐 *Sites Added:* +{sites_added}\n📡 *Proxies Added:* +{proxies_added}"
         
-        total_cards = 0
-        if gateway == "stripe_charge":
-            total_cards = len(get_all_sc_cards())
-        elif gateway == "stripe_auth":
-            total_cards = len(get_all_stripe_cards())
-        else:
-            total_cards = len(get_all_cards())
+        response += f"\n\n{LINE_THIN}\n🔽 *Select gateway to load cards:*"
         
-        response += f"\n\n{LINE_THIN}\n📊 *Total cards in queue:* {total_cards}"
-        
-        markup = InlineKeyboardMarkup()
-        if cards_added > 0:
-            if gateway == "stripe_charge":
-                markup.add(InlineKeyboardButton("💳 START SC MASS CHECK ▶️", callback_data="sc_mass"))
-            elif gateway == "stripe_auth":
-                markup.add(InlineKeyboardButton("🔓 START AU MASS CHECK ▶️", callback_data="stripe_mass"))
-            else:
-                markup.add(InlineKeyboardButton("🛒 START MASS CHECK ▶️", callback_data="mass"))
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🛒 Shopify", callback_data="file_gw_shopify"),
+            InlineKeyboardButton("🔓 Stripe Auth (FREE)", callback_data="file_gw_stripe_auth"),
+            InlineKeyboardButton("💳 Stripe Charge", callback_data="file_gw_stripe_charge"),
+            InlineKeyboardButton("📦 ALL GATEWAYS", callback_data="file_gw_all")
+        )
         
         try:
-            bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, 
-                                parse_mode='Markdown', reply_markup=markup if markup.keyboard else None)
+            bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id,
+                                parse_mode='Markdown', reply_markup=markup)
         except:
-            bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+            bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id,
+                                reply_markup=markup)
     
     except Exception as e:
         bot.edit_message_text(f"❌ Error: {str(e)[:100]}", chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+def process_file_cards_to_gateway(chat_id_str, gateway):
+    global pending_file_cards
+    data = pending_file_cards.get(chat_id_str)
+    if not data:
+        return 0, 0, 0
+    
+    cards_list = data.get('cards', [])
+    added = 0
+    dup = 0
+    
+    for card_line in cards_list:
+        parts = card_line.split('|')
+        if len(parts) < 4:
+            continue
+        cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+        
+        if gateway == "shopify":
+            if add_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "stripe_auth":
+            if add_stripe_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "stripe_charge":
+            if add_sc_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+    
+    return len(cards_list), added, dup
 
 def detect_line_type(line):
     line = line.strip()
@@ -3699,6 +3721,76 @@ Please wait while workers finish...""",
         else:
             bot.answer_callback_query(call.id, "No dead proxies to delete")
     
+    elif call.data.startswith("file_gw_"):
+        global pending_file_cards
+        bot.answer_callback_query(call.id)
+        chat_id_str = str(call.message.chat.id)
+        
+        if chat_id_str not in pending_file_cards:
+            try:
+                bot.edit_message_text("❌ No pending cards. Please upload a file again.",
+                                    chat_id=call.message.chat.id, message_id=call.message.message_id)
+            except:
+                pass
+        else:
+            gw_choice = call.data.replace("file_gw_", "")
+            
+            if gw_choice == "all":
+                gateways = ["shopify", "stripe_auth", "stripe_charge"]
+                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge"]
+            elif gw_choice == "shopify":
+                gateways = ["shopify"]
+                gw_names = ["🛒 Shopify"]
+            elif gw_choice == "stripe_auth":
+                gateways = ["stripe_auth"]
+                gw_names = ["🔓 Stripe Auth"]
+            elif gw_choice == "stripe_charge":
+                gateways = ["stripe_charge"]
+                gw_names = ["💳 Stripe Charge"]
+            else:
+                gateways = []
+                gw_names = []
+            
+            total_results = []
+            for gw in gateways:
+                total_cards, added, dup = process_file_cards_to_gateway(chat_id_str, gw)
+                total_results.append((gw, added, dup))
+            
+            if chat_id_str in pending_file_cards:
+                del pending_file_cards[chat_id_str]
+            
+            response = f"""\n{LINE_DASH}\n📂 *CARDS LOADED*\n{LINE_DASH}\n"""
+            
+            for i, (gw, added, dup) in enumerate(total_results):
+                gw_display = gw_names[i] if i < len(gw_names) else gw
+                response += f"\n{gw_display}:\n   ├ ✅ Added: *{added}*\n   └ 🔄 Duplicates: *{dup}*\n"
+            
+            response += f"\n{LINE_THIN}\n📊 *Queues:*\n"
+            response += f"   🛒 Shopify: *{len(get_all_cards())}*\n"
+            response += f"   🔓 Stripe Auth: *{len(get_all_stripe_cards())}*\n"
+            response += f"   💳 Stripe Charge: *{len(get_all_sc_cards())}*"
+            
+            markup = InlineKeyboardMarkup(row_width=1)
+            if gw_choice == "shopify" or gw_choice == "all":
+                if len(get_all_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🛒 START SHOPIFY MASS ▶️", callback_data="mass"))
+            if gw_choice == "stripe_auth" or gw_choice == "all":
+                if len(get_all_stripe_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🔓 START AU MASS ▶️", callback_data="stripe_mass"))
+            if gw_choice == "stripe_charge" or gw_choice == "all":
+                if len(get_all_sc_cards()) > 0:
+                    markup.add(InlineKeyboardButton("💳 START SC MASS ▶️", callback_data="sc_mass"))
+            
+            try:
+                bot.edit_message_text(response, chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                    parse_mode='Markdown', reply_markup=markup if markup.keyboard else None)
+            except:
+                try:
+                    bot.edit_message_text(response.replace('*', ''), chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                        reply_markup=markup if markup.keyboard else None)
+                except:
+                    pass
+    
     elif call.data == "help":
         help_text = f"""❓ *{BOT_NAME} {BOT_VERSION}*
 {LINE_DASH}
@@ -3734,9 +3826,8 @@ Please wait while workers finish...""",
   /stop ─ Stop active mass check
 
 📂 *━━ FILE UPLOAD ━━*
-  Send `.txt` file → auto-load
-  Name with "au"/"stripe" → Stripe Auth
-  Name with "charge"/"sc" → Stripe Charge
+  Send `.txt` file → select gateway
+  Choose: Shopify, Stripe Auth, Stripe Charge, or ALL
 
 🧹 *━━ AUTO-MAINTENANCE ━━*
   Dead sites auto-cleaned every 50 checks
