@@ -125,6 +125,13 @@ failed_proxies = {}
 PROXY_FAIL_THRESHOLD = 3
 PROXY_FAIL_COOLDOWN = 300
 
+# Site performance tracking
+site_stats = {}
+SITE_AUTO_CLEAN_INTERVAL = 50
+site_check_counter = 0
+SITE_MIN_CHECKS = 5
+SITE_FAIL_RATE_THRESHOLD = 0.85
+
 # Stripe Auth sites
 STRIPE_SITES = [
     "https://prontoheat.com",
@@ -811,7 +818,21 @@ def get_random_site():
     sites = [s for s in sites if s and isinstance(s, str)]
     if not sites:
         return None
-    return random.choice(sites)
+    scored = []
+    for s in sites:
+        if s in site_stats:
+            total, success = site_stats[s]
+            if total >= SITE_MIN_CHECKS:
+                rate = success / total
+                scored.append((s, rate))
+            else:
+                scored.append((s, 0.5))
+        else:
+            scored.append((s, 0.5))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_count = max(1, len(scored) // 3)
+    top_sites = [s for s, _ in scored[:top_count]]
+    return random.choice(top_sites)
 
 def fix_all_sites():
     sites = load_sites()
@@ -828,9 +849,46 @@ def fix_all_sites():
 # REPORT SITE RESULT
 # ============================================
 
+def track_site_performance(url, success):
+    """Track site success/failure for smart rotation"""
+    if not url:
+        return
+    if url in site_stats:
+        total, wins = site_stats[url]
+        site_stats[url] = (total + 1, wins + (1 if success else 0))
+    else:
+        site_stats[url] = (1, 1 if success else 0)
+
+def auto_clean_dead_sites():
+    """Remove non-permanent sites with high failure rate"""
+    global site_check_counter
+    site_check_counter += 1
+    if site_check_counter < SITE_AUTO_CLEAN_INTERVAL:
+        return
+    site_check_counter = 0
+    sites = load_sites()
+    removed = []
+    for url in list(sites):
+        if sqlite_backup.is_permanent_site(url):
+            continue
+        if url in site_stats:
+            total, success = site_stats[url]
+            if total >= SITE_MIN_CHECKS:
+                fail_rate = 1 - (success / total)
+                if fail_rate >= SITE_FAIL_RATE_THRESHOLD:
+                    sites.remove(url)
+                    removed.append(url)
+                    print(f"🧹 Auto-cleaned dead site: {url} (fail rate: {fail_rate:.0%})")
+    if removed:
+        save_sites(sites)
+        print(f"🧹 Auto-maintenance: removed {len(removed)} dead sites")
+
 def report_site_result(url, success, response_status=None, card_category=None):
     if not url:
         return
+    
+    track_site_performance(url, success is True)
+    auto_clean_dead_sites()
     
     if card_category in ['CHARGE', '3DS', 'CVV', 'FUNDS', 'LIVE']:
         if not sqlite_backup.is_permanent_site(url):
@@ -929,7 +987,8 @@ def report_proxy_success(proxy_str):
 # PROXY CHECKER
 # ============================================
 
-def check_proxy_socket_fast(proxy_str):
+def check_proxy_socket(proxy_str):
+    """Level 1: TCP socket connection test"""
     try:
         parts = proxy_str.split(':')
         if len(parts) >= 2:
@@ -944,27 +1003,84 @@ def check_proxy_socket_fast(proxy_str):
         pass
     return False
 
-def verify_proxy_batch(proxies, max_workers=PROXY_CHECK_WORKERS):
+def check_proxy_http_connect(proxy_str):
+    """Level 2: HTTP CONNECT tunnel test"""
+    try:
+        parts = proxy_str.split(':')
+        if len(parts) < 2:
+            return False
+        host = parts[0]
+        port = int(parts[1])
+        proxy_url = f"http://{host}:{port}"
+        if len(parts) >= 4:
+            proxy_url = f"http://{parts[2]}:{parts[3]}@{host}:{port}"
+        proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        resp = requests.get('http://httpbin.org/ip', proxies=proxies_dict, timeout=PROXY_CHECK_TIMEOUT + 2, verify=False)
+        return resp.status_code == 200
+    except:
+        return False
+
+def check_proxy_full(proxy_str):
+    """Level 3: Full proxy verification with real HTTP request"""
+    try:
+        parts = proxy_str.split(':')
+        if len(parts) < 2:
+            return False
+        host = parts[0]
+        port = int(parts[1])
+        proxy_url = f"http://{host}:{port}"
+        if len(parts) >= 4:
+            proxy_url = f"http://{parts[2]}:{parts[3]}@{host}:{port}"
+        proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        resp = requests.get('https://www.google.com', proxies=proxies_dict, timeout=PROXY_CHECK_TIMEOUT + 3, verify=False)
+        return resp.status_code == 200
+    except:
+        return False
+
+def check_proxy_deep(proxy_str):
+    """Deep proxy check: socket + HTTP CONNECT + real request"""
+    if not check_proxy_socket(proxy_str):
+        return False, 'SOCKET_FAIL'
+    if not check_proxy_http_connect(proxy_str):
+        return False, 'HTTP_FAIL'
+    if not check_proxy_full(proxy_str):
+        return False, 'REQUEST_FAIL'
+    return True, 'ALL_PASS'
+
+def verify_proxy_batch(proxies, max_workers=PROXY_CHECK_WORKERS, deep=False):
     alive = []
     dead = []
+    reasons = {}
+    check_fn = check_proxy_deep if deep else check_proxy_socket
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_proxy_socket_fast, p): p for p in proxies}
+        futures = {executor.submit(check_fn, p): p for p in proxies}
         for future in as_completed(futures):
             proxy = futures[future]
             try:
-                if future.result(timeout=PROXY_SOCKET_TIMEOUT + 1):
-                    alive.append(proxy)
+                result = future.result(timeout=PROXY_CHECK_TIMEOUT + 5)
+                if deep:
+                    is_alive, reason = result
+                    if is_alive:
+                        alive.append(proxy)
+                    else:
+                        dead.append(proxy)
+                        reasons[proxy] = reason
                 else:
-                    dead.append(proxy)
+                    if result:
+                        alive.append(proxy)
+                    else:
+                        dead.append(proxy)
+                        reasons[proxy] = 'SOCKET_FAIL'
             except:
                 dead.append(proxy)
-    return alive, dead
+                reasons[proxy] = 'TIMEOUT'
+    return alive, dead, reasons
 
 def silent_proxy_check():
     proxies = load_proxies()
     if not proxies:
         return
-    alive, dead = verify_proxy_batch(proxies)
+    alive, dead, _ = verify_proxy_batch(proxies)
 
 def start_silent_pc():
     global silent_pc_running, silent_pc_thread
@@ -983,6 +1099,49 @@ def start_silent_pc():
         silent_pc_running = True
         silent_pc_thread = threading.Thread(target=run_silent_pc, daemon=True)
         silent_pc_thread.start()
+
+# ============================================
+# LUHN ALGORITHM & CARD GENERATOR
+# ============================================
+
+def luhn_checksum(card_number):
+    """Calculate Luhn checksum digit"""
+    digits = [int(d) for d in str(card_number)]
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        total += sum(divmod(d * 2, 10))
+    return total % 10
+
+def generate_luhn_card(bin_prefix, length=16):
+    """Generate a valid card number from BIN using Luhn algorithm"""
+    bin_str = str(bin_prefix)
+    remaining = length - len(bin_str) - 1
+    partial = bin_str + ''.join([str(random.randint(0, 9)) for _ in range(remaining)])
+    for check_digit in range(10):
+        candidate = partial + str(check_digit)
+        if luhn_checksum(candidate) == 0:
+            return candidate
+    return partial + '0'
+
+def generate_cards_from_bin(bin_prefix, count=10):
+    """Generate multiple valid cards with random expiry and CVV"""
+    cards = []
+    now = datetime.now()
+    seen = set()
+    attempts = 0
+    while len(cards) < count and attempts < count * 3:
+        attempts += 1
+        cc = generate_luhn_card(bin_prefix)
+        if cc in seen:
+            continue
+        seen.add(cc)
+        month = random.randint(1, 12)
+        year = random.randint(now.year + 1, now.year + 5) % 100
+        cvv = random.randint(100, 999)
+        cards.append(f"{cc}|{month:02d}|{year:02d}|{cvv}")
+    return cards
 
 # ============================================
 # BIN LOOKUP
@@ -1399,12 +1558,13 @@ def get_main_keyboard():
     )
     # ── Row 5: Utilities ──
     keyboard.row(
-        InlineKeyboardButton("📎 Export", callback_data="export"),
         InlineKeyboardButton("🏦 BIN Info", callback_data="bin_lookup"),
-        InlineKeyboardButton("🔒 Permanent", callback_data="permanent_sites")
+        InlineKeyboardButton("🎲 Generate", callback_data="gen_cards"),
+        InlineKeyboardButton("📎 Export", callback_data="export")
     )
     # ── Row 6: Tools ──
     keyboard.row(
+        InlineKeyboardButton("🔒 Permanent", callback_data="permanent_sites"),
         InlineKeyboardButton("🔧 Fix Sites", callback_data="fix_sites")
     )
     # ── Row 7: Control ──
@@ -1576,7 +1736,8 @@ def send_welcome(message):
 
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
-  /px ─ Check all proxies
+  /gen `424242` `10` ─ Generate cards (Luhn)
+  /px ─ Deep proxy check (3 levels)
   /delproxy ─ Delete proxy
   /clearshopify ─ Clear Shopify cards
   /clearau ─ Clear Stripe cards
@@ -1588,6 +1749,8 @@ def send_welcome(message):
 {LINE_THIN}
 📂 *Send .txt file to auto-load*
    └ Name with "au" or "stripe" → Stripe Auth
+🧹 *Auto-maintenance active*
+   └ Dead sites auto-cleaned every 50 checks
 """
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
@@ -2350,22 +2513,39 @@ def proxy_check_command(message):
         bot.reply_to(message, "⚠️ No proxies to check")
         return
     total = len(proxies)
-    msg = bot.reply_to(message, f"⏳ Checking {total} proxies...")
+    msg = bot.reply_to(message, f"⏳ Deep checking {total} proxies (3-level verification)...")
     start_time = time.time()
-    alive, dead = verify_proxy_batch(proxies)
+    alive, dead, reasons = verify_proxy_batch(proxies, deep=True)
     elapsed = time.time() - start_time
     global last_dead_proxies
     last_dead_proxies = dead
+    
+    socket_fail = sum(1 for r in reasons.values() if r == 'SOCKET_FAIL')
+    http_fail = sum(1 for r in reasons.values() if r == 'HTTP_FAIL')
+    request_fail = sum(1 for r in reasons.values() if r == 'REQUEST_FAIL')
+    timeout_fail = sum(1 for r in reasons.values() if r == 'TIMEOUT')
+    
     summary = f"""📡 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔍 *PROXY CHECK COMPLETED*
+🔍 *DEEP PROXY CHECK ─ 3 LEVELS*
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 ⚡ *Speed:* {total/elapsed:.1f} proxies/s
 ⏱ *Time:* {elapsed:.1f}s
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-✅ *Alive:* {len(alive)}
+✅ *Alive (all 3 tests passed):* {len(alive)}
 💀 *Dead:* {len(dead)}
 📊 *Total:* {total}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+🔬 *Failure Breakdown:*
+   ├ 🔌 Socket fail: {socket_fail}
+   ├ 🌐 HTTP tunnel fail: {http_fail}
+   ├ 📡 Request fail: {request_fail}
+   └ ⏱ Timeout: {timeout_fail}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+📋 *Verification Levels:*
+   1️⃣ TCP Socket Connection
+   2️⃣ HTTP CONNECT Tunnel
+   3️⃣ Real HTTPS Request
 ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
 🤖 {BOT_NAME} {BOT_VERSION} │ /help"""
     markup = InlineKeyboardMarkup()
@@ -2423,6 +2603,71 @@ def list_sites_command(message):
     
     response += f"\n{LINE_THIN}\n💡 Use `/addsite url` to add │ `/listsites` to view"
     safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['gen'])
+def gen_command(message):
+    """Comando /gen - Generar tarjetas válidas con algoritmo de Luhn"""
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /gen 424242 [amount]\nExample: /gen 424242 10")
+        return
+    
+    bin_prefix = args[1].strip()
+    if not bin_prefix.isdigit() or len(bin_prefix) < 6:
+        bot.reply_to(message, "❌ Invalid BIN. Must be at least 6 digits. Example: /gen 424242")
+        return
+    
+    count = 10
+    if len(args) >= 3:
+        try:
+            count = min(int(args[2]), 50)
+            count = max(1, count)
+        except ValueError:
+            count = 10
+    
+    processing_msg = bot.reply_to(message, f"⚙️ *Generating {count} cards with Luhn algorithm...*", parse_mode='Markdown')
+    
+    cards = generate_cards_from_bin(bin_prefix, count)
+    bin_info = bin_lookup(bin_prefix[:6])
+    
+    cards_text = '\n'.join([f"`{c}`" for c in cards])
+    
+    if bin_info:
+        response = f"""{get_bot_header('shopify')}
+
+🎲 *CARD GENERATOR ─ LUHN*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_prefix}`
+🔢 {stylize_text('Amount')}  ➜  {len(cards)}
+
+📋 *{stylize_text('BIN Info')}*
+   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}
+   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
+   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
+
+💳 *{stylize_text('Generated Cards')}*
+{cards_text}
+
+✅ All cards pass Luhn validation
+{get_bot_footer()}"""
+    else:
+        response = f"""{get_bot_header('shopify')}
+
+🎲 *CARD GENERATOR ─ LUHN*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_prefix}`
+🔢 {stylize_text('Amount')}  ➜  {len(cards)}
+
+💳 *{stylize_text('Generated Cards')}*
+{cards_text}
+
+✅ All cards pass Luhn validation
+{get_bot_footer()}"""
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['bin'])
 def bin_command(message):
@@ -2548,6 +2793,10 @@ def handle_callback(call):
     elif call.data == "bin_lookup":
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, "🏦 Send BIN number:\n/bin `424242`", parse_mode='Markdown')
+    
+    elif call.data == "gen_cards":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🎲 Generate cards with Luhn:\n/gen `424242` `10`\n\nFormat: /gen BIN [amount]", parse_mode='Markdown')
     
     elif call.data == "export":
         bot.answer_callback_query(call.id)
@@ -2760,7 +3009,8 @@ def handle_callback(call):
 
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
-  /px ─ Check all proxies
+  /gen `424242` `10` ─ Generate cards (Luhn)
+  /px ─ Deep proxy check (3 levels)
   /delproxy ─ Delete proxy
 
 ⚙️ *━━ SETTINGS ━━*
@@ -2770,6 +3020,10 @@ def handle_callback(call):
 📂 *━━ FILE UPLOAD ━━*
   Send `.txt` file → auto-load
   Name with "au"/"stripe" → Stripe Auth
+
+🧹 *━━ AUTO-MAINTENANCE ━━*
+  Dead sites auto-cleaned every 50 checks
+  Smart site rotation (best sites first)
 {LINE_THIN}
 🤖 {BOT_NAME} {BOT_VERSION}"""
         try:
