@@ -45,31 +45,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE"
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Owner configuration
-OWNER_ID = 8220432777
-
-def owner_only(func):
-    def wrapper(message):
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-        is_owner = (user_id == OWNER_ID) or (chat_id == OWNER_ID)
-        print(f"[OWNER CHECK] User ID: {user_id} | Chat ID: {chat_id} | Owner ID: {OWNER_ID} | Match: {is_owner}")
-        if not is_owner:
-            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{user_id}`\nChat ID: `{chat_id}`", parse_mode='Markdown')
-            return
-        return func(message)
-    return wrapper
-
-def owner_callback(func):
-    def wrapper(call):
-        user_id = call.from_user.id
-        chat_id = call.message.chat.id if call.message else 0
-        is_owner = (user_id == OWNER_ID) or (chat_id == OWNER_ID)
-        if not is_owner:
-            bot.answer_callback_query(call.id, f"\u274c Access denied. Your ID: {user_id}")
-            return
-        return func(call)
-    return wrapper
+# Public bot - no owner restriction
 
 # Data files
 SITES_FILE = "sites.json"
@@ -1288,10 +1264,14 @@ def classify_response(response_msg):
     if any(kw in response_upper for kw in ['CHARGED', 'CAPTURED', 'APPROVED', 'SUCCESS', 'SUCCEEDED', 'PAID', 'PAYMENT_INTENT_UNEXPECTED_STATE']):
         return "CHARGE", response_msg
     
-    # 3DS / Authentication Required
+    # 3DS / Authentication Required (requires_action is treated as DECLINED)
     if any(kw in response_upper for kw in ['3DS', '3D_SECURE', 'THREE_D_SECURE', 'AUTHENTICATION_REQUIRED', 
-                                            'REQUIRES_ACTION', 'REDIRECT', 'ENROLLED', 'SCA_REQUIRED']):
+                                            'REDIRECT', 'ENROLLED', 'SCA_REQUIRED']):
         return "3DS", response_msg
+    
+    # Requires Action (treated as declined, not live)
+    if 'REQUIRES_ACTION' in response_upper:
+        return "DECLINED", response_msg
     
     # CVV/CVC incorrect (card is live)
     if any(kw in response_upper for kw in ['CVV', 'CVC', 'INCORRECT_CVC', 'SECURITY_CODE', 
@@ -1667,7 +1647,6 @@ def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None):
 # ============================================
 
 @bot.message_handler(content_types=['document'])
-@owner_only
 def handle_document(message):
     processing_msg = bot.reply_to(message, "⏳ Analyzing file...")
     try:
@@ -1805,7 +1784,6 @@ def myid_command(message):
     bot.reply_to(message, f"🆔 Your Telegram ID: `{message.from_user.id}`\n\nSend this ID to the bot admin to get access.", parse_mode='Markdown')
 
 @bot.message_handler(commands=['start', 'help'])
-@owner_only
 def send_welcome(message):
     welcome_text = f"""
 ╔══════════════════════════════╗
@@ -1842,7 +1820,6 @@ def send_welcome(message):
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
 @bot.message_handler(commands=['chk'])
-@owner_only
 def chk_command(message):
     args = message.text.split()
     if len(args) < 2:
@@ -1883,7 +1860,6 @@ def chk_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['au'])
-@owner_only
 def stripe_command(message):
     """Comando /au - Check individual con Stripe Auth"""
     args = message.text.split()
@@ -1927,7 +1903,6 @@ def stripe_command(message):
 # ============================================
 
 @bot.message_handler(commands=['delproxy'])
-@owner_only
 def delete_proxy_command(message):
     """Eliminar un proxy específico por índice o todos"""
     args = message.text.split()
@@ -1971,7 +1946,6 @@ def delete_proxy_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mass'])
-@owner_only
 def mass_check_command(message):
     global mass_check_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
     
@@ -2235,7 +2209,6 @@ def mass_check_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mau'])
-@owner_only
 def stripe_mass_command(message):
     """Mass check con Stripe Auth - Estilo foto"""
     global stripe_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
@@ -2498,7 +2471,6 @@ def stripe_mass_command(message):
 # ============================================
 
 @bot.message_handler(commands=['auhits'])
-@owner_only
 def stripe_hits_command(message):
     hits = get_stripe_hits()
     if not hits:
@@ -2533,7 +2505,6 @@ def stripe_hits_command(message):
     bot.send_document(message.chat.id, file_data, caption=f"🔓 {len(hits)} Stripe Auth approved cards")
 
 @bot.message_handler(commands=['clearau'])
-@owner_only
 def clear_stripe_command(message):
     count = len(get_all_stripe_cards())
     if count == 0:
@@ -2549,7 +2520,6 @@ def clear_stripe_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['clearshopify'])
-@owner_only
 def clear_shopify_command(message):
     count = len(get_all_cards())
     if count == 0:
@@ -2565,7 +2535,6 @@ def clear_shopify_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['stop'])
-@owner_only
 def stop_mass_check(message):
     global mass_check_running, stripe_mass_running, stop_mass_flag
     if mass_check_running or stripe_mass_running:
@@ -2586,7 +2555,6 @@ Please wait while workers finish...""",
         bot.reply_to(message, "ℹ️ No active mass check")
 
 @bot.message_handler(commands=['stats'])
-@owner_only
 def show_stats(message):
     sites = load_sites()
     proxies = load_proxies()
@@ -2619,7 +2587,6 @@ def show_stats(message):
     safe_send_message(message.chat.id, stats_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['hits'])
-@owner_only
 def hits_command(message):
     hits = get_hits()
     if not hits:
@@ -2632,7 +2599,6 @@ def hits_command(message):
         bot.send_document(message.chat.id, file_data, caption=f"🏆 {len(hits)} Shopify approved cards")
 
 @bot.message_handler(commands=['px'])
-@owner_only
 def proxy_check_command(message):
     proxies = load_proxies()
     if not proxies:
@@ -2685,7 +2651,6 @@ def proxy_check_command(message):
                             message_id=msg.message_id, reply_markup=markup if markup.keyboard else None)
 
 @bot.message_handler(commands=['addsite'])
-@owner_only
 def add_site_command(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2701,7 +2666,6 @@ def add_site_command(message):
         bot.reply_to(message, "⚠️ Site already exists")
 
 @bot.message_handler(commands=['listsites'])
-@owner_only
 def list_sites_command(message):
     sites = load_sites()
     if not sites:
@@ -2733,7 +2697,6 @@ def list_sites_command(message):
     safe_send_message(message.chat.id, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['gen'])
-@owner_only
 def gen_command(message):
     """Comando /gen - Generar tarjetas válidas con algoritmo de Luhn"""
     args = message.text.split()
@@ -2799,7 +2762,6 @@ def gen_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['bin'])
-@owner_only
 def bin_command(message):
     """Comando /bin - Consultar info de un BIN sin hacer check"""
     args = message.text.split()
@@ -2840,7 +2802,6 @@ def bin_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['mode'])
-@owner_only
 def mode_command(message):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -2866,7 +2827,6 @@ def mode_command(message):
 # ============================================
 
 @bot.callback_query_handler(func=lambda call: True)
-@owner_callback
 def handle_callback(call):
     global current_max_workers, mass_check_running, stripe_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
