@@ -51,17 +51,22 @@ OWNER_ID = 8220432777
 def owner_only(func):
     def wrapper(message):
         user_id = message.from_user.id
-        print(f"[OWNER CHECK] User ID: {user_id} | Owner ID: {OWNER_ID} | Match: {user_id == OWNER_ID}")
-        if user_id != OWNER_ID:
-            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{user_id}`\nOwner ID: `{OWNER_ID}`", parse_mode='Markdown')
+        chat_id = message.chat.id
+        is_owner = (user_id == OWNER_ID) or (chat_id == OWNER_ID)
+        print(f"[OWNER CHECK] User ID: {user_id} | Chat ID: {chat_id} | Owner ID: {OWNER_ID} | Match: {is_owner}")
+        if not is_owner:
+            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{user_id}`\nChat ID: `{chat_id}`", parse_mode='Markdown')
             return
         return func(message)
     return wrapper
 
 def owner_callback(func):
     def wrapper(call):
-        if call.from_user.id != OWNER_ID:
-            bot.answer_callback_query(call.id, f"\u274c Access denied. Your ID: {call.from_user.id}")
+        user_id = call.from_user.id
+        chat_id = call.message.chat.id if call.message else 0
+        is_owner = (user_id == OWNER_ID) or (chat_id == OWNER_ID)
+        if not is_owner:
+            bot.answer_callback_query(call.id, f"\u274c Access denied. Your ID: {user_id}")
             return
         return func(call)
     return wrapper
