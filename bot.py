@@ -42,22 +42,26 @@ logger = logging.getLogger(__name__)
 # ============================================
 # BOT CONFIGURATION
 # ============================================
-BOT_TOKEN = "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Public bot - no owner restriction
 
+# Data directory (Railway volume or local)
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
 # Data files
-SITES_FILE = "sites.json"
-PROXIES_FILE = "proxies.json"
-CARDS_FILE = "cards.json"
-HITS_FILE = "hits.json"
-PERMANENT_SITES_FILE = "permanent_sites.json"
-STRIPE_CARDS_FILE = "stripe_cards.json"
-STRIPE_HITS_FILE = "stripe_hits.json"
-SC_CARDS_FILE = "sc_cards.json"
-SC_HITS_FILE = "sc_hits.json"
-API_URL = "http://108.165.12.183:8081"
+SITES_FILE = os.path.join(DATA_DIR, "sites.json")
+PROXIES_FILE = os.path.join(DATA_DIR, "proxies.json")
+CARDS_FILE = os.path.join(DATA_DIR, "cards.json")
+HITS_FILE = os.path.join(DATA_DIR, "hits.json")
+PERMANENT_SITES_FILE = os.path.join(DATA_DIR, "permanent_sites.json")
+STRIPE_CARDS_FILE = os.path.join(DATA_DIR, "stripe_cards.json")
+STRIPE_HITS_FILE = os.path.join(DATA_DIR, "stripe_hits.json")
+SC_CARDS_FILE = os.path.join(DATA_DIR, "sc_cards.json")
+SC_HITS_FILE = os.path.join(DATA_DIR, "sc_hits.json")
+API_URL = os.environ.get("API_URL", "http://108.165.12.183:8081")
 MAX_CARDS_PER_BATCH = 999999
 
 # Concurrency settings
@@ -189,8 +193,8 @@ COUNTRY_FLAGS = {
 # ============================================
 
 class SQLiteBackup:
-    def __init__(self, db_path: str = "shopify_bot_backup.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or os.path.join(DATA_DIR, "shopify_bot_backup.db")
         self.conn = None
         self.setup_database()
     
@@ -3866,6 +3870,28 @@ Please wait while workers finish...""",
         bot.answer_callback_query(call.id)
 
 # ============================================
+# RAILWAY HEALTH CHECK SERVER
+# ============================================
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 0))
+    if port:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"  🏥 Health check server on port {port}")
+
+# ============================================
 # START BOT
 # ============================================
 if __name__ == "__main__":
@@ -3874,6 +3900,7 @@ if __name__ == "__main__":
     print(f"  🚀 PARALLEL PIPELINE MODE")
     print("═" * 60)
     print(f"  🌐 Public mode: ALL USERS")
+    print(f"  📂 Data dir: {DATA_DIR}")
     print(f"  🛒 Shopify cards: {len(get_all_cards())}")
     print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
     print(f"  💳 Stripe Charge cards: {len(get_all_sc_cards())}")
@@ -3891,6 +3918,7 @@ if __name__ == "__main__":
     print("  🌐 BOT IS PUBLIC - All users can use")
     print("═" * 60 + "\n")
     
+    start_health_server()
     start_silent_pc()
     
     while True:
