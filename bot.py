@@ -45,6 +45,25 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE"
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Owner configuration
+OWNER_ID = 8220432777
+
+def owner_only(func):
+    def wrapper(message):
+        if message.from_user.id != OWNER_ID:
+            bot.reply_to(message, "\u274c Access denied. This bot is private.")
+            return
+        return func(message)
+    return wrapper
+
+def owner_callback(func):
+    def wrapper(call):
+        if call.from_user.id != OWNER_ID:
+            bot.answer_callback_query(call.id, "\u274c Access denied")
+            return
+        return func(call)
+    return wrapper
+
 # Data files
 SITES_FILE = "sites.json"
 PROXIES_FILE = "proxies.json"
@@ -1257,22 +1276,43 @@ def check_card_shopify(cc, month, year, cvv):
 
 def classify_response(response_msg):
     response_upper = response_msg.upper() if response_msg else ""
-    if 'CHARGED' in response_upper or 'CAPTURED' in response_upper or 'APPROVED' in response_upper:
+    
+    # CHARGE / APPROVED
+    if any(kw in response_upper for kw in ['CHARGED', 'CAPTURED', 'APPROVED', 'SUCCESS', 'SUCCEEDED', 'PAID', 'PAYMENT_INTENT_UNEXPECTED_STATE']):
         return "CHARGE", response_msg
-    elif '3DS' in response_upper:
+    
+    # 3DS / Authentication Required
+    if any(kw in response_upper for kw in ['3DS', '3D_SECURE', 'THREE_D_SECURE', 'AUTHENTICATION_REQUIRED', 
+                                            'REQUIRES_ACTION', 'REDIRECT', 'ENROLLED', 'SCA_REQUIRED']):
         return "3DS", response_msg
-    elif 'CVV' in response_upper or 'CVC' in response_upper:
+    
+    # CVV/CVC incorrect (card is live)
+    if any(kw in response_upper for kw in ['CVV', 'CVC', 'INCORRECT_CVC', 'SECURITY_CODE', 
+                                            'INVALID_CVC', 'CVC_CHECK_FAILED']):
         return "CVV", response_msg
-    elif 'INSUFFICIENT' in response_upper or 'FUNDS' in response_upper:
+    
+    # Insufficient funds (card is live)
+    if any(kw in response_upper for kw in ['INSUFFICIENT', 'FUNDS', 'INSUFFICIENT_FUNDS', 
+                                            'NOT_ENOUGH', 'BALANCE']):
         return "FUNDS", response_msg
-    elif 'DECLINED' in response_upper:
+    
+    # Declined reasons
+    if any(kw in response_upper for kw in ['DECLINED', 'DECLINE', 'CARD_DECLINED', 'DO_NOT_HONOR',
+                                            'GENERIC_DECLINE', 'RESTRICTED', 'LOST', 'STOLEN',
+                                            'PICKUP', 'FRAUD', 'FRAUDULENT', 'RISK',
+                                            'EXPIRED', 'EXPIRED_CARD', 'INVALID_EXPIRY',
+                                            'INVALID_NUMBER', 'INCORRECT_NUMBER',
+                                            'PROCESSING_ERROR', 'CARD_NOT_SUPPORTED',
+                                            'INVALID_ACCOUNT', 'EXCEEDS_LIMIT',
+                                            'OTP', 'NOT_PERMITTED', 'REVOCATION',
+                                            'BLOCKED', 'CURRENCY_NOT_SUPPORTED',
+                                            'TRANSACTION_NOT_ALLOWED', 'DO NOT TRY AGAIN',
+                                            'REFER_TO_ISSUER', 'ISSUER_NOT_AVAILABLE',
+                                            'TRY_AGAIN_LATER', 'WITHDRAW', 'NO_ACTION_TAKEN',
+                                            'REENTER_TRANSACTION', 'INVALID_PIN']):
         return "DECLINED", response_msg
-    elif 'EXPIRED' in response_upper:
-        return "DECLINED", response_msg
-    elif 'OTP' in response_upper:
-        return "DECLINED", response_msg
-    else:
-        return "UNKNOWN", response_msg
+    
+    return "UNKNOWN", response_msg
 
 # ============================================
 # HITS MANAGEMENT (SHOPIFY)
@@ -1433,23 +1473,41 @@ def format_chk_response(card_data, category, status_msg, response_msg, price, ga
     
     icon, status_display, dot = get_status_emoji(category)
     
-    message = f"{get_bot_header('shopify')}\n\n"
-    message += f"{dot} {status_display} {dot}\n\n"
-    message += f"{LINE_DOT}\n"
-    message += f"💳 {stylize_text('CC')}  ➜  `{cc}|{month}|{year}|{cvv}`\n"
-    message += f"🌐 {stylize_text('Gateway')}  ➜  {gateway}\n"
-    message += f"📝 {stylize_text('Response')}  ➜  {response_msg}\n"
-    message += f"💲 {stylize_text('Price')}  ➜  {price}\n"
+    # Status title based on category
+    if category == 'CHARGE':
+        title = f"\u26a1 {stylize_text('Card Charged')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'FUNDS':
+        title = f"\u26a1 {stylize_text('Insufficient Funds')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Shopify Payments')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
     
     if bin_info:
-        message += f"\n{LINE_DOT}\n"
-        message += f"🏦 *BIN INFO*\n"
-        message += f"   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}\n"
-        message += f"   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}\n"
-        message += f"   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}\n"
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
     
-    message += f"\n⏱ {stylize_text('Time')}: {elapsed}s"
-    message += get_bot_footer()
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
 def format_stripe_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
@@ -1460,23 +1518,39 @@ def format_stripe_response(card_data, category, status_msg, response_msg, price,
     
     icon, status_display, dot = get_status_emoji(category)
     
-    message = f"{get_bot_header('stripe_auth')}\n\n"
-    message += f"{dot} {status_display} {dot}\n\n"
-    message += f"{LINE_DOT}\n"
-    message += f"💳 {stylize_text('CC')}  ➜  `{cc}|{month}|{year}|{cvv}`\n"
-    message += f"🔓 {stylize_text('Gateway')}  ➜  {gateway}\n"
-    message += f"📝 {stylize_text('Response')}  ➜  {response_msg}\n"
-    message += f"💲 {stylize_text('Price')}  ➜  {price}\n"
+    # Status title based on category
+    if category == 'LIVE':
+        title = f"\u26a1 {stylize_text('Card Live')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Auth')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
     
     if bin_info:
-        message += f"\n{LINE_DOT}\n"
-        message += f"🏦 *BIN INFO*\n"
-        message += f"   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}\n"
-        message += f"   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}\n"
-        message += f"   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}\n"
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
     
-    message += f"\n⏱ {stylize_text('Time')}: {elapsed}s"
-    message += get_bot_footer()
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
 # ============================================
@@ -1586,6 +1660,7 @@ def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None):
 # ============================================
 
 @bot.message_handler(content_types=['document'])
+@owner_only
 def handle_document(message):
     processing_msg = bot.reply_to(message, "⏳ Analyzing file...")
     try:
@@ -1719,6 +1794,7 @@ def detect_line_type(line):
 # ============================================
 
 @bot.message_handler(commands=['start', 'help'])
+@owner_only
 def send_welcome(message):
     welcome_text = f"""
 ╔══════════════════════════════╗
@@ -1755,6 +1831,7 @@ def send_welcome(message):
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
 @bot.message_handler(commands=['chk'])
+@owner_only
 def chk_command(message):
     args = message.text.split()
     if len(args) < 2:
@@ -1795,6 +1872,7 @@ def chk_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['au'])
+@owner_only
 def stripe_command(message):
     """Comando /au - Check individual con Stripe Auth"""
     args = message.text.split()
@@ -1838,6 +1916,7 @@ def stripe_command(message):
 # ============================================
 
 @bot.message_handler(commands=['delproxy'])
+@owner_only
 def delete_proxy_command(message):
     """Eliminar un proxy específico por índice o todos"""
     args = message.text.split()
@@ -1881,6 +1960,7 @@ def delete_proxy_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mass'])
+@owner_only
 def mass_check_command(message):
     global mass_check_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
     
@@ -1988,7 +2068,7 @@ def mass_check_command(message):
         update_counter = 0
         
         def send_update():
-            nonlocal last_card, last_response, update_counter
+            nonlocal last_card, last_response, last_price, update_counter
             
             total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
             
@@ -2002,6 +2082,7 @@ def mass_check_command(message):
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💳 *Card:* `{last_card}`
 📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{total_approved}*
 ❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
@@ -2143,6 +2224,7 @@ def mass_check_command(message):
 # ============================================
 
 @bot.message_handler(commands=['mau'])
+@owner_only
 def stripe_mass_command(message):
     """Mass check con Stripe Auth - Estilo foto"""
     global stripe_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
@@ -2201,6 +2283,7 @@ def stripe_mass_command(message):
         completed = 0
         last_card = "WAITING..."
         last_response = "CONNECTING..."
+        last_price = "FREE"
         
         task_queue = Queue()
         result_queue = Queue()
@@ -2244,7 +2327,7 @@ def stripe_mass_command(message):
         update_counter = 0
         
         def send_update():
-            nonlocal last_card, last_response, update_counter
+            nonlocal last_card, last_response, last_price, update_counter
             
             total_approved = stats['live'] + stats['threeds'] + stats['cvv']
             
@@ -2258,6 +2341,7 @@ def stripe_mass_command(message):
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💳 *Card:* `{last_card}`
 📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💚 Live: *{stats['live']}*  │  🔐 3DS: *{stats['threeds']}*  │  🔶 CVV: *{stats['cvv']}*
 ❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
@@ -2295,6 +2379,7 @@ def stripe_mass_command(message):
                     category, status_msg, response_msg, price, gateway, elapsed = result
                     
                     last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_price = price if price else "FREE"
                     clean_response = response_msg
                     if clean_response.startswith('[unknown]'):
                         clean_response = clean_response.replace('[unknown]', '').strip()
@@ -2402,6 +2487,7 @@ def stripe_mass_command(message):
 # ============================================
 
 @bot.message_handler(commands=['auhits'])
+@owner_only
 def stripe_hits_command(message):
     hits = get_stripe_hits()
     if not hits:
@@ -2436,6 +2522,7 @@ def stripe_hits_command(message):
     bot.send_document(message.chat.id, file_data, caption=f"🔓 {len(hits)} Stripe Auth approved cards")
 
 @bot.message_handler(commands=['clearau'])
+@owner_only
 def clear_stripe_command(message):
     count = len(get_all_stripe_cards())
     if count == 0:
@@ -2451,6 +2538,7 @@ def clear_stripe_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['clearshopify'])
+@owner_only
 def clear_shopify_command(message):
     count = len(get_all_cards())
     if count == 0:
@@ -2466,6 +2554,7 @@ def clear_shopify_command(message):
                  parse_mode='Markdown', reply_markup=markup)
 
 @bot.message_handler(commands=['stop'])
+@owner_only
 def stop_mass_check(message):
     global mass_check_running, stripe_mass_running, stop_mass_flag
     if mass_check_running or stripe_mass_running:
@@ -2486,6 +2575,7 @@ Please wait while workers finish...""",
         bot.reply_to(message, "ℹ️ No active mass check")
 
 @bot.message_handler(commands=['stats'])
+@owner_only
 def show_stats(message):
     sites = load_sites()
     proxies = load_proxies()
@@ -2518,6 +2608,7 @@ def show_stats(message):
     safe_send_message(message.chat.id, stats_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['hits'])
+@owner_only
 def hits_command(message):
     hits = get_hits()
     if not hits:
@@ -2530,6 +2621,7 @@ def hits_command(message):
         bot.send_document(message.chat.id, file_data, caption=f"🏆 {len(hits)} Shopify approved cards")
 
 @bot.message_handler(commands=['px'])
+@owner_only
 def proxy_check_command(message):
     proxies = load_proxies()
     if not proxies:
@@ -2582,6 +2674,7 @@ def proxy_check_command(message):
                             message_id=msg.message_id, reply_markup=markup if markup.keyboard else None)
 
 @bot.message_handler(commands=['addsite'])
+@owner_only
 def add_site_command(message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
@@ -2597,6 +2690,7 @@ def add_site_command(message):
         bot.reply_to(message, "⚠️ Site already exists")
 
 @bot.message_handler(commands=['listsites'])
+@owner_only
 def list_sites_command(message):
     sites = load_sites()
     if not sites:
@@ -2628,6 +2722,7 @@ def list_sites_command(message):
     safe_send_message(message.chat.id, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['gen'])
+@owner_only
 def gen_command(message):
     """Comando /gen - Generar tarjetas válidas con algoritmo de Luhn"""
     args = message.text.split()
@@ -2693,6 +2788,7 @@ def gen_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['bin'])
+@owner_only
 def bin_command(message):
     """Comando /bin - Consultar info de un BIN sin hacer check"""
     args = message.text.split()
@@ -2733,6 +2829,7 @@ def bin_command(message):
         bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['mode'])
+@owner_only
 def mode_command(message):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -2758,6 +2855,7 @@ def mode_command(message):
 # ============================================
 
 @bot.callback_query_handler(func=lambda call: True)
+@owner_callback
 def handle_callback(call):
     global current_max_workers, mass_check_running, stripe_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
