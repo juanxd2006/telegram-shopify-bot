@@ -66,7 +66,7 @@ CACHE_BIN_RESULTS = True
 DELAY_BETWEEN_CHECKS = 5
 
 # Selectable modes
-current_mode = "rapido"
+current_mode = "extremo"
 mode_workers = {
     "seguro": 1,
     "rapido": 3,
@@ -1885,7 +1885,7 @@ def mass_check_command(message):
     global mass_check_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
     
     if mass_check_running:
-        bot.reply_to(message, "⚠️ Mass check already in progress. Use STOP button.")
+        bot.reply_to(message, "⚠️ Mass check already in progress. Use STOP button or /stop")
         return
     
     sites = load_sites()
@@ -1908,91 +1908,93 @@ def mass_check_command(message):
     mass_paused = False
     mass_check_running = True
     
-    stats = {
-        'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
-        'declined': 0, 'errors': 0, 'total': total
-    }
-    
-    completed = 0
-    last_card = "WAITING..."
-    last_response = "CONNECTING..."
-    last_price = "$0.00"
-    last_bin_info = None
-    
-    task_queue = Queue()
-    result_queue = Queue()
-    
-    for card_str in cards:
-        task_queue.put(card_str)
-    
-    for _ in range(PARALLEL_WORKERS):
-        task_queue.put(None)
-    
-    def shopify_worker(worker_id):
-        while not stop_mass_flag:
-            if mass_paused:
-                time.sleep(1)
-                continue
-            try:
-                card_str = task_queue.get(timeout=1)
-                if card_str is None:
-                    break
-                
-                parts = card_str.split('|')
-                if len(parts) < 4:
-                    result_queue.put(('error', card_str, None, worker_id))
-                    continue
-                
-                cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-                bin_info = bin_lookup(cc[:6])
-                result = check_card_shopify(cc, month, year, cvv)
-                result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
-            except:
-                continue
-    
-    workers = []
-    for i in range(PARALLEL_WORKERS):
-        w = threading.Thread(target=shopify_worker, args=(i,))
-        w.daemon = True
-        w.start()
-        workers.append(w)
-    
-    processed_cards = set()
-    update_counter = 0
-    
     # Botones estilo foto - SOLO STOP
     control_buttons = InlineKeyboardMarkup(row_width=1)
     control_buttons.add(
         InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
     )
     
-    progress_bar = create_progress_bar(completed, total)
+    progress_bar = create_progress_bar(0, total)
     msg_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *SHOPIFY MASS CHECK*
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-💳 *Card:* `{last_card}`
-📝 *Response:* `{last_response}`
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']}*
-❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+💰 Charge: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
     
     progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
     
     current_mass_msg = progress_msg
     current_mass_chat_id = message.chat.id
     
-    def send_update():
-        nonlocal last_card, last_response, update_counter
+    def run_shopify_mass(chat_id, msg_id):
+        global mass_check_running, stop_mass_flag
         
-        total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+        stats = {
+            'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
         
-        # Solo actualizar cada 5 checks
-        if update_counter % 5 == 0 or update_counter == 0 or completed == total:
-            progress_bar = create_progress_bar(completed, total)
-            update_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "$0.00"
+        last_bin_info = None
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def shopify_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_card_shopify(cc, month, year, cvv)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(PARALLEL_WORKERS):
+            w = threading.Thread(target=shopify_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, update_counter
+            
+            total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *SHOPIFY MASS CHECK*
 
@@ -2003,110 +2005,111 @@ def mass_check_command(message):
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{total_approved}*
 ❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
-            
-            if not stop_mass_flag:
-                try:
-                    bot.edit_message_text(update_text, chat_id=message.chat.id, message_id=progress_msg.message_id,
-                                        parse_mode='Markdown', reply_markup=control_buttons)
-                except:
-                    pass
-    
-    start_time = time.time()
-    
-    while completed < total and not stop_mass_flag:
-        try:
-            result_data = result_queue.get(timeout=0.5)
-            
-            if result_data[0] == 'error':
-                card_str = result_data[1]
-                if card_str in processed_cards:
-                    continue
-                processed_cards.add(card_str)
-                completed += 1
-                stats['errors'] += 1
-                delete_card(card_str)
-                update_counter += 1
-                send_update()
-            else:
-                _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
                 
-                if card_str in processed_cards:
-                    continue
-                processed_cards.add(card_str)
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
                 
-                category, status_msg, response_msg, price, gateway, elapsed, site_used = result
-                
-                last_card = f"{cc[:6]}******{cc[-4:]}"
-                last_response = response_msg if response_msg else status_msg
-                last_price = price
-                last_bin_info = bin_info
-                
-                if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
-                    if category == 'CHARGE':
-                        stats['charge'] += 1
-                    elif category == '3DS':
-                        stats['threeds'] += 1
-                    elif category == 'CVV':
-                        stats['cvv'] += 1
-                    elif category == 'FUNDS':
-                        stats['funds'] += 1
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
                     
-                    icon, cat_display, dot = get_status_emoji(category)
-                    hit_msg = f"""{dot} *SHOPIFY ─ APPROVED* {dot}
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed, site_used = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    last_bin_info = bin_info
+                    
+                    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+                        if category == 'CHARGE':
+                            stats['charge'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        elif category == 'FUNDS':
+                            stats['funds'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *SHOPIFY ─ APPROVED* {dot}
 {LINE_THIN}
 💳 `{cc}|{month}|{year}|{cvv}`
 🌐 {gateway}
 📝 {response_msg}
 💲 {price}
 {LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
                     
-                    try:
-                        bot.send_message(message.chat.id, hit_msg, parse_mode='Markdown')
-                    except:
-                        bot.send_message(message.chat.id, hit_msg.replace('`', '').replace('*', ''))
+                    completed += 1
+                    delete_card(card_str)
+                    update_counter += 1
+                    send_update()
                     
-                    hit_data = {
-                        'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
-                        'category': category, 'status_msg': response_msg,
-                        'gateway': gateway, 'price': price, 'elapsed': elapsed,
-                        'bin_info': bin_info,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    save_hit(hit_data)
-                elif category == 'DECLINED':
-                    stats['declined'] += 1
-                else:
-                    stats['errors'] += 1
-                
-                completed += 1
-                delete_card(card_str)
-                update_counter += 1
-                send_update()
-                
-        except:
-            continue
-    
-    for w in workers:
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+        
         try:
-            w.join(timeout=2)
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
         except:
             pass
-    
-    send_update()
-    
-    elapsed = time.time() - start_time
-    minutes, seconds = int(elapsed // 60), int(elapsed % 60)
-    total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
-    
-    try:
-        sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
-    except:
-        pass
-    
-    final_bar = create_progress_bar(completed, total)
-    final_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏁 *MASS CHECK COMPLETED*
+{status_label}
 
 `{final_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -2116,20 +2119,24 @@ def mass_check_command(message):
 📊 *Total:* {completed}
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 ⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+        
+        mass_check_running = False
     
-    result_keyboard = InlineKeyboardMarkup()
-    result_keyboard.row(
-        InlineKeyboardButton("🏆 Ver Hits", callback_data="hits"),
-        InlineKeyboardButton("📦 Nuevo Mass", callback_data="mass")
-    )
-    
-    try:
-        bot.edit_message_text(final_text, chat_id=message.chat.id, message_id=progress_msg.message_id,
-                            parse_mode='Markdown', reply_markup=result_keyboard)
-    except:
-        pass
-    
-    mass_check_running = False
+    t = threading.Thread(target=run_shopify_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
 
 # ============================================
 # MASS CHECK STRIPE AUTH (CON BOTONES SOLO STOP Y UPDATE CADA 5 CHK)
@@ -2141,7 +2148,7 @@ def stripe_mass_command(message):
     global stripe_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
     
     if stripe_mass_running:
-        bot.reply_to(message, "⚠️ Stripe Auth mass check already in progress. Use STOP button.")
+        bot.reply_to(message, "⚠️ Stripe Auth mass check already in progress. Use STOP button or /stop")
         return
     
     cards = get_all_stripe_cards()
@@ -2159,89 +2166,91 @@ def stripe_mass_command(message):
     mass_paused = False
     stripe_mass_running = True
     
-    stats = {
-        'live': 0, 'threeds': 0, 'cvv': 0,
-        'declined': 0, 'errors': 0, 'total': total
-    }
-    
-    completed = 0
-    last_card = "WAITING..."
-    last_response = "CONNECTING..."
-    
-    task_queue = Queue()
-    result_queue = Queue()
-    
-    for card_str in cards:
-        task_queue.put(card_str)
-    
-    for _ in range(PARALLEL_WORKERS):
-        task_queue.put(None)
-    
-    def stripe_worker(worker_id):
-        while not stop_mass_flag:
-            if mass_paused:
-                time.sleep(1)
-                continue
-            try:
-                card_str = task_queue.get(timeout=1)
-                if card_str is None:
-                    break
-                
-                parts = card_str.split('|')
-                if len(parts) < 4:
-                    result_queue.put(('error', card_str, None, worker_id))
-                    continue
-                
-                cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-                bin_info = bin_lookup(cc[:6])
-                result = check_stripe_auth(cc, month, year, cvv)
-                result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
-            except:
-                continue
-    
-    workers = []
-    for i in range(PARALLEL_WORKERS):
-        w = threading.Thread(target=stripe_worker, args=(i,))
-        w.daemon = True
-        w.start()
-        workers.append(w)
-    
-    processed_cards = set()
-    update_counter = 0
-    
     # Botones estilo foto - SOLO STOP
     control_buttons = InlineKeyboardMarkup(row_width=1)
     control_buttons.add(
         InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
     )
     
-    progress_bar = create_progress_bar(completed, total)
+    progress_bar = create_progress_bar(0, total)
     msg_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *STRIPE AUTH MASS CHECK* ─ FREE
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-💳 *Card:* `{last_card}`
-📝 *Response:* `{last_response}`
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
-💚 Live: *{stats['live']}*  │  🔐 3DS: *{stats['threeds']}*  │  🔶 CVV: *{stats['cvv']}*
-❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+💚 Live: *0*  │  🔐 3DS: *0*  │  🔶 CVV: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
     
     progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
     
     current_mass_msg = progress_msg
     current_mass_chat_id = message.chat.id
     
-    def send_update():
-        nonlocal last_card, last_response, update_counter
+    def run_stripe_mass(chat_id, msg_id):
+        global stripe_mass_running, stop_mass_flag
         
-        total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+        stats = {
+            'live': 0, 'threeds': 0, 'cvv': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
         
-        # Solo actualizar cada 5 checks
-        if update_counter % 5 == 0 or update_counter == 0 or completed == total:
-            progress_bar = create_progress_bar(completed, total)
-            update_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def stripe_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_stripe_auth(cc, month, year, cvv)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(PARALLEL_WORKERS):
+            w = threading.Thread(target=stripe_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, update_counter
+            
+            total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *STRIPE AUTH MASS CHECK* ─ FREE
 
@@ -2252,112 +2261,113 @@ def stripe_mass_command(message):
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 💚 Live: *{stats['live']}*  │  🔐 3DS: *{stats['threeds']}*  │  🔶 CVV: *{stats['cvv']}*
 ❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
-            
-            if not stop_mass_flag:
-                try:
-                    bot.edit_message_text(update_text, chat_id=message.chat.id, message_id=progress_msg.message_id,
-                                        parse_mode='Markdown', reply_markup=control_buttons)
-                except:
-                    pass
-    
-    start_time = time.time()
-    
-    while completed < total and not stop_mass_flag:
-        try:
-            result_data = result_queue.get(timeout=0.5)
-            
-            if result_data[0] == 'error':
-                card_str = result_data[1]
-                if card_str in processed_cards:
-                    continue
-                processed_cards.add(card_str)
-                completed += 1
-                stats['errors'] += 1
-                delete_stripe_card(card_str)
-                update_counter += 1
-                send_update()
-            else:
-                _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
                 
-                if card_str in processed_cards:
-                    continue
-                processed_cards.add(card_str)
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
                 
-                category, status_msg, response_msg, price, gateway, elapsed = result
-                
-                last_card = f"{cc[:6]}******{cc[-4:]}"
-                clean_response = response_msg
-                if clean_response.startswith('[unknown]'):
-                    clean_response = clean_response.replace('[unknown]', '').strip()
-                elif clean_response.startswith('unknown'):
-                    clean_response = clean_response.replace('unknown', '').strip()
-                last_response = clean_response if clean_response else status_msg
-                
-                if category in ['LIVE', '3DS', 'CVV']:
-                    if category == 'LIVE':
-                        stats['live'] += 1
-                    elif category == '3DS':
-                        stats['threeds'] += 1
-                    elif category == 'CVV':
-                        stats['cvv'] += 1
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_stripe_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
                     
-                    icon, cat_display, dot = get_status_emoji(category)
-                    hit_msg = f"""{dot} *STRIPE AUTH ─ {cat_display}* {dot}
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    clean_response = response_msg
+                    if clean_response.startswith('[unknown]'):
+                        clean_response = clean_response.replace('[unknown]', '').strip()
+                    elif clean_response.startswith('unknown'):
+                        clean_response = clean_response.replace('unknown', '').strip()
+                    last_response = clean_response if clean_response else status_msg
+                    
+                    if category in ['LIVE', '3DS', 'CVV']:
+                        if category == 'LIVE':
+                            stats['live'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *STRIPE AUTH ─ {cat_display}* {dot}
 {LINE_THIN}
 💳 `{cc}|{month}|{year}|{cvv}`
 🌐 {gateway}
 📝 {clean_response}
 💲 {price}
 {LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': status_msg,
+                            'response_msg': clean_response,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_stripe_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
                     
-                    try:
-                        bot.send_message(message.chat.id, hit_msg, parse_mode='Markdown')
-                    except:
-                        bot.send_message(message.chat.id, hit_msg.replace('`', '').replace('*', ''))
+                    completed += 1
+                    delete_stripe_card(card_str)
+                    update_counter += 1
+                    send_update()
                     
-                    hit_data = {
-                        'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
-                        'category': category, 'status_msg': status_msg,
-                        'response_msg': clean_response,
-                        'gateway': gateway, 'price': price, 'elapsed': elapsed,
-                        'bin_info': bin_info,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    save_stripe_hit(hit_data)
-                elif category == 'DECLINED':
-                    stats['declined'] += 1
-                else:
-                    stats['errors'] += 1
-                
-                completed += 1
-                delete_stripe_card(card_str)
-                update_counter += 1
-                send_update()
-                
-        except:
-            continue
-    
-    for w in workers:
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+        
         try:
-            w.join(timeout=2)
+            sqlite_backup.update_daily_stats(0, 0, 0, 0, completed, total_approved, current_mode)
         except:
             pass
-    
-    send_update()
-    
-    elapsed = time.time() - start_time
-    minutes, seconds = int(elapsed // 60), int(elapsed % 60)
-    total_approved = stats['live'] + stats['threeds'] + stats['cvv']
-    
-    try:
-        sqlite_backup.update_daily_stats(0, 0, 0, 0, completed, total_approved, current_mode)
-    except:
-        pass
-    
-    final_bar = create_progress_bar(completed, total)
-    final_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *STRIPE AUTH STOPPED*" if was_stopped else "🏁 *STRIPE AUTH COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏁 *STRIPE AUTH COMPLETED*
+{status_label}
 
 `{final_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -2368,20 +2378,24 @@ def stripe_mass_command(message):
 📊 *Total:* {completed}
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
 ⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🔓 Ver AU Hits", callback_data="stripe_hits"),
+            InlineKeyboardButton("🔓 Nuevo AU Mass", callback_data="stripe_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+        
+        stripe_mass_running = False
     
-    result_keyboard = InlineKeyboardMarkup()
-    result_keyboard.row(
-        InlineKeyboardButton("🔓 Ver AU Hits", callback_data="stripe_hits"),
-        InlineKeyboardButton("🔓 Nuevo AU Mass", callback_data="stripe_mass")
-    )
-    
-    try:
-        bot.edit_message_text(final_text, chat_id=message.chat.id, message_id=progress_msg.message_id,
-                            parse_mode='Markdown', reply_markup=result_keyboard)
-    except:
-        pass
-    
-    stripe_mass_running = False
+    t = threading.Thread(target=run_stripe_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
 
 # ============================================
 # HITS COMMANDS
@@ -2456,9 +2470,18 @@ def stop_mass_check(message):
     global mass_check_running, stripe_mass_running, stop_mass_flag
     if mass_check_running or stripe_mass_running:
         stop_mass_flag = True
-        mass_check_running = False
-        stripe_mass_running = False
-        bot.reply_to(message, "✅ Mass check stopped")
+        bot.reply_to(message, f"🛑 *Stopping mass check...*\n{LINE_THIN}\nPlease wait while workers finish...", parse_mode='Markdown')
+        try:
+            if current_mass_msg and current_mass_chat_id:
+                bot.edit_message_text(f"""🛑 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏳ *STOPPING MASS CHECK...*
+
+Please wait while workers finish...""",
+                    chat_id=current_mass_chat_id, message_id=current_mass_msg.message_id,
+                    parse_mode='Markdown')
+        except:
+            pass
     else:
         bot.reply_to(message, "ℹ️ No active mass check")
 
@@ -2866,9 +2889,18 @@ def handle_callback(call):
     elif call.data == "stop_mass":
         if mass_check_running or stripe_mass_running:
             stop_mass_flag = True
-            mass_check_running = False
-            stripe_mass_running = False
-            bot.answer_callback_query(call.id, "✅ Stopping...")
+            bot.answer_callback_query(call.id, "🛑 Stopping mass check...")
+            try:
+                if current_mass_msg and current_mass_chat_id:
+                    bot.edit_message_text(f"""🛑 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏳ *STOPPING MASS CHECK...*
+
+Please wait while workers finish...""",
+                        chat_id=current_mass_chat_id, message_id=current_mass_msg.message_id,
+                        parse_mode='Markdown')
+            except:
+                pass
         else:
             bot.answer_callback_query(call.id, "No active mass check")
     
@@ -3016,6 +3048,7 @@ def handle_callback(call):
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics panel
   /mode ─ Parallel mode (1x/3x/5x)
+  /stop ─ Stop active mass check
 
 📂 *━━ FILE UPLOAD ━━*
   Send `.txt` file → auto-load
