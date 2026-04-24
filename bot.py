@@ -726,7 +726,7 @@ def sc_create_payment_method(card_number, exp_month, exp_year, cvc):
         "referer": "https://js.stripe.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
     }
-    return requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+    return requests.post(url, data=payload, headers=headers)
 
 def sc_send_payment(pm_id):
     url = f"{SC_MERCHANT_URL}/man_int/rest/man_int/V1/guest-carts/{SC_CART_ID}/payment-information"
@@ -749,6 +749,7 @@ def sc_send_payment(pm_id):
         "email": "crimsonkelcie@dollicons.com"
     }
     headers = {
+        "authority": "shop.manner.com",
         "accept": "*/*",
         "content-type": "application/json",
         "cookie": SC_COOKIES,
@@ -757,7 +758,7 @@ def sc_send_payment(pm_id):
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "x-requested-with": "XMLHttpRequest"
     }
-    return requests.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+    return requests.post(url, json=payload, headers=headers)
 
 def check_stripe_charge(cc, month, year, cvv):
     start_time = time.time()
