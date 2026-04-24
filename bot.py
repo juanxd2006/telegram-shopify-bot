@@ -50,8 +50,10 @@ OWNER_ID = 8220432777
 
 def owner_only(func):
     def wrapper(message):
-        if message.from_user.id != OWNER_ID:
-            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{message.from_user.id}`", parse_mode='Markdown')
+        user_id = message.from_user.id
+        print(f"[OWNER CHECK] User ID: {user_id} | Owner ID: {OWNER_ID} | Match: {user_id == OWNER_ID}")
+        if user_id != OWNER_ID:
+            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{user_id}`\nOwner ID: `{OWNER_ID}`", parse_mode='Markdown')
             return
         return func(message)
     return wrapper
