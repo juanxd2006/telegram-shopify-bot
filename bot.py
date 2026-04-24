@@ -51,7 +51,7 @@ OWNER_ID = 8220432777
 def owner_only(func):
     def wrapper(message):
         if message.from_user.id != OWNER_ID:
-            bot.reply_to(message, "\u274c Access denied. This bot is private.")
+            bot.reply_to(message, f"\u274c Access denied. This bot is private.\n\nYour ID: `{message.from_user.id}`", parse_mode='Markdown')
             return
         return func(message)
     return wrapper
@@ -59,7 +59,7 @@ def owner_only(func):
 def owner_callback(func):
     def wrapper(call):
         if call.from_user.id != OWNER_ID:
-            bot.answer_callback_query(call.id, "\u274c Access denied")
+            bot.answer_callback_query(call.id, f"\u274c Access denied. Your ID: {call.from_user.id}")
             return
         return func(call)
     return wrapper
@@ -1792,6 +1792,10 @@ def detect_line_type(line):
 # ============================================
 # COMMANDS
 # ============================================
+
+@bot.message_handler(commands=['myid'])
+def myid_command(message):
+    bot.reply_to(message, f"🆔 Your Telegram ID: `{message.from_user.id}`\n\nSend this ID to the bot admin to get access.", parse_mode='Markdown')
 
 @bot.message_handler(commands=['start', 'help'])
 @owner_only
