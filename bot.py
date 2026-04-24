@@ -77,6 +77,7 @@ mode_workers = {
     "extremo": 5
 }
 PARALLEL_WORKERS = mode_workers[current_mode]
+SC_PARALLEL_WORKERS = 1
 
 # Update cada 5 cards
 UPDATE_BATCH_SIZE = 5
@@ -1466,8 +1467,10 @@ def check_card_shopify(cc, month, year, cvv):
 def classify_response(response_msg):
     response_upper = response_msg.upper() if response_msg else ""
     
-    # CHARGE / APPROVED
-    if any(kw in response_upper for kw in ['CHARGED', 'CAPTURED', 'APPROVED', 'SUCCESS', 'SUCCEEDED', 'PAID', 'PAYMENT_INTENT_UNEXPECTED_STATE']):
+    # CHARGE / APPROVED / ORDER COMPLETE
+    if any(kw in response_upper for kw in ['CHARGED', 'CAPTURED', 'APPROVED', 'SUCCESS', 'SUCCEEDED', 'PAID', 
+                                            'PAYMENT_INTENT_UNEXPECTED_STATE', 'ORDER_COMPLETE', 'ORDER COMPLETE',
+                                            'ORDER_PLACED', 'ORDER PLACED']):
         return "CHARGE", response_msg
     
     # 3DS / Authentication Required (requires_action is treated as DECLINED)
@@ -1700,6 +1703,7 @@ def format_chk_response(card_data, category, status_msg, response_msg, price, ga
         message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
         message += f"\u26a1 {stylize_text('Country')}: {country}\n"
     
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
     message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
@@ -1743,6 +1747,7 @@ def format_stripe_response(card_data, category, status_msg, response_msg, price,
         message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
         message += f"\u26a1 {stylize_text('Country')}: {country}\n"
     
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
     message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
@@ -1785,6 +1790,7 @@ def format_sc_response(card_data, category, status_msg, response_msg, price, gat
         message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
         message += f"\u26a1 {stylize_text('Country')}: {country}\n"
     
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
     message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
@@ -2270,7 +2276,7 @@ def sc_mass_command(message):
     progress_bar = create_progress_bar(0, total)
     msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ *STRIPE CHARGE MASS CHECK*
+⚡ *STRIPE CHARGE MASS CHECK (1x)*
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -2304,7 +2310,7 @@ def sc_mass_command(message):
         for card_str in cards:
             task_queue.put(card_str)
         
-        for _ in range(PARALLEL_WORKERS):
+        for _ in range(SC_PARALLEL_WORKERS):
             task_queue.put(None)
         
         def sc_worker(worker_id):
@@ -2330,7 +2336,7 @@ def sc_mass_command(message):
                     continue
         
         workers = []
-        for i in range(PARALLEL_WORKERS):
+        for i in range(SC_PARALLEL_WORKERS):
             w = threading.Thread(target=sc_worker, args=(i,))
             w.daemon = True
             w.start()
@@ -2348,7 +2354,7 @@ def sc_mass_command(message):
                 progress_bar = create_progress_bar(completed, total)
                 update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ *STRIPE CHARGE MASS CHECK*
+⚡ *STRIPE CHARGE MASS CHECK (1x)*
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
