@@ -1366,13 +1366,13 @@ def bin_lookup(bin_number):
         if time.time() - timestamp < bin_cache_expiry:
             return data
     
-    result = _bin_lookup_binlist(bin_number)
-    if not result:
-        result = _bin_lookup_handyapi(bin_number)
-    
-    if result and CACHE_BIN_RESULTS:
-        bin_cache[bin_number] = (result, time.time())
-    return result
+    for lookup_fn in [_bin_lookup_binlist, _bin_lookup_handyapi, _bin_lookup_bincodes, _bin_lookup_bincheck]:
+        result = lookup_fn(bin_number)
+        if result:
+            if CACHE_BIN_RESULTS:
+                bin_cache[bin_number] = (result, time.time())
+            return result
+    return None
 
 def _bin_lookup_binlist(bin_number):
     try:
@@ -1426,6 +1426,72 @@ def _bin_lookup_handyapi(bin_number):
                     'brand': scheme if scheme else 'UNKNOWN',
                     'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
                     'level': '',
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
+    except:
+        pass
+    return None
+
+def _bin_lookup_bincodes(bin_number):
+    try:
+        response = requests.get(f"https://api.bincodes.com/bin/?format=json&api_key=free&bin={bin_number}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('bin'):
+                scheme = data.get('card', 'UNKNOWN').upper()
+                card_type = data.get('type', 'UNKNOWN').upper()
+                level = data.get('level', '').upper()
+                bank_name = data.get('bank', 'UNKNOWN')
+                country_name = data.get('countryname', 'UNKNOWN')
+                country_code = data.get('country', 'XX').upper()
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                return {
+                    'info': f"{card_type} - {scheme} {level}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': level,
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
+    except:
+        pass
+    return None
+
+def _bin_lookup_bincheck(bin_number):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+        }
+        response = requests.get(f"https://bins.antipublic.cc/bins/{bin_number}", timeout=10, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('bin'):
+                scheme = data.get('brand', 'UNKNOWN').upper()
+                card_type = data.get('type', 'UNKNOWN').upper()
+                level = data.get('level', '').upper()
+                bank_name = data.get('bank', 'UNKNOWN')
+                country_name = data.get('country_name', 'UNKNOWN')
+                country_code = data.get('country', 'XX').upper()
+                prepaid = data.get('prepaid', False)
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                if prepaid:
+                    card_type = 'PREPAID'
+                
+                return {
+                    'info': f"{card_type} - {scheme} {level}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': level,
                     'bank': bank_name,
                     'country': f"{country_name} {flag}",
                     'flag': flag,
@@ -3435,10 +3501,24 @@ def gen_command(message):
     cards = generate_cards_from_bin(bin_prefix, count)
     bin_info = bin_lookup(bin_prefix[:6])
     
+    response = _format_gen_response(bin_prefix, count, cards, bin_info)
+    
+    regen_markup = InlineKeyboardMarkup()
+    regen_markup.row(
+        InlineKeyboardButton("🔄 Regenerate", callback_data=f"regen_{bin_prefix}_{count}"),
+        InlineKeyboardButton("📋 Copy All", callback_data=f"gencopy_{bin_prefix}_{count}")
+    )
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown', reply_markup=regen_markup)
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id, reply_markup=regen_markup)
+
+def _format_gen_response(bin_prefix, count, cards, bin_info):
     cards_text = '\n'.join([f"`{c}`" for c in cards])
     
     if bin_info:
-        response = f"""{get_bot_header('shopify')}
+        return f"""{get_bot_header('shopify')}
 
 🎲 *CARD GENERATOR ─ LUHN*
 {LINE_DOT}
@@ -3446,7 +3526,8 @@ def gen_command(message):
 🔢 {stylize_text('Amount')}  ➜  {len(cards)}
 
 📋 *{stylize_text('BIN Info')}*
-   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}
+   ├ {stylize_text('Brand')}: {bin_info.get('brand', 'Unknown')}
+   ├ {stylize_text('Type')}: {bin_info.get('type', 'Unknown')}
    ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
    └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
 
@@ -3456,7 +3537,7 @@ def gen_command(message):
 ✅ All cards pass Luhn validation
 {get_bot_footer()}"""
     else:
-        response = f"""{get_bot_header('shopify')}
+        return f"""{get_bot_header('shopify')}
 
 🎲 *CARD GENERATOR ─ LUHN*
 {LINE_DOT}
@@ -3468,11 +3549,6 @@ def gen_command(message):
 
 ✅ All cards pass Luhn validation
 {get_bot_footer()}"""
-    
-    try:
-        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
-    except:
-        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 @bot.message_handler(commands=['bin'])
 def bin_command(message):
@@ -3492,6 +3568,7 @@ def bin_command(message):
     bin_info = bin_lookup(bin_number)
     
     if bin_info:
+        level_line = f"\n   ├ {stylize_text('Level')}: {bin_info.get('level')}" if bin_info.get('level') else ""
         response = f"""{get_bot_header('shopify')}
 
 🏦 *BIN LOOKUP*
@@ -3499,7 +3576,8 @@ def bin_command(message):
 💳 {stylize_text('BIN')}  ➜  `{bin_number}`
 
 📋 *{stylize_text('Details')}*
-   ├ {stylize_text('Type')}: {bin_info.get('info', 'Unknown')}
+   ├ {stylize_text('Brand')}: {bin_info.get('brand', 'Unknown')}
+   ├ {stylize_text('Type')}: {bin_info.get('type', 'Unknown')}{level_line}
    ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
    └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
 {get_bot_footer()}"""
@@ -3614,6 +3692,35 @@ def handle_callback(call):
     elif call.data == "gen_cards":
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, "🎲 Generate cards with Luhn:\n/gen `424242` `10`\n\nFormat: /gen BIN [amount]", parse_mode='Markdown')
+    
+    elif call.data.startswith("regen_"):
+        parts = call.data.split("_", 2)
+        if len(parts) == 3:
+            bin_prefix = parts[1]
+            count = int(parts[2])
+            bot.answer_callback_query(call.id, "🔄 Regenerating...")
+            cards = generate_cards_from_bin(bin_prefix, count)
+            bin_info = bin_lookup(bin_prefix[:6])
+            response = _format_gen_response(bin_prefix, count, cards, bin_info)
+            regen_markup = InlineKeyboardMarkup()
+            regen_markup.row(
+                InlineKeyboardButton("🔄 Regenerate", callback_data=f"regen_{bin_prefix}_{count}"),
+                InlineKeyboardButton("📋 Copy All", callback_data=f"gencopy_{bin_prefix}_{count}")
+            )
+            try:
+                bot.edit_message_text(response, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='Markdown', reply_markup=regen_markup)
+            except:
+                pass
+    
+    elif call.data.startswith("gencopy_"):
+        parts = call.data.split("_", 2)
+        if len(parts) == 3:
+            bin_prefix = parts[1]
+            count = int(parts[2])
+            bot.answer_callback_query(call.id, "📋 Generating plain text...")
+            cards = generate_cards_from_bin(bin_prefix, count)
+            plain_text = '\n'.join(cards)
+            bot.send_message(call.message.chat.id, f"```\n{plain_text}\n```", parse_mode='Markdown')
     
     elif call.data == "export":
         bot.answer_callback_query(call.id)
