@@ -1365,8 +1365,19 @@ def bin_lookup(bin_number):
         data, timestamp = bin_cache[bin_number]
         if time.time() - timestamp < bin_cache_expiry:
             return data
+    
+    result = _bin_lookup_binlist(bin_number)
+    if not result:
+        result = _bin_lookup_handyapi(bin_number)
+    
+    if result and CACHE_BIN_RESULTS:
+        bin_cache[bin_number] = (result, time.time())
+    return result
+
+def _bin_lookup_binlist(bin_number):
     try:
-        response = requests.get(f"https://lookup.binlist.net/{bin_number}", timeout=10)
+        response = requests.get(f"https://lookup.binlist.net/{bin_number}", timeout=10,
+                               headers={'Accept-Version': '3'})
         if response.status_code == 200:
             data = response.json()
             scheme = data.get('scheme', 'UNKNOWN').upper()
@@ -1382,16 +1393,44 @@ def bin_lookup(bin_number):
             flag = COUNTRY_FLAGS.get(country_code, '🌍')
             
             card_type = "PREPAID" if prepaid else type_card if type_card != 'UNKNOWN' else "CREDIT/DEBIT"
-            result = {
+            return {
                 'info': f"{card_type} - {scheme} {brand}".strip(),
+                'brand': scheme if scheme else (brand if brand else 'UNKNOWN'),
+                'type': card_type,
+                'level': brand if brand and brand != scheme else '',
                 'bank': bank_name,
                 'country': f"{country_name} {flag}",
                 'flag': flag,
                 'country_code': country_code
             }
-            if CACHE_BIN_RESULTS:
-                bin_cache[bin_number] = (result, time.time())
-            return result
+    except:
+        pass
+    return None
+
+def _bin_lookup_handyapi(bin_number):
+    try:
+        response = requests.get(f"https://data.handyapi.com/bin/{bin_number}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('Status') == 'SUCCESS':
+                scheme = data.get('Scheme', 'UNKNOWN').upper()
+                card_type = data.get('Type', 'UNKNOWN').upper()
+                bank_name = data.get('Issuer', 'UNKNOWN')
+                country_name = data.get('Country', {}).get('Name', 'UNKNOWN') if isinstance(data.get('Country'), dict) else data.get('CountryName', 'UNKNOWN')
+                country_code = data.get('Country', {}).get('A2', 'XX') if isinstance(data.get('Country'), dict) else 'XX'
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                return {
+                    'info': f"{card_type} - {scheme}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': '',
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
     except:
         pass
     return None
@@ -2298,6 +2337,15 @@ def sc_mass_command(message):
     def run_sc_mass(chat_id, msg_id):
         global sc_mass_running, stop_mass_flag
         
+        try:
+            _run_sc_mass_inner(chat_id, msg_id)
+        finally:
+            sc_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_sc_mass_inner(chat_id, msg_id):
+        global sc_mass_running, stop_mass_flag
+        
         stats = {
             'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
             'declined': 0, 'errors': 0, 'total': total
@@ -2494,8 +2542,6 @@ def sc_mass_command(message):
                                 parse_mode='Markdown', reply_markup=result_keyboard)
         except:
             pass
-        
-        sc_mass_running = False
     
     t = threading.Thread(target=run_sc_mass, args=(message.chat.id, progress_msg.message_id))
     t.daemon = True
@@ -2636,6 +2682,15 @@ def mass_check_command(message):
     current_mass_chat_id = message.chat.id
     
     def run_shopify_mass(chat_id, msg_id):
+        global mass_check_running, stop_mass_flag
+        
+        try:
+            _run_shopify_mass_inner(chat_id, msg_id)
+        finally:
+            mass_check_running = False
+            stop_mass_flag = False
+    
+    def _run_shopify_mass_inner(chat_id, msg_id):
         global mass_check_running, stop_mass_flag
         
         stats = {
@@ -2835,8 +2890,6 @@ def mass_check_command(message):
                                 parse_mode='Markdown', reply_markup=result_keyboard)
         except:
             pass
-        
-        mass_check_running = False
     
     t = threading.Thread(target=run_shopify_mass, args=(message.chat.id, progress_msg.message_id))
     t.daemon = True
@@ -2895,6 +2948,15 @@ def stripe_mass_command(message):
     current_mass_chat_id = message.chat.id
     
     def run_stripe_mass(chat_id, msg_id):
+        global stripe_mass_running, stop_mass_flag
+        
+        try:
+            _run_stripe_mass_inner(chat_id, msg_id)
+        finally:
+            stripe_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_stripe_mass_inner(chat_id, msg_id):
         global stripe_mass_running, stop_mass_flag
         
         stats = {
@@ -3097,8 +3159,6 @@ def stripe_mass_command(message):
                                 parse_mode='Markdown', reply_markup=result_keyboard)
         except:
             pass
-        
-        stripe_mass_running = False
     
     t = threading.Thread(target=run_stripe_mass, args=(message.chat.id, progress_msg.message_id))
     t.daemon = True
@@ -3189,6 +3249,15 @@ Please wait while workers finish...""",
                     parse_mode='Markdown')
         except:
             pass
+        def force_reset():
+            global mass_check_running, stripe_mass_running, sc_mass_running, stop_mass_flag
+            time.sleep(15)
+            mass_check_running = False
+            stripe_mass_running = False
+            sc_mass_running = False
+            stop_mass_flag = False
+        t = threading.Thread(target=force_reset, daemon=True)
+        t.start()
     else:
         bot.reply_to(message, "ℹ️ No active mass check")
 
