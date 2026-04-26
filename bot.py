@@ -1091,15 +1091,28 @@ def b3_random_identity():
     return first, last, f"{user}@{domain}", random.choice(B3_ADDRESSES)
 
 def b3_load_cookies(session):
-    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cookies.json')
-    if os.path.exists(cookies_path):
-        with open(cookies_path) as f:
-            cookies = json.load(f)
-        for c in cookies:
-            domain = c.get('domain', '')
-            if 'trade-chem' in domain:
-                session.cookies.set(c['name'], c['value'], domain=domain, path=c.get('path', '/'))
-        return True
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    home = os.path.expanduser('~')
+    search_paths = []
+    for d in [script_dir, cwd, home]:
+        for name in ['cookies.json', 'cookies.txt']:
+            search_paths.append(os.path.join(d, name))
+    for cookies_path in search_paths:
+        if os.path.exists(cookies_path):
+            try:
+                with open(cookies_path) as f:
+                    cookies = json.load(f)
+                loaded = 0
+                for c in cookies:
+                    domain = c.get('domain', '')
+                    if 'trade-chem' in domain:
+                        session.cookies.set(c['name'], c['value'], domain=domain, path=c.get('path', '/'))
+                        loaded += 1
+                if loaded > 0:
+                    return True
+            except:
+                continue
     return False
 
 def b3_try_register(session):
