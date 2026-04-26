@@ -882,12 +882,16 @@ def sc_classify_donation_response(status_code, resp_text, final_url=""):
     error_match = re.search(r'error:?\s*(there was an issue[^.]*\.)', plain_lower)
     if error_match:
         err = error_match.group(1).strip()
+        if ':' in err:
+            err = err.split(':', 1)[1].strip().rstrip('.')
         cat = sc_classify_error_text(err)
         return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
     
     txn_match = re.search(r'(there was an issue with your donation[^.]*\.)', plain_lower)
     if txn_match:
         err = txn_match.group(1).strip()
+        if ':' in err:
+            err = err.split(':', 1)[1].strip().rstrip('.')
         cat = sc_classify_error_text(err)
         return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
     
