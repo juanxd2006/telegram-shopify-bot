@@ -1090,30 +1090,22 @@ def b3_random_identity():
     domain = random.choice(["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"])
     return first, last, f"{user}@{domain}", random.choice(B3_ADDRESSES)
 
+B3_COOKIES = [
+    {"domain": "trade-chem.co.uk", "name": "wordpress_logged_in_4d9c7ece763608b995b6637298409475", "value": "dayamadrid7099%7C1778363368%7CxOgLbD3ioAmtak3rN3aoj5lGH85bQEmPieJJDIm1txY%7C25049f2a8270175a5a950d79bc12e0b91d3c3266543b56140421040fa77cb455", "path": "/"},
+    {"domain": "trade-chem.co.uk", "name": "wfwaf-authcookie-fdddcad932b8083b61bd8da62850a450", "value": "3024%7Cother%7Cread%7C80a6dd52a8a7c716a006fccb87899bd151fec9e62db4062e4d272a89083dc62c", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_migrations", "value": "1418474375998%3D1", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_current_add", "value": "fd%3D2026-04-26%2019%3A35%3A41%7C%7C%7Cep%3Dhttps%3A%2F%2Ftrade-chem.co.uk%2Fmy-account%2Fadd-payment-method%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Ftrade-chem.co.uk%2Fmy-account%2Fpayment-methods%2F", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_first_add", "value": "fd%3D2026-04-26%2019%3A35%3A41%7C%7C%7Cep%3Dhttps%3A%2F%2Ftrade-chem.co.uk%2Fmy-account%2Fadd-payment-method%2F%7C%7C%7Crf%3Dhttps%3A%2F%2Ftrade-chem.co.uk%2Fmy-account%2Fpayment-methods%2F", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_current", "value": "typ%3Dtypein%7C%7C%7Csrc%3D%28direct%29%7C%7C%7Cmdm%3D%28none%29%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_first", "value": "typ%3Dtypein%7C%7C%7Csrc%3D%28direct%29%7C%7C%7Cmdm%3D%28none%29%7C%7C%7Ccmp%3D%28none%29%7C%7C%7Ccnt%3D%28none%29%7C%7C%7Ctrm%3D%28none%29%7C%7C%7Cid%3D%28none%29%7C%7C%7Cplt%3D%28none%29%7C%7C%7Cfmt%3D%28none%29%7C%7C%7Ctct%3D%28none%29", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_udata", "value": "vst%3D1%7C%7C%7Cuip%3D%28none%29%7C%7C%7Cuag%3DMozilla%2F5.0%20%28Linux%3B%20Android%2010%3B%20K%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F127.0.0.0%20Mobile%20Safari%2F537.36", "path": "/"},
+    {"domain": ".trade-chem.co.uk", "name": "sbjs_session", "value": "pgs%3D2%7C%7C%7Ccpg%3Dhttps%3A%2F%2Ftrade-chem.co.uk%2Fmy-account%2Fadd-payment-method%2F", "path": "/"},
+]
+
 def b3_load_cookies(session):
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    cwd = os.getcwd()
-    home = os.path.expanduser('~')
-    search_paths = []
-    for d in [script_dir, cwd, home]:
-        for name in ['cookies.json', 'cookies.txt']:
-            search_paths.append(os.path.join(d, name))
-    for cookies_path in search_paths:
-        if os.path.exists(cookies_path):
-            try:
-                with open(cookies_path) as f:
-                    cookies = json.load(f)
-                loaded = 0
-                for c in cookies:
-                    domain = c.get('domain', '')
-                    if 'trade-chem' in domain:
-                        session.cookies.set(c['name'], c['value'], domain=domain, path=c.get('path', '/'))
-                        loaded += 1
-                if loaded > 0:
-                    return True
-            except:
-                continue
-    return False
+    for c in B3_COOKIES:
+        session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c.get('path', '/'))
+    return True
 
 def b3_try_register(session):
     try:
