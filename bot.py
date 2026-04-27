@@ -1717,21 +1717,73 @@ def delete_card(card_str):
         return True
     return False
 
+def validate_luhn(card_number):
+    digits = [int(d) for d in str(card_number)]
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        total += sum(divmod(d * 2, 10))
+    return total % 10 == 0
+
+def is_card_expired(month, year):
+    try:
+        now = datetime.now()
+        m = int(month)
+        y = int(year)
+        if y < 100:
+            y += 2000
+        if y < now.year:
+            return True
+        if y == now.year and m < now.month:
+            return True
+        return False
+    except:
+        return False
+
+def validate_cvv(cvv, cc):
+    if not cvv.isdigit():
+        return False
+    if cc.startswith('3'):
+        return len(cvv) in [3, 4]
+    return len(cvv) == 3
+
 def parse_card_line(line):
     line = line.strip()
     if not line:
         return None
     line = re.sub(r'\s+', '', line)
-    if '|' in line:
-        parts = line.split('|')
-        if len(parts) >= 4:
-            cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
-            if len(year) > 2:
-                year = year[-2:]
-            if len(month) == 1:
-                month = f"0{month}"
-            return {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
-    return None
+    parts = None
+    for sep in ['|', '/', ':', ';', ',']:
+        if sep in line:
+            candidate = line.split(sep)
+            if len(candidate) >= 4:
+                parts = candidate
+                break
+    if not parts or len(parts) < 4:
+        return None
+    cc = re.sub(r'[^\d]', '', parts[0].strip())
+    month = parts[1].strip()
+    year = parts[2].strip()
+    cvv = parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13 or len(cc) > 19:
+        return None
+    if not month.isdigit() or not year.isdigit() or not cvv.isdigit():
+        return None
+    if len(year) == 4:
+        year = year[-2:]
+    elif len(year) != 2:
+        return None
+    if len(month) == 1:
+        month = f"0{month}"
+    m = int(month)
+    if m < 1 or m > 12:
+        return None
+    if not validate_luhn(cc):
+        return None
+    if not validate_cvv(cvv, cc):
+        return None
+    return {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
 
 # ============================================
 # SITES MANAGEMENT
@@ -1745,11 +1797,51 @@ def save_sites(sites):
     sites = list(dict.fromkeys(sites))
     return safe_json_save(SITES_FILE, sites)
 
+def validate_site_url(url):
+    if not url or not isinstance(url, str):
+        return False, "Empty URL"
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    domain_match = re.search(r'https?://([^/]+)', url)
+    if not domain_match:
+        return False, "No domain found"
+    domain = domain_match.group(1)
+    if '.' not in domain:
+        return False, "Invalid domain (no TLD)"
+    if len(domain) < 4:
+        return False, "Domain too short"
+    tld = domain.split('.')[-1].lower()
+    valid_tlds = ['com','org','net','shop','store','io','co','uk','de','fr','es','it',
+                  'ca','au','br','mx','ar','cl','xyz','online','site','info','biz',
+                  'us','eu','app','dev','me','in','jp','ru','nl','se','no','ie','pt',
+                  'pl','cz','at','ch','be','dk','fi','nz','za','sg','hk','tw','kr',
+                  'th','ph','vn','id','my','ae','sa','il','tr','ua','ro','bg','hr',
+                  'sk','si','lt','lv','ee','is','lu','mt','cy','gr','hu']
+    if tld not in valid_tlds:
+        return False, f"Unknown TLD: .{tld}"
+    return True, url
+
+def check_site_alive(url, timeout=5):
+    try:
+        resp = requests.head(url, timeout=timeout, verify=False, allow_redirects=True,
+                           headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        return resp.status_code < 500, resp.status_code, resp.elapsed.total_seconds()
+    except requests.exceptions.ConnectionError:
+        return False, 0, 0
+    except requests.exceptions.Timeout:
+        return False, 0, 0
+    except:
+        return False, 0, 0
+
 def add_site(url):
     if not url:
         return False
     cleaned_url = normalize_url(url)
     if not cleaned_url:
+        return False
+    valid, result = validate_site_url(cleaned_url)
+    if not valid:
         return False
     sites = load_sites()
     if cleaned_url not in sites:
@@ -1817,7 +1909,7 @@ def track_site_performance(url, success):
         site_stats[url] = (1, 1 if success else 0)
 
 def auto_clean_dead_sites():
-    """Remove non-permanent sites with high failure rate"""
+    """Remove non-permanent sites with high failure rate + connectivity check"""
     global site_check_counter
     site_check_counter += 1
     if site_check_counter < SITE_AUTO_CLEAN_INTERVAL:
@@ -1828,14 +1920,25 @@ def auto_clean_dead_sites():
     for url in list(sites):
         if sqlite_backup.is_permanent_site(url):
             continue
+        should_remove = False
         if url in site_stats:
             total, success = site_stats[url]
             if total >= SITE_MIN_CHECKS:
                 fail_rate = 1 - (success / total)
                 if fail_rate >= SITE_FAIL_RATE_THRESHOLD:
-                    sites.remove(url)
-                    removed.append(url)
+                    should_remove = True
                     print(f"🧹 Auto-cleaned dead site: {url} (fail rate: {fail_rate:.0%})")
+        if should_remove:
+            alive, status_code, _ = check_site_alive(url, timeout=3)
+            if not alive:
+                sites.remove(url)
+                removed.append(url)
+                if url in site_stats:
+                    del site_stats[url]
+            else:
+                if url in site_stats:
+                    site_stats[url] = (0, 0)
+                print(f"🔄 Site {url} still alive (HTTP {status_code}), stats reset")
     if removed:
         save_sites(sites)
         print(f"🧹 Auto-maintenance: removed {len(removed)} dead sites")
@@ -1877,7 +1980,40 @@ def load_proxies():
 def save_proxies(proxies):
     return safe_json_save(PROXIES_FILE, proxies)
 
+def validate_proxy_format(proxy_str):
+    if not proxy_str or not isinstance(proxy_str, str):
+        return False, "Empty proxy"
+    proxy_str = proxy_str.strip()
+    parts = proxy_str.split(':')
+    if len(parts) not in [2, 4]:
+        return False, "Format must be IP:PORT or IP:PORT:USER:PASS"
+    ip = parts[0]
+    port_str = parts[1]
+    ip_pattern = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+    match = ip_pattern.match(ip)
+    if not match:
+        return False, f"Invalid IP: {ip}"
+    for octet in match.groups():
+        if int(octet) > 255:
+            return False, f"Invalid IP octet: {octet}"
+    try:
+        port = int(port_str)
+        if port < 1 or port > 65535:
+            return False, f"Invalid port: {port}"
+    except ValueError:
+        return False, f"Port not a number: {port_str}"
+    return True, "OK"
+
+def normalize_proxy(proxy_str):
+    proxy_str = proxy_str.strip()
+    proxy_str = re.sub(r'\s+', '', proxy_str)
+    return proxy_str
+
 def add_proxy(proxy_str):
+    proxy_str = normalize_proxy(proxy_str)
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        return False
     proxies = load_proxies()
     if proxy_str not in proxies:
         proxies.append(proxy_str)
@@ -1944,18 +2080,27 @@ def report_proxy_success(proxy_str):
 # PROXY CHECKER
 # ============================================
 
+proxy_latency = {}
+
 def check_proxy_socket(proxy_str):
-    """Level 1: TCP socket connection test"""
+    """Level 1: TCP socket connection test with latency"""
     try:
+        valid, reason = validate_proxy_format(proxy_str)
+        if not valid:
+            return False
         parts = proxy_str.split(':')
-        if len(parts) >= 2:
-            host = parts[0]
-            port = int(parts[1])
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(PROXY_SOCKET_TIMEOUT)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            return result == 0
+        host = parts[0]
+        port = int(parts[1])
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(PROXY_SOCKET_TIMEOUT)
+        start = time.time()
+        result = sock.connect_ex((host, port))
+        latency = round((time.time() - start) * 1000)
+        sock.close()
+        if result == 0:
+            proxy_latency[proxy_str] = latency
+            return True
+        return False
     except:
         pass
     return False
@@ -1995,7 +2140,10 @@ def check_proxy_full(proxy_str):
         return False
 
 def check_proxy_deep(proxy_str):
-    """Deep proxy check: socket + HTTP CONNECT + real request"""
+    """Deep proxy check: format + socket + HTTP CONNECT + real request"""
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        return False, f'FORMAT_FAIL: {reason}'
     if not check_proxy_socket(proxy_str):
         return False, 'SOCKET_FAIL'
     if not check_proxy_http_connect(proxy_str):
@@ -2038,6 +2186,9 @@ def silent_proxy_check():
     if not proxies:
         return
     alive, dead, _ = verify_proxy_batch(proxies)
+    if dead:
+        delete_dead_proxies(dead)
+        print(f"🧹 Silent proxy check: removed {len(dead)} dead proxies, {len(alive)} alive")
 
 def start_silent_pc():
     global silent_pc_running, silent_pc_thread
@@ -2954,25 +3105,313 @@ def detect_line_type(line):
     line = line.strip()
     if not line:
         return 'empty'
-    if '|' in line:
-        parts = line.split('|')
-        if len(parts) >= 4:
-            cc = re.sub(r'[^\d]', '', parts[0])
-            if len(cc) >= 13 and len(cc) <= 19 and cc.isdigit():
-                return 'card'
-    url_patterns = [r'https?://', r'\.com', r'\.org', r'\.net', r'\.shop', r'\.store', r'myshopify\.com']
+    for sep in ['|', '/', ';', ',']:
+        if sep in line:
+            parts = line.split(sep)
+            if len(parts) >= 4:
+                cc = re.sub(r'[^\d]', '', parts[0])
+                if len(cc) >= 13 and len(cc) <= 19 and cc.isdigit():
+                    if validate_luhn(cc):
+                        return 'card'
+    url_patterns = [
+        r'https?://',
+        r'\.com\b', r'\.org\b', r'\.net\b', r'\.shop\b', r'\.store\b',
+        r'\.io\b', r'\.co\b', r'\.uk\b', r'\.de\b', r'\.fr\b', r'\.es\b',
+        r'\.it\b', r'\.ca\b', r'\.au\b', r'\.br\b', r'\.mx\b', r'\.ar\b',
+        r'\.cl\b', r'\.co\.uk\b', r'\.com\.au\b', r'\.com\.br\b',
+        r'\.xyz\b', r'\.online\b', r'\.site\b', r'\.info\b', r'\.biz\b',
+        r'\.us\b', r'\.eu\b', r'\.app\b', r'\.dev\b', r'\.me\b',
+        r'\.in\b', r'\.jp\b', r'\.ru\b', r'\.nl\b', r'\.se\b', r'\.no\b',
+        r'\.ie\b', r'\.pt\b', r'\.pl\b', r'\.cz\b', r'\.at\b', r'\.ch\b',
+        r'myshopify\.com'
+    ]
     for pattern in url_patterns:
         if re.search(pattern, line, re.IGNORECASE):
             return 'site'
     if ':' in line and '/' not in line:
         parts = line.split(':')
-        if len(parts) >= 2:
+        if len(parts) in [2, 4]:
             ip = parts[0].strip()
-            port = parts[1].strip()
-            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', ip)
+            port_str = parts[1].strip()
+            ip_match = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', ip)
             if ip_match:
-                return 'proxy'
+                octets_valid = all(int(o) <= 255 for o in ip_match.groups())
+                try:
+                    port = int(port_str)
+                    port_valid = 1 <= port <= 65535
+                except ValueError:
+                    port_valid = False
+                if octets_valid and port_valid:
+                    return 'proxy'
     return 'invalid'
+
+# ============================================
+# NEW UTILITY COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['addproxy'])
+def addproxy_command(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /addproxy IP:PORT or /addproxy IP:PORT:USER:PASS")
+        return
+    proxy_str = args[1].strip()
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        bot.reply_to(message, f"❌ Invalid proxy: {reason}")
+        return
+    if add_proxy(proxy_str):
+        latency_info = ""
+        if check_proxy_socket(proxy_str):
+            lat = proxy_latency.get(proxy_str, 0)
+            latency_info = f"\n⏱ Latency: {lat}ms"
+        bot.reply_to(message, f"✅ Proxy added: `{proxy_str}`{latency_info}", parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "⚠️ Proxy already exists")
+
+@bot.message_handler(commands=['testsite'])
+def testsite_command(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /testsite URL")
+        return
+    url = args[1].strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    processing_msg = bot.reply_to(message, f"🔍 Testing site: {url}...")
+    valid, result = validate_site_url(url)
+    if not valid:
+        bot.edit_message_text(f"❌ Invalid URL: {result}", chat_id=message.chat.id, message_id=processing_msg.message_id)
+        return
+    alive, status_code, response_time = check_site_alive(url, timeout=8)
+    response = f"🌐 *Site Test: {url}*\n{LINE_DASH}\n"
+    response += f"📋 URL Valid: ✅\n"
+    if alive:
+        response += f"🟢 Status: ONLINE (HTTP {status_code})\n"
+        response += f"⏱ Response: {response_time:.2f}s\n"
+        is_perm = sqlite_backup.is_permanent_site(url)
+        if is_perm:
+            response += f"🔒 Permanent: YES\n"
+        if url in site_stats:
+            total, success = site_stats[url]
+            rate = (success / total * 100) if total > 0 else 0
+            response += f"📊 Stats: {success}/{total} ({rate:.0f}% success)\n"
+    else:
+        response += f"🔴 Status: OFFLINE\n"
+        response += f"⚠️ Site is not reachable\n"
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+@bot.message_handler(commands=['cardinfo'])
+def cardinfo_command(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /cardinfo cc|mm|yy|cvv")
+        return
+    card = parse_card_line(args[1])
+    if not card:
+        bot.reply_to(message, "❌ Invalid card format or failed Luhn check")
+        return
+    cc = card['cc']
+    month = card['month']
+    year = card['year']
+    cvv = card['cvv']
+    expired = is_card_expired(month, year)
+    bin_info = bin_lookup(cc[:6])
+    response = f"💳 *Card Validation*\n{LINE_DASH}\n"
+    response += f"⚡ {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    response += f"✅ Luhn: VALID\n"
+    response += f"{'❌ EXPIRED' if expired else '✅ NOT EXPIRED'}\n"
+    response += f"📏 Length: {len(cc)} digits\n"
+    response += f"🔢 CVV: {'4 digits (AMEX)' if len(cvv) == 4 else '3 digits'}\n"
+    brand = "UNKNOWN"
+    if cc.startswith('4'):
+        brand = "VISA"
+    elif cc.startswith(('51','52','53','54','55')):
+        brand = "MASTERCARD"
+    elif cc.startswith(('34','37')):
+        brand = "AMEX"
+    elif cc.startswith('6011') or cc.startswith('65'):
+        brand = "DISCOVER"
+    elif cc.startswith(('300','301','302','303','304','305','36','38')):
+        brand = "DINERS"
+    elif cc.startswith(('2131','1800','35')):
+        brand = "JCB"
+    response += f"🏷 Brand: {brand}\n"
+    if bin_info:
+        response += f"\n🏦 *BIN Info*:\n"
+        response += f"  Type: {bin_info.get('type', 'N/A')}\n"
+        response += f"  Level: {bin_info.get('level', 'N/A')}\n"
+        response += f"  Bank: {bin_info.get('bank', 'N/A')}\n"
+        response += f"  Country: {bin_info.get('country', 'N/A')}\n"
+    try:
+        bot.reply_to(message, response, parse_mode='Markdown')
+    except:
+        bot.reply_to(message, response.replace('*', ''))
+
+@bot.message_handler(commands=['dedup'])
+def dedup_command(message):
+    processing_msg = bot.reply_to(message, "🔍 Scanning for duplicates across all gateways...")
+    all_queues = {
+        'Shopify': (get_all_cards, save_cards),
+        'Stripe Auth': (get_all_stripe_cards, save_stripe_cards),
+        'Stripe Charge': (get_all_sc_cards, save_sc_cards),
+        'Braintree Auth': (get_all_b3_cards, save_b3_cards),
+    }
+    total_removed = 0
+    details = []
+    for name, (loader, saver) in all_queues.items():
+        cards = loader()
+        original = len(cards)
+        unique = list(dict.fromkeys(cards))
+        dupes = original - len(unique)
+        if dupes > 0:
+            saver(unique)
+            total_removed += dupes
+            details.append(f"  {name}: {dupes} duplicados removidos")
+    cross_dupes = 0
+    all_seen = set()
+    for name, (loader, saver) in all_queues.items():
+        cards = loader()
+        clean = []
+        for c in cards:
+            if c not in all_seen:
+                all_seen.add(c)
+                clean.append(c)
+            else:
+                cross_dupes += 1
+        if len(clean) < len(cards):
+            saver(clean)
+    total_removed += cross_dupes
+    response = f"🧹 *Deduplication Complete*\n{LINE_DASH}\n"
+    if details:
+        response += "\n".join(details) + "\n"
+    if cross_dupes > 0:
+        response += f"  Cross-gateway: {cross_dupes} duplicados removidos\n"
+    if total_removed == 0:
+        response += "✅ No duplicates found!\n"
+    else:
+        response += f"\n🗑 Total removed: {total_removed}\n"
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+@bot.message_handler(commands=['cleanexp'])
+def cleanexp_command(message):
+    processing_msg = bot.reply_to(message, "🔍 Scanning for expired cards...")
+    all_queues = {
+        'Shopify': (get_all_cards, save_cards),
+        'Stripe Auth': (get_all_stripe_cards, save_stripe_cards),
+        'Stripe Charge': (get_all_sc_cards, save_sc_cards),
+        'Braintree Auth': (get_all_b3_cards, save_b3_cards),
+    }
+    total_removed = 0
+    details = []
+    for name, (loader, saver) in all_queues.items():
+        cards = loader()
+        valid_cards = []
+        expired_count = 0
+        for card_str in cards:
+            parsed = parse_card_line(card_str)
+            if parsed and is_card_expired(parsed['month'], parsed['year']):
+                expired_count += 1
+            else:
+                valid_cards.append(card_str)
+        if expired_count > 0:
+            saver(valid_cards)
+            total_removed += expired_count
+            details.append(f"  {name}: {expired_count} expired removed")
+    response = f"🧹 *Expired Cards Cleanup*\n{LINE_DASH}\n"
+    if details:
+        response += "\n".join(details) + "\n"
+    if total_removed == 0:
+        response += "✅ No expired cards found!\n"
+    else:
+        response += f"\n🗑 Total expired removed: {total_removed}\n"
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+@bot.message_handler(commands=['proxyinfo'])
+def proxyinfo_command(message):
+    proxies = load_proxies()
+    if not proxies:
+        bot.reply_to(message, "❌ No proxies loaded")
+        return
+    processing_msg = bot.reply_to(message, f"📡 Analyzing {len(proxies)} proxies...")
+    response = f"📡 *Proxy Dashboard*\n{LINE_DASH}\n"
+    response += f"📊 Total: {len(proxies)}\n"
+    valid_count = 0
+    invalid_count = 0
+    auth_count = 0
+    for p in proxies:
+        valid, _ = validate_proxy_format(p)
+        if valid:
+            valid_count += 1
+            parts = p.split(':')
+            if len(parts) >= 4:
+                auth_count += 1
+        else:
+            invalid_count += 1
+    response += f"✅ Valid format: {valid_count}\n"
+    response += f"❌ Invalid format: {invalid_count}\n"
+    response += f"🔑 With auth: {auth_count}\n"
+    response += f"🔓 No auth: {valid_count - auth_count}\n"
+    if proxy_latency:
+        latencies = list(proxy_latency.values())
+        avg_lat = sum(latencies) / len(latencies)
+        min_lat = min(latencies)
+        max_lat = max(latencies)
+        response += f"\n⏱ *Latency Stats*:\n"
+        response += f"  Avg: {avg_lat:.0f}ms\n"
+        response += f"  Min: {min_lat}ms\n"
+        response += f"  Max: {max_lat}ms\n"
+    if failed_proxies:
+        response += f"\n⚠️ Failed proxies in cooldown: {len(failed_proxies)}\n"
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+@bot.message_handler(commands=['siteinfo'])
+def siteinfo_command(message):
+    sites = load_sites()
+    if not sites:
+        bot.reply_to(message, "❌ No sites loaded")
+        return
+    perm_sites = sqlite_backup.get_permanent_sites()
+    response = f"🌐 *Site Dashboard*\n{LINE_DASH}\n"
+    response += f"📊 Total sites: {len(sites)}\n"
+    response += f"🔒 Permanent: {len(perm_sites)}\n"
+    response += f"🔓 Regular: {len(sites) - len([s for s in sites if sqlite_backup.is_permanent_site(s)])}\n"
+    if site_stats:
+        best_sites = []
+        worst_sites = []
+        for url, (total, success) in site_stats.items():
+            if total >= SITE_MIN_CHECKS:
+                rate = success / total
+                best_sites.append((url, rate, total))
+                worst_sites.append((url, rate, total))
+        best_sites.sort(key=lambda x: x[1], reverse=True)
+        worst_sites.sort(key=lambda x: x[1])
+        if best_sites[:3]:
+            response += f"\n🏆 *Best Sites*:\n"
+            for url, rate, total in best_sites[:3]:
+                domain = re.sub(r'https?://', '', url).split('/')[0]
+                response += f"  🟢 {domain} ({rate:.0%}, {total} checks)\n"
+        if worst_sites[:3]:
+            response += f"\n⚠️ *Worst Sites*:\n"
+            for url, rate, total in worst_sites[:3]:
+                domain = re.sub(r'https?://', '', url).split('/')[0]
+                response += f"  🔴 {domain} ({rate:.0%}, {total} checks)\n"
+    try:
+        bot.reply_to(message, response, parse_mode='Markdown')
+    except:
+        bot.reply_to(message, response.replace('*', ''))
 
 # ============================================
 # COMMANDS
@@ -3005,11 +3444,16 @@ def send_welcome(message):
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
+  /cardinfo `cc|mm|yy|cvv` ─ Validate card
   /px ─ Deep proxy check (3 levels)
-  /delproxy ─ Delete proxy
-  /clearshopify ─ Clear Shopify cards
-  /clearau ─ Clear Stripe Auth cards
-  /clearsc ─ Clear Stripe Charge $10 cards
+  /addproxy `IP:PORT` ─ Add proxy
+  /testsite `URL` ─ Test site status
+
+🧹 *━━ MAINTENANCE ━━*
+  /dedup ─ Remove duplicate cards
+  /cleanexp ─ Remove expired cards
+  /proxyinfo ─ Proxy dashboard
+  /siteinfo ─ Site dashboard
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics
@@ -3017,9 +3461,7 @@ def send_welcome(message):
 
 {LINE_THIN}
 📂 *Send .txt file to auto-load*
-   └ Name with "au" or "stripe" → Stripe Auth
 🧹 *Auto-maintenance active*
-   └ Dead sites auto-cleaned every 50 checks
 """
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
@@ -5222,21 +5664,21 @@ Please wait while workers finish...""",
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
+  /cardinfo `cc|mm|yy|cvv` ─ Validate card
   /px ─ Deep proxy check (3 levels)
-  /delproxy ─ Delete proxy
+  /addproxy `IP:PORT` ─ Add proxy
+  /testsite `URL` ─ Test site status
+
+🧹 *━━ MAINTENANCE ━━*
+  /dedup ─ Remove duplicate cards
+  /cleanexp ─ Remove expired cards
+  /proxyinfo ─ Proxy dashboard
+  /siteinfo ─ Site dashboard
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics panel
   /mode ─ Parallel mode (1x/3x/5x)
   /stop ─ Stop active mass check
-
-📂 *━━ FILE UPLOAD ━━*
-  Send `.txt` file → select gateway
-  Choose: Shopify, Stripe Auth, Stripe Charge $10, Braintree Auth $0, or ALL
-
-🧹 *━━ AUTO-MAINTENANCE ━━*
-  Dead sites auto-cleaned every 50 checks
-  Smart site rotation (best sites first)
 {LINE_THIN}
 🤖 {BOT_NAME} {BOT_VERSION}"""
         try:
