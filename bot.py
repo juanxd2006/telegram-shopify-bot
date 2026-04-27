@@ -5056,15 +5056,16 @@ def handle_callback(call):
         if not proxies:
             bot.send_message(call.message.chat.id, "❌ No proxies saved")
             return
-        response = f"📡 *{BOT_NAME} ─ PROXIES ({len(proxies)})*\n{LINE_DASH}\n\n"
-        for i, proxy in enumerate(proxies[:30], 1):
-            parts = proxy.split(':')
-            masked = f"{parts[0]}:{parts[1]}"
-            if len(parts) >= 4:
-                masked += ":****:****"
-            response += f"  {i}. `{masked}`\n"
-        response += f"\n{LINE_THIN}\n💡 Use `/delproxy <number>` to delete a proxy"
-        safe_send_message(call.message.chat.id, response, parse_mode='Markdown')
+        file_content = "\n".join(proxies)
+        file_path = os.path.join(DATA_DIR, "proxy_export.txt")
+        with open(file_path, 'w') as f:
+            f.write(file_content)
+        with open(file_path, 'rb') as f:
+            bot.send_document(call.message.chat.id, f, caption=f"📡 Proxies: {len(proxies)}", visible_file_name="proxies.txt")
+        try:
+            os.remove(file_path)
+        except:
+            pass
     
     elif call.data == "px":
         bot.answer_callback_query(call.id)
