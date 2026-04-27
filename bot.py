@@ -3169,250 +3169,6 @@ def addproxy_command(message):
     else:
         bot.reply_to(message, "⚠️ Proxy already exists")
 
-@bot.message_handler(commands=['testsite'])
-def testsite_command(message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Format: /testsite URL")
-        return
-    url = args[1].strip()
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    processing_msg = bot.reply_to(message, f"🔍 Testing site: {url}...")
-    valid, result = validate_site_url(url)
-    if not valid:
-        bot.edit_message_text(f"❌ Invalid URL: {result}", chat_id=message.chat.id, message_id=processing_msg.message_id)
-        return
-    alive, status_code, response_time = check_site_alive(url, timeout=8)
-    response = f"🌐 *Site Test: {url}*\n{LINE_DASH}\n"
-    response += f"📋 URL Valid: ✅\n"
-    if alive:
-        response += f"🟢 Status: ONLINE (HTTP {status_code})\n"
-        response += f"⏱ Response: {response_time:.2f}s\n"
-        is_perm = sqlite_backup.is_permanent_site(url)
-        if is_perm:
-            response += f"🔒 Permanent: YES\n"
-        if url in site_stats:
-            total, success = site_stats[url]
-            rate = (success / total * 100) if total > 0 else 0
-            response += f"📊 Stats: {success}/{total} ({rate:.0f}% success)\n"
-    else:
-        response += f"🔴 Status: OFFLINE\n"
-        response += f"⚠️ Site is not reachable\n"
-    try:
-        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
-    except:
-        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
-
-@bot.message_handler(commands=['cardinfo'])
-def cardinfo_command(message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Format: /cardinfo cc|mm|yy|cvv")
-        return
-    card = parse_card_line(args[1])
-    if not card:
-        bot.reply_to(message, "❌ Invalid card format or failed Luhn check")
-        return
-    cc = card['cc']
-    month = card['month']
-    year = card['year']
-    cvv = card['cvv']
-    expired = is_card_expired(month, year)
-    bin_info = bin_lookup(cc[:6])
-    response = f"💳 *Card Validation*\n{LINE_DASH}\n"
-    response += f"⚡ {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
-    response += f"✅ Luhn: VALID\n"
-    response += f"{'❌ EXPIRED' if expired else '✅ NOT EXPIRED'}\n"
-    response += f"📏 Length: {len(cc)} digits\n"
-    response += f"🔢 CVV: {'4 digits (AMEX)' if len(cvv) == 4 else '3 digits'}\n"
-    brand = "UNKNOWN"
-    if cc.startswith('4'):
-        brand = "VISA"
-    elif cc.startswith(('51','52','53','54','55')):
-        brand = "MASTERCARD"
-    elif cc.startswith(('34','37')):
-        brand = "AMEX"
-    elif cc.startswith('6011') or cc.startswith('65'):
-        brand = "DISCOVER"
-    elif cc.startswith(('300','301','302','303','304','305','36','38')):
-        brand = "DINERS"
-    elif cc.startswith(('2131','1800','35')):
-        brand = "JCB"
-    response += f"🏷 Brand: {brand}\n"
-    if bin_info:
-        response += f"\n🏦 *BIN Info*:\n"
-        response += f"  Type: {bin_info.get('type', 'N/A')}\n"
-        response += f"  Level: {bin_info.get('level', 'N/A')}\n"
-        response += f"  Bank: {bin_info.get('bank', 'N/A')}\n"
-        response += f"  Country: {bin_info.get('country', 'N/A')}\n"
-    try:
-        bot.reply_to(message, response, parse_mode='Markdown')
-    except:
-        bot.reply_to(message, response.replace('*', ''))
-
-@bot.message_handler(commands=['dedup'])
-def dedup_command(message):
-    processing_msg = bot.reply_to(message, "🔍 Scanning for duplicates across all gateways...")
-    all_queues = {
-        'Shopify': (get_all_cards, save_cards),
-        'Stripe Auth': (get_all_stripe_cards, save_stripe_cards),
-        'Stripe Charge': (get_all_sc_cards, save_sc_cards),
-        'Braintree Auth': (get_all_b3_cards, save_b3_cards),
-    }
-    total_removed = 0
-    details = []
-    for name, (loader, saver) in all_queues.items():
-        cards = loader()
-        original = len(cards)
-        unique = list(dict.fromkeys(cards))
-        dupes = original - len(unique)
-        if dupes > 0:
-            saver(unique)
-            total_removed += dupes
-            details.append(f"  {name}: {dupes} duplicados removidos")
-    cross_dupes = 0
-    all_seen = set()
-    for name, (loader, saver) in all_queues.items():
-        cards = loader()
-        clean = []
-        for c in cards:
-            if c not in all_seen:
-                all_seen.add(c)
-                clean.append(c)
-            else:
-                cross_dupes += 1
-        if len(clean) < len(cards):
-            saver(clean)
-    total_removed += cross_dupes
-    response = f"🧹 *Deduplication Complete*\n{LINE_DASH}\n"
-    if details:
-        response += "\n".join(details) + "\n"
-    if cross_dupes > 0:
-        response += f"  Cross-gateway: {cross_dupes} duplicados removidos\n"
-    if total_removed == 0:
-        response += "✅ No duplicates found!\n"
-    else:
-        response += f"\n🗑 Total removed: {total_removed}\n"
-    try:
-        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
-    except:
-        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
-
-@bot.message_handler(commands=['cleanexp'])
-def cleanexp_command(message):
-    processing_msg = bot.reply_to(message, "🔍 Scanning for expired cards...")
-    all_queues = {
-        'Shopify': (get_all_cards, save_cards),
-        'Stripe Auth': (get_all_stripe_cards, save_stripe_cards),
-        'Stripe Charge': (get_all_sc_cards, save_sc_cards),
-        'Braintree Auth': (get_all_b3_cards, save_b3_cards),
-    }
-    total_removed = 0
-    details = []
-    for name, (loader, saver) in all_queues.items():
-        cards = loader()
-        valid_cards = []
-        expired_count = 0
-        for card_str in cards:
-            parsed = parse_card_line(card_str)
-            if parsed and is_card_expired(parsed['month'], parsed['year']):
-                expired_count += 1
-            else:
-                valid_cards.append(card_str)
-        if expired_count > 0:
-            saver(valid_cards)
-            total_removed += expired_count
-            details.append(f"  {name}: {expired_count} expired removed")
-    response = f"🧹 *Expired Cards Cleanup*\n{LINE_DASH}\n"
-    if details:
-        response += "\n".join(details) + "\n"
-    if total_removed == 0:
-        response += "✅ No expired cards found!\n"
-    else:
-        response += f"\n🗑 Total expired removed: {total_removed}\n"
-    try:
-        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
-    except:
-        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
-
-@bot.message_handler(commands=['proxyinfo'])
-def proxyinfo_command(message):
-    proxies = load_proxies()
-    if not proxies:
-        bot.reply_to(message, "❌ No proxies loaded")
-        return
-    processing_msg = bot.reply_to(message, f"📡 Analyzing {len(proxies)} proxies...")
-    response = f"📡 *Proxy Dashboard*\n{LINE_DASH}\n"
-    response += f"📊 Total: {len(proxies)}\n"
-    valid_count = 0
-    invalid_count = 0
-    auth_count = 0
-    for p in proxies:
-        valid, _ = validate_proxy_format(p)
-        if valid:
-            valid_count += 1
-            parts = p.split(':')
-            if len(parts) >= 4:
-                auth_count += 1
-        else:
-            invalid_count += 1
-    response += f"✅ Valid format: {valid_count}\n"
-    response += f"❌ Invalid format: {invalid_count}\n"
-    response += f"🔑 With auth: {auth_count}\n"
-    response += f"🔓 No auth: {valid_count - auth_count}\n"
-    if proxy_latency:
-        latencies = list(proxy_latency.values())
-        avg_lat = sum(latencies) / len(latencies)
-        min_lat = min(latencies)
-        max_lat = max(latencies)
-        response += f"\n⏱ *Latency Stats*:\n"
-        response += f"  Avg: {avg_lat:.0f}ms\n"
-        response += f"  Min: {min_lat}ms\n"
-        response += f"  Max: {max_lat}ms\n"
-    if failed_proxies:
-        response += f"\n⚠️ Failed proxies in cooldown: {len(failed_proxies)}\n"
-    try:
-        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
-    except:
-        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
-
-@bot.message_handler(commands=['siteinfo'])
-def siteinfo_command(message):
-    sites = load_sites()
-    if not sites:
-        bot.reply_to(message, "❌ No sites loaded")
-        return
-    perm_sites = sqlite_backup.get_permanent_sites()
-    response = f"🌐 *Site Dashboard*\n{LINE_DASH}\n"
-    response += f"📊 Total sites: {len(sites)}\n"
-    response += f"🔒 Permanent: {len(perm_sites)}\n"
-    response += f"🔓 Regular: {len(sites) - len([s for s in sites if sqlite_backup.is_permanent_site(s)])}\n"
-    if site_stats:
-        best_sites = []
-        worst_sites = []
-        for url, (total, success) in site_stats.items():
-            if total >= SITE_MIN_CHECKS:
-                rate = success / total
-                best_sites.append((url, rate, total))
-                worst_sites.append((url, rate, total))
-        best_sites.sort(key=lambda x: x[1], reverse=True)
-        worst_sites.sort(key=lambda x: x[1])
-        if best_sites[:3]:
-            response += f"\n🏆 *Best Sites*:\n"
-            for url, rate, total in best_sites[:3]:
-                domain = re.sub(r'https?://', '', url).split('/')[0]
-                response += f"  🟢 {domain} ({rate:.0%}, {total} checks)\n"
-        if worst_sites[:3]:
-            response += f"\n⚠️ *Worst Sites*:\n"
-            for url, rate, total in worst_sites[:3]:
-                domain = re.sub(r'https?://', '', url).split('/')[0]
-                response += f"  🔴 {domain} ({rate:.0%}, {total} checks)\n"
-    try:
-        bot.reply_to(message, response, parse_mode='Markdown')
-    except:
-        bot.reply_to(message, response.replace('*', ''))
-
 # ============================================
 # COMMANDS
 # ============================================
@@ -3444,16 +3200,12 @@ def send_welcome(message):
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
-  /cardinfo `cc|mm|yy|cvv` ─ Validate card
   /px ─ Deep proxy check (3 levels)
   /addproxy `IP:PORT` ─ Add proxy
-  /testsite `URL` ─ Test site status
-
-🧹 *━━ MAINTENANCE ━━*
-  /dedup ─ Remove duplicate cards
-  /cleanexp ─ Remove expired cards
-  /proxyinfo ─ Proxy dashboard
-  /siteinfo ─ Site dashboard
+  /delproxy ─ Delete proxy
+  /clearshopify ─ Clear Shopify cards
+  /clearau ─ Clear Stripe Auth cards
+  /clearsc ─ Clear Stripe Charge $10 cards
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics
@@ -3461,7 +3213,9 @@ def send_welcome(message):
 
 {LINE_THIN}
 📂 *Send .txt file to auto-load*
+   └ Name with "au" or "stripe" → Stripe Auth
 🧹 *Auto-maintenance active*
+   └ Dead sites auto-cleaned every 50 checks
 """
     safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
 
@@ -5664,21 +5418,21 @@ Please wait while workers finish...""",
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
-  /cardinfo `cc|mm|yy|cvv` ─ Validate card
   /px ─ Deep proxy check (3 levels)
   /addproxy `IP:PORT` ─ Add proxy
-  /testsite `URL` ─ Test site status
-
-🧹 *━━ MAINTENANCE ━━*
-  /dedup ─ Remove duplicate cards
-  /cleanexp ─ Remove expired cards
-  /proxyinfo ─ Proxy dashboard
-  /siteinfo ─ Site dashboard
+  /delproxy ─ Delete proxy
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics panel
   /mode ─ Parallel mode (1x/3x/5x)
   /stop ─ Stop active mass check
+
+📂 *━━ FILE UPLOAD ━━*
+  Send `.txt` file → select gateway
+
+🧹 *━━ AUTO-MAINTENANCE ━━*
+  Dead sites auto-cleaned every 50 checks
+  Smart site rotation (best sites first)
 {LINE_THIN}
 🤖 {BOT_NAME} {BOT_VERSION}"""
         try:
