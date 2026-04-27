@@ -1986,16 +1986,19 @@ def validate_proxy_format(proxy_str):
     proxy_str = proxy_str.strip()
     parts = proxy_str.split(':')
     if len(parts) not in [2, 4]:
-        return False, "Format must be IP:PORT or IP:PORT:USER:PASS"
-    ip = parts[0]
+        return False, "Format must be HOST:PORT or HOST:PORT:USER:PASS"
+    host = parts[0]
     port_str = parts[1]
+    # Accept both IP addresses and hostnames
     ip_pattern = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
-    match = ip_pattern.match(ip)
-    if not match:
-        return False, f"Invalid IP: {ip}"
-    for octet in match.groups():
-        if int(octet) > 255:
-            return False, f"Invalid IP octet: {octet}"
+    hostname_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$')
+    ip_match = ip_pattern.match(host)
+    if ip_match:
+        for octet in ip_match.groups():
+            if int(octet) > 255:
+                return False, f"Invalid IP octet: {octet}"
+    elif not hostname_pattern.match(host):
+        return False, f"Invalid host: {host}"
     try:
         port = int(port_str)
         if port < 1 or port > 65535:
@@ -2996,7 +2999,8 @@ def handle_document(message):
                 if url:
                     sites_list.append(url)
             elif line_type == 'proxy':
-                proxies_list.append(line)
+                clean_proxy = line[4:].strip() if line.startswith('/px ') else line
+                proxies_list.append(clean_proxy)
         
         sites_added = 0
         proxies_added = 0
@@ -3105,6 +3109,9 @@ def detect_line_type(line):
     line = line.strip()
     if not line:
         return 'empty'
+    # Strip /px prefix (some proxy files include command prefix)
+    if line.startswith('/px '):
+        line = line[4:].strip()
     for sep in ['|', '/', ';', ',']:
         if sep in line:
             parts = line.split(sep)
@@ -3113,6 +3120,27 @@ def detect_line_type(line):
                 if len(cc) >= 13 and len(cc) <= 19 and cc.isdigit():
                     if validate_luhn(cc):
                         return 'card'
+    # Check proxy BEFORE site (hostname proxies like host.com:port would match site patterns)
+    if ':' in line:
+        parts = line.split(':')
+        if len(parts) in [2, 4]:
+            host = parts[0].strip()
+            port_str = parts[1].strip()
+            ip_match = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', host)
+            hostname_match = re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$', host)
+            host_valid = False
+            if ip_match:
+                host_valid = all(int(o) <= 255 for o in ip_match.groups())
+            elif hostname_match:
+                host_valid = True
+            if host_valid:
+                try:
+                    port = int(port_str)
+                    port_valid = 1 <= port <= 65535
+                except ValueError:
+                    port_valid = False
+                if port_valid:
+                    return 'proxy'
     url_patterns = [
         r'https?://',
         r'\.com\b', r'\.org\b', r'\.net\b', r'\.shop\b', r'\.store\b',
@@ -3128,21 +3156,6 @@ def detect_line_type(line):
     for pattern in url_patterns:
         if re.search(pattern, line, re.IGNORECASE):
             return 'site'
-    if ':' in line and '/' not in line:
-        parts = line.split(':')
-        if len(parts) in [2, 4]:
-            ip = parts[0].strip()
-            port_str = parts[1].strip()
-            ip_match = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', ip)
-            if ip_match:
-                octets_valid = all(int(o) <= 255 for o in ip_match.groups())
-                try:
-                    port = int(port_str)
-                    port_valid = 1 <= port <= 65535
-                except ValueError:
-                    port_valid = False
-                if octets_valid and port_valid:
-                    return 'proxy'
     return 'invalid'
 
 # ============================================
