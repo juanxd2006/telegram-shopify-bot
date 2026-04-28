@@ -83,6 +83,7 @@ mode_workers = {
     "extremo": 5
 }
 PARALLEL_WORKERS = mode_workers[current_mode]
+STRIPE_AUTH_WORKERS = 3
 SC_PARALLEL_WORKERS = 1
 B3_PARALLEL_WORKERS = 1
 
@@ -1943,13 +1944,17 @@ def auto_clean_dead_sites():
         save_sites(sites)
         print(f"🧹 Auto-maintenance: removed {len(removed)} dead sites")
 
-def report_site_result(url, success, response_status=None, card_category=None):
+def report_site_result(url, success, response_status=None, card_category=None, response_msg=None):
     if not url:
         return
     
     track_site_performance(url, success is True)
     auto_clean_dead_sites()
     
+    # Smart site filter: check response message
+    resp_lower = (response_msg or '').lower()
+    
+    # APPROVED / CHARGE → mark as permanent
     if card_category in ['CHARGE', '3DS', 'CVV', 'FUNDS', 'LIVE']:
         if not sqlite_backup.is_permanent_site(url):
             sqlite_backup.add_permanent_site(url)
@@ -1962,12 +1967,18 @@ def report_site_result(url, success, response_status=None, card_category=None):
         print(f"🔒 Sitio PERMANENTE protegido: {url}")
         return
     
-    if card_category == 'UNKNOWN':
+    # DECLINED → site is responding correctly, keep it
+    if card_category == 'DECLINED':
+        print(f"✅ Sitio ACTIVO (DECLINED = responde correctamente): {url}")
+        return
+    
+    # "site dead 06" or "unknown" → auto-delete site
+    if card_category == 'UNKNOWN' or 'site dead' in resp_lower or 'unknown' in resp_lower:
         sites = load_sites()
         if url in sites:
             sites.remove(url)
             save_sites(sites)
-            print(f"❌ Sitio ELIMINADO (UNKNOWN): {url}")
+            print(f"❌ Sitio ELIMINADO ({card_category}): {url}")
         return
 
 # ============================================
@@ -2442,7 +2453,7 @@ def check_card_shopify(cc, month, year, cvv):
                 category, status_msg = classify_response(response_msg)
                 
                 if site:
-                    report_site_result(site, True, response.status_code, category)
+                    report_site_result(site, True, response.status_code, category, response_msg=response_msg)
                 if proxy:
                     report_proxy_success(proxy)
                 
@@ -2450,7 +2461,7 @@ def check_card_shopify(cc, month, year, cvv):
             except:
                 category, status_msg = classify_response(result_text)
                 if site:
-                    report_site_result(site, True, response.status_code, category)
+                    report_site_result(site, True, response.status_code, category, response_msg=result_text)
                 if proxy:
                     report_proxy_success(proxy)
                 return category, status_msg, result_text, "$0.95", "Shopify Payments", round(elapsed, 2), site
@@ -2927,8 +2938,7 @@ def get_main_keyboard():
     )
     # ── Row 4: Settings ──
     keyboard.row(
-        InlineKeyboardButton("🎮 Mode", callback_data="mode_menu"),
-        InlineKeyboardButton("⚙️ Workers", callback_data="setworkers_menu"),
+        InlineKeyboardButton("🎮 Mode (Shopify)", callback_data="mode_menu"),
         InlineKeyboardButton("📊 Stats", callback_data="stats")
     )
     # ── Row 5: Utilities ──
@@ -3210,6 +3220,10 @@ def send_welcome(message):
   /sc `cc|mm|yy|cvv` ─ Single check
   /msc ─ Mass check (pipeline)
 
+🔐 *━━ BRAINTREE AUTH $0 ━━*
+  /b3 `cc|mm|yy|cvv` ─ Single check
+  /mb3 ─ Mass check (pipeline)
+
 🏦 *━━ UTILITIES ━━*
   /bin `424242` ─ BIN lookup
   /gen `424242` `10` ─ Generate cards (Luhn)
@@ -3222,7 +3236,7 @@ def send_welcome(message):
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics
-  /mode ─ Parallel mode (1x/3x/5x)
+  /mode ─ Shopify parallel mode (1x/3x/5x)
 
 {LINE_THIN}
 📂 *Send .txt file to auto-load*
@@ -3421,10 +3435,6 @@ def sc_mass_command(message):
         return
     
     total = len(cards)
-    if total > 1000:
-        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs\n1000 CCs will be checked")
-        cards = cards[:1000]
-        total = 1000
     
     stop_mass_flag = False
     mass_paused = False
@@ -3733,10 +3743,6 @@ def b3_mass_command(message):
         return
     
     total = len(cards)
-    if total > 1000:
-        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs\n1000 CCs will be checked")
-        cards = cards[:1000]
-        total = 1000
     
     stop_mass_flag = False
     mass_paused = False
@@ -4080,10 +4086,6 @@ def mass_check_command(message):
         return
     
     total = len(cards)
-    if total > 1000:
-        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs (your limit)\n1000 CCs will be checked")
-        cards = cards[:1000]
-        total = 1000
     
     stop_mass_flag = False
     mass_paused = False
@@ -4346,10 +4348,6 @@ def stripe_mass_command(message):
         return
     
     total = len(cards)
-    if total > 1000:
-        bot.reply_to(message, f"⚠️ Found {total} CCs in file\nProcessing only first 1000 CCs (your limit)\n1000 CCs will be checked")
-        cards = cards[:1000]
-        total = 1000
     
     stop_mass_flag = False
     mass_paused = False
@@ -4407,7 +4405,7 @@ def stripe_mass_command(message):
         for card_str in cards:
             task_queue.put(card_str)
         
-        for _ in range(PARALLEL_WORKERS):
+        for _ in range(STRIPE_AUTH_WORKERS):
             task_queue.put(None)
         
         def stripe_worker(worker_id):
@@ -4433,7 +4431,7 @@ def stripe_mass_command(message):
                     continue
         
         workers = []
-        for i in range(PARALLEL_WORKERS):
+        for i in range(STRIPE_AUTH_WORKERS):
             w = threading.Thread(target=stripe_worker, args=(i,))
             w.daemon = True
             w.start()
@@ -4874,6 +4872,12 @@ def gen_command(message):
     cards = generate_cards_from_bin(bin_prefix, count)
     bin_info = bin_lookup(bin_prefix[:6])
     
+    # Send txt file with generated cards
+    file_content = '\n'.join(cards)
+    file_data = BytesIO(file_content.encode('utf-8'))
+    file_data.name = f"gen_{bin_prefix}x{count}.txt"
+    bot.send_document(message.chat.id, file_data, caption=f"🎲 {len(cards)} cards generated from BIN {bin_prefix}")
+    
     response = _format_gen_response(bin_prefix, count, cards, bin_info)
     
     regen_markup = InlineKeyboardMarkup()
@@ -4978,10 +4982,11 @@ def mode_command(message):
         "rapido": "⚡ FAST",
         "extremo": "🚀 EXTREME"
     }
-    bot.reply_to(message, f"""🎮 *{BOT_NAME} ─ MODE SELECT*
+    bot.reply_to(message, f"""🎮 *{BOT_NAME} ─ SHOPIFY MODE*
 {LINE_DASH}
 
 🔄 *Current:* {current_mode_text.get(current_mode, 'FAST')} ({PARALLEL_WORKERS}x)
+⚠️ *Applies to Shopify /mass only*
 
 🔽 *Select parallel mode:*""", 
                  parse_mode='Markdown', reply_markup=markup)
@@ -5122,11 +5127,13 @@ def handle_callback(call):
     elif call.data == "clear_menu":
         shopify_count = len(get_all_cards())
         stripe_count = len(get_all_stripe_cards())
+        sc_count = len(get_all_sc_cards())
         b3_count = len(get_all_b3_cards())
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton(f"🛒 Delete Shopify Cards ({shopify_count})", callback_data="confirm_clear_shopify"),
             InlineKeyboardButton(f"🔓 Delete Stripe Auth Cards ({stripe_count})", callback_data="confirm_clear_stripe"),
+            InlineKeyboardButton(f"💳 Delete Stripe Charge Cards ({sc_count})", callback_data="confirm_clear_sc"),
             InlineKeyboardButton(f"🔐 Delete Braintree Auth Cards ({b3_count})", callback_data="confirm_clear_b3"),
             InlineKeyboardButton("↩️ Cancel", callback_data="cancel_clear")
         )
@@ -5136,6 +5143,7 @@ def handle_callback(call):
 
 🛒 Shopify: *{shopify_count}* cards
 🔓 Stripe Auth: *{stripe_count}* cards
+💳 Stripe Charge $10: *{sc_count}* cards
 🔐 Braintree Auth: *{b3_count}* cards
 
 🔽 *Select which cards to delete:*""", 
@@ -5162,6 +5170,17 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, f"✅ {count} Stripe Auth cards deleted")
         try:
             bot.edit_message_text(f"🗑️ *{count} Stripe Auth cards deleted*\n{LINE_THIN}\n🔓 Stripe Auth queue is now empty", 
+                                chat_id=call.message.chat.id, message_id=call.message.message_id,
+                                parse_mode='Markdown')
+        except:
+            pass
+    
+    elif call.data == "confirm_clear_sc":
+        count = len(get_all_sc_cards())
+        clear_sc_cards()
+        bot.answer_callback_query(call.id, f"✅ {count} Stripe Charge cards deleted")
+        try:
+            bot.edit_message_text(f"🗑️ *{count} Stripe Charge $10 cards deleted*\n{LINE_THIN}\n💳 Stripe Charge queue is now empty", 
                                 chat_id=call.message.chat.id, message_id=call.message.message_id,
                                 parse_mode='Markdown')
         except:
@@ -5230,10 +5249,11 @@ Please wait while workers finish...""",
             InlineKeyboardButton("🚀 EXTREME ─ 5 cards parallel", callback_data="mode_extremo")
         )
         try:
-            bot.edit_message_text(f"""🎮 *{BOT_NAME} ─ MODE SELECT*
+            bot.edit_message_text(f"""🎮 *{BOT_NAME} ─ SHOPIFY MODE*
 {LINE_DASH}
 
 🔄 *Current:* {current_mode} ({PARALLEL_WORKERS}x)
+⚠️ *Applies to Shopify /mass only*
 
 🔽 *Select parallel mode:*""", 
                                 chat_id=call.message.chat.id, message_id=call.message.message_id,
@@ -5271,42 +5291,6 @@ Please wait while workers finish...""",
                                 message_id=call.message.message_id, parse_mode='Markdown')
         except:
             pass
-    
-    elif call.data == "setworkers_menu":
-        markup = InlineKeyboardMarkup(row_width=5)
-        markup.add(
-            InlineKeyboardButton("1️⃣", callback_data="set_workers_1"),
-            InlineKeyboardButton("2️⃣", callback_data="set_workers_2"),
-            InlineKeyboardButton("3️⃣", callback_data="set_workers_3"),
-            InlineKeyboardButton("4️⃣", callback_data="set_workers_4"),
-            InlineKeyboardButton("5️⃣", callback_data="set_workers_5")
-        )
-        try:
-            bot.edit_message_text(f"""⚙️ *{BOT_NAME} ─ WORKERS*
-{LINE_DASH}
-
-👷 *Current:* {current_max_workers} workers
-
-🔽 *Select workers count:*""", 
-                                chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                parse_mode='Markdown', reply_markup=markup)
-        except:
-            pass
-        bot.answer_callback_query(call.id)
-    
-    elif call.data.startswith("set_workers_"):
-        try:
-            new_workers = int(call.data.replace("set_workers_", ""))
-            current_max_workers = new_workers
-            bot.answer_callback_query(call.id, f"✅ Workers: {current_max_workers}")
-            try:
-                bot.edit_message_text(f"✅ *Workers updated to {current_max_workers}*\n{LINE_THIN}\n👷 Active workers: *{current_max_workers}*", 
-                                    chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                    parse_mode='Markdown')
-            except:
-                pass
-        except:
-            bot.answer_callback_query(call.id, "Error")
     
     elif call.data == "delete_dead_proxies":
         if last_dead_proxies:
@@ -5438,7 +5422,7 @@ Please wait while workers finish...""",
 
 ⚙️ *━━ SETTINGS ━━*
   /stats ─ Statistics panel
-  /mode ─ Parallel mode (1x/3x/5x)
+  /mode ─ Shopify mode (1x/3x/5x)
   /stop ─ Stop active mass check
 
 📂 *━━ FILE UPLOAD ━━*
